@@ -23,7 +23,9 @@ struct Params {
   old_base: u32, o_gcount: u32, o_gstart: u32, o_gfill: u32,
   o_sorted: u32, o_cell: u32, o_mask: u32, o_ccount: u32,
   o_cstart: u32, o_cfill: u32, o_order: u32, o_mcolor: u32,
-  o_tnew: u32, o_told: u32, anchor: u32, pad0: u32,
+  o_tnew: u32, o_told: u32, anchor: u32, max_pairs: u32,
+  o_pairs: u32, o_bcount: u32, o_bstart: u32, o_bfill: u32,
+  o_blist: u32, pad1: u32, pad2: u32, pad3: u32,
 }
 struct Pt { raxn: vec4f, rbxn: vec4f, iaxn: vec4f, ibxn: vec4f }  // w: adj, nm, jn, -
 struct Man {
@@ -49,7 +51,7 @@ const BS = 13u;
 const F_P = 0u; const F_Q = 1u; const F_H = 2u; const F_IL = 3u; const F_V = 4u; const F_W = 5u;
 const F_DP = 6u; const F_TH = 7u; const F_I0 = 8u; const F_LO = 11u; const F_HI = 12u;
 // counters in ints[0..16]
-const C_MAN = 0u; const C_OVF = 1u; const C_COLORS = 2u; const C_PAIRS = 3u; const C_DROP = 4u;
+const C_MAN = 0u; const C_OVF = 1u; const C_COLORS = 2u; const C_PAIRS = 3u; const C_DROP = 4u; const C_NPAIR = 5u;
 
 @group(0) @binding(0) var<storage, read_write> bod: array<vec4f>;
 @group(0) @binding(1) var<storage, read_write> ints: array<atomic<u32>>;
@@ -353,16 +355,16 @@ fn emit(a: u32, b: u32, c0: Contact) {
   insert_new(a, b, mi);
 }
 
-@compute @workgroup_size(64) fn collide(@builtin(global_invocation_id) g: vec3u) {
+// broad phase output: candidate pairs (i, j>i) and ground pairs (i, 0)
+fn push_pair(a: u32, b: u32) {
+  let k = atomicAdd(&ints[C_NPAIR], 1u);
+  if (k < P.max_pairs) { st(P.o_pairs + 2u * k, a); st(P.o_pairs + 2u * k + 1u, b); }
+}
+@compute @workgroup_size(64) fn pairs(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.n1) { return; }
   let lo = B(i, F_LO).xyz; let hi = B(i, F_HI).xyz;
-  let pi = B(i, F_P); let vi = B(i, F_V).xyz; let wi = B(i, F_W).xyz; let hi_ = B(i, F_H).xyz;
-  if (lo.y < 0.0) {
-    let gc = ground_contact(i, P.spec + max(-vi.y, 0.0) * P.dt);
-    if (gc.cnt > 0u) { emit(i, 0u, gc); }
-  }
-  let Ri = qmat(B(i, F_Q));
-  let c0 = cellc(pi.xyz);
+  if (lo.y < 0.0) { push_pair(i, 0u); }
+  let c0 = cellc(B(i, F_P).xyz);
   var seen: array<u32, 27>; var ns = 0u;
   for (var dz = -1; dz <= 1; dz++) { for (var dy = -1; dy <= 1; dy++) { for (var dx = -1; dx <= 1; dx++) {
     let hc = chash(c0 + vec3i(dx, dy, dz));
@@ -375,14 +377,25 @@ fn emit(a: u32, b: u32, c0: Contact) {
       if (j <= i) { continue; }
       let lj = B(j, F_LO).xyz; let hj = B(j, F_HI).xyz;
       if (any(lo > hj) || any(lj > hi)) { continue; }
-      atomicAdd(&ints[C_PAIRS], 1u);
-      let pj = B(j, F_P); let hj_ = B(j, F_H).xyz;
-      let rel = length(B(j, F_V).xyz - vi) + length(wi) * length(hi_) + length(B(j, F_W).xyz) * length(hj_);
-      let margin = P.spec + rel * P.dt;
-      let c = box_box(pi.xyz, Ri, hi_, pj.xyz, qmat(B(j, F_Q)), hj_, margin);
-      if (c.cnt > 0u) { emit(i, j, c); }
+      push_pair(i, j);
     }
   } } }
+}
+// narrow phase: one thread per candidate pair
+@compute @workgroup_size(64) fn narrow(@builtin(global_invocation_id) g: vec3u) {
+  let k = g.x; if (k >= min(ld(C_NPAIR), P.max_pairs)) { return; }
+  let i = ld(P.o_pairs + 2u * k); let j = ld(P.o_pairs + 2u * k + 1u);
+  let vi = B(i, F_V).xyz;
+  if (j == 0u) {
+    let gc = ground_contact(i, P.spec + max(-vi.y, 0.0) * P.dt);
+    if (gc.cnt > 0u) { emit(i, 0u, gc); }
+    return;
+  }
+  atomicAdd(&ints[C_PAIRS], 1u);
+  let hi_ = B(i, F_H).xyz; let hj_ = B(j, F_H).xyz;
+  let rel = length(B(j, F_V).xyz - vi) + length(B(i, F_W).xyz) * length(hi_) + length(B(j, F_W).xyz) * length(hj_);
+  let c = box_box(B(i, F_P).xyz, qmat(B(i, F_Q)), hi_, B(j, F_P).xyz, qmat(B(j, F_Q)), hj_, P.spec + rel * P.dt);
+  if (c.cnt > 0u) { emit(i, j, c); }
 }
 
 // ---------------------------------------------------------------- colouring
@@ -402,20 +415,61 @@ fn emit(a: u32, b: u32, c0: Contact) {
   }
   st(P.o_mcolor + mi, col);
   atomicAdd(&ints[P.o_ccount + col], 1u);
+  atomicAdd(&ints[P.o_bcount + a], 1u);
+  if (b != 0u) { atomicAdd(&ints[P.o_bcount + b], 1u); }
   if (col == P.color_limit) { atomicAdd(&ints[C_OVF], 1u); } else { atomicMax(&ints[C_COLORS], col + 1u); }
 }
 @compute @workgroup_size(64) fn color_scatter(@builtin(global_invocation_id) g: vec3u) {
   let mi = g.x; if (mi >= ld(C_MAN) || mi >= P.max_man) { return; }
   let c = ld(P.o_mcolor + mi);
-  st(P.o_order + ld(P.o_cstart + c) + atomicAdd(&ints[P.o_cfill + c], 1u), P.cur_base + mi);
+  let m = P.cur_base + mi;
+  st(P.o_order + ld(P.o_cstart + c) + atomicAdd(&ints[P.o_cfill + c], 1u), m);
+  let a = man[m].a; let b = man[m].b;
+  st(P.o_blist + ld(P.o_bstart + a) + atomicAdd(&ints[P.o_bfill + a], 1u), m * 2u);
+  if (b != 0u) { st(P.o_blist + ld(P.o_bstart + b) + atomicAdd(&ints[P.o_bfill + b], 1u), m * 2u + 1u); }
+}
+// per-body contact lists: exclusive scan of the counts (one workgroup)
+@compute @workgroup_size(256) fn adj_scan(@builtin(local_invocation_index) t: u32) {
+  let per = (P.n1 + 255u) / 256u; let base = t * per;
+  var s = 0u;
+  for (var k = 0u; k < per; k++) { if (base + k < P.n1) { s += ld(P.o_bcount + base + k); } }
+  wsum[t] = s;
+  workgroupBarrier();
+  for (var off = 1u; off < 256u; off *= 2u) {
+    var v = 0u; if (t >= off) { v = wsum[t - off]; }
+    workgroupBarrier(); wsum[t] += v; workgroupBarrier();
+  }
+  var run = 0u; if (t > 0u) { run = wsum[t - 1u]; }
+  for (var k = 0u; k < per; k++) { if (base + k < P.n1) { st(P.o_bstart + base + k, run); run += ld(P.o_bcount + base + k); } }
 }
 
 // ---------------------------------------------------------------- solver
-@compute @workgroup_size(64) fn integrate_vel(@builtin(global_invocation_id) g: vec3u) {
+// gravity, spin clamp, then the warm start gathered per body (no colouring needed: each thread owns its body)
+@compute @workgroup_size(64) fn integrate_warm(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.n1) { return; }
-  if (B(i, F_P).w > 0.0) { setB(i, F_V, vec4f(B(i, F_V).xyz + P.gravity * P.h, 0.0)); }
-  let w = B(i, F_W).xyz; let wl = length(w);
-  if (wl > P.wmax) { setB(i, F_W, vec4f(w * (P.wmax / wl), 0.0)); }
+  var v = B(i, F_V).xyz; var w = B(i, F_W).xyz;
+  if (B(i, F_P).w > 0.0) { v += P.gravity * P.h; }
+  let wl = length(w); if (wl > P.wmax) { w *= P.wmax / wl; }
+  let s0 = ld(P.o_bstart + i); let s1 = s0 + ld(P.o_bcount + i);
+  for (var k = s0; k < s1; k++) {
+    let e = ld(P.o_blist + k); let m = e >> 1u; let side_b = (e & 1u) != 0u;
+    var pn = 0.0; var dw = vec3f(0.0);
+    let cnt = man[m].cnt;
+    for (var q = 0u; q < cnt; q++) {
+      let pt = man[m].p[q]; let jn = pt.iaxn.w; pn += jn;
+      dw += select(pt.iaxn.xyz, pt.ibxn.xyz, side_b) * jn;
+    }
+    let jt1 = man[m].ca2.w; let jt2 = man[m].cb1.w; let jtw = man[m].cb2.w;
+    let p = man[m].n.xyz * pn + man[m].t1.xyz * jt1 + man[m].t2.xyz * jt2;
+    if (side_b) {
+      v += p * man[m].ia2.w;
+      w += dw + man[m].ib1.xyz * jt1 + man[m].ib2.xyz * jt2 + man[m].ibn.xyz * jtw;
+    } else {
+      v -= p * man[m].ia1.w;
+      w -= dw + man[m].ia1.xyz * jt1 + man[m].ia2.xyz * jt2 + man[m].ian.xyz * jtw;
+    }
+  }
+  setB(i, F_V, vec4f(v, 0.0)); setB(i, F_W, vec4f(w, 0.0));
 }
 @compute @workgroup_size(64) fn integrate_pos(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.n1) { return; }
@@ -511,12 +565,10 @@ fn color_item(g: u32) -> u32 {
   if (g >= ld(P.o_ccount + c)) { return 0xffffffffu; }
   return ld(P.o_order + ld(P.o_cstart + c) + g);
 }
-@compute @workgroup_size(64) fn warm(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { warm_man(m); } }
 @compute @workgroup_size(64) fn solve(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { solve_man(m, true); } }
 @compute @workgroup_size(64) fn relax(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { solve_man(m, false); } }
 // overflow manifolds (no free colour): one thread, in sequence
 fn ovf_range() -> vec2u { let c = P.color_limit; let s = ld(P.o_cstart + c); return vec2u(s, s + ld(P.o_ccount + c)); }
-@compute @workgroup_size(1) fn warm_ovf() { let r = ovf_range(); for (var k = r.x; k < r.y; k++) { warm_man(ld(P.o_order + k)); } }
 @compute @workgroup_size(1) fn solve_ovf() { let r = ovf_range(); for (var k = r.x; k < r.y; k++) { solve_man(ld(P.o_order + k), true); } }
 @compute @workgroup_size(1) fn relax_ovf() { let r = ovf_range(); for (var k = r.x; k < r.y; k++) { solve_man(ld(P.o_order + k), false); } }
 `;
@@ -529,12 +581,17 @@ const WGSL_ARGS = WGSL.replace(/@compute[\s\S]*$/, '') + /* wgsl */`
   let n = min(ld(C_MAN), P.max_man);
   args[96] = (n + 63u) / 64u; args[97] = 1u; args[98] = 1u;
 }
+@compute @workgroup_size(1) fn pair_args() {
+  let n = min(ld(C_NPAIR), P.max_pairs);
+  args[99] = (n + 63u) / 64u; args[100] = 1u; args[101] = 1u;
+}
 @compute @workgroup_size(1) fn color_scan() {
   var run = 0u;
   for (var c = 0u; c <= P.color_limit; c++) {
     let n = ld(P.o_ccount + c);
     st(P.o_cstart + c, run); run += n;
-    args[c * 3u] = (n + 63u) / 64u; args[c * 3u + 1u] = 1u; args[c * 3u + 2u] = 1u;
+    // the overflow bucket is one sequential thread: one workgroup if it holds anything
+    args[c * 3u] = select((n + 63u) / 64u, min(n, 1u), c == P.color_limit); args[c * 3u + 1u] = 1u; args[c * 3u + 2u] = 1u;
   }
 }
 `;
@@ -556,6 +613,7 @@ class GpuWorld {
     this.colorLimit = opt.colorLimit || 24;
     this.anchor = opt.anchor ?? true;
     this.maxMan = Math.max(64, Math.ceil((opt.manPerBody || 4) * n));
+    this.maxPairs = Math.max(128, Math.ceil((opt.pairsPerBody || 8) * n));
     let G = 256; while (G < 2 * this.n1) G *= 2; this.G = G;
     let T = 256; while (T < 2 * this.maxMan) T *= 2; this.T = T;
     // grid cell: at least the largest AABB (with margin), so overlapping bodies sit in neighbour cells
@@ -571,6 +629,8 @@ class GpuWorld {
     take('ccount', 33); take('cstart', 33); take('cfill', 33);
     take('order', this.maxMan); take('mcolor', this.maxMan);
     take('t0', T); take('t1', T);
+    take('pairs', 2 * this.maxPairs); take('bcount', this.n1); take('bstart', this.n1); take('bfill', this.n1);
+    take('blist', 2 * this.maxMan);
     this.L = L; this.nInts = o;
 
     const BS = 13;
@@ -625,11 +685,21 @@ class GpuWorld {
     const errsA = infoA.messages.filter(m => m.type === 'error');
     if (errsA.length) throw new Error('WGSL args: ' + errsA.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join('\n'));
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
-    const names = ['prep', 'scan', 'scatter', 'collide', 'color', 'color_scatter', 'integrate_vel', 'integrate_pos', 'finish',
-                   'warm', 'solve', 'relax', 'warm_ovf', 'solve_ovf', 'relax_ovf'];
+    const names = ['prep', 'scan', 'scatter', 'pairs', 'narrow', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
+                   'integrate_pos', 'finish', 'solve', 'relax', 'solve_ovf', 'relax_ovf'];
     this.pl = {};
     await Promise.all(names.map(async k => { this.pl[k] = await mk(k); }));
     this.pl.man_args = await mk('man_args', argsL, modA);
+    this.pl.pair_args = await mk('pair_args', argsL, modA);
+    // GPU timestamps per stage, when the device has them
+    this.ts = d.features.has('timestamp-query');
+    this.stages = ['broad', 'narrow', 'colour', 'sub-steps'];
+    if (this.ts) {
+      this.qs = d.createQuerySet({ type: 'timestamp', count: 32 });
+      this.qBuf = d.createBuffer({ size: 256, usage: U.QUERY_RESOLVE | U.COPY_SRC });
+      this.qRead = d.createBuffer({ size: 256, usage: U.COPY_DST | U.MAP_READ });
+      this.qPending = false; this.gpuMs = null;
+    }
     this.pl.color_scan = await mk('color_scan', argsL, modA);
     this.frame = 0;
   }
@@ -647,46 +717,60 @@ class GpuWorld {
     u[20] = (1 - cur) * this.maxMan; u[21] = L.gcount; u[22] = L.gstart; u[23] = L.gfill;
     u[24] = L.sorted; u[25] = L.cell; u[26] = L.mask; u[27] = L.ccount;
     u[28] = L.cstart; u[29] = L.cfill; u[30] = L.order; u[31] = L.mcolor;
-    u[32] = cur ? L.t1 : L.t0; u[33] = cur ? L.t0 : L.t1; u[34] = this.anchor ? 1 : 0;
+    u[32] = cur ? L.t1 : L.t0; u[33] = cur ? L.t0 : L.t1; u[34] = this.anchor ? 1 : 0; u[35] = this.maxPairs;
+    u[36] = L.pairs; u[37] = L.bcount; u[38] = L.bstart; u[39] = L.bfill; u[40] = L.blist;
     return f;
   }
 
-  // Encode one 60 Hz step into `enc` (several compute passes).
+  // Encode one 60 Hz step into `enc` (several compute passes; one timestamp pair per stage).
   encode(enc, dt = 1 / 60) {
     const d = this.device;
     d.queue.writeBuffer(this.parBuf, 0, this.params(dt));
     const L = this.L, cur = this.frame & 1;
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
     clr(0, 16); clr(L.gcount, this.G); clr(L.gfill, this.G); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
+    clr(L.bcount, this.n1); clr(L.bfill, this.n1);
     const nb = Math.ceil(this.n / 64) || 1;
-    const run = (pass, k, x) => { pass.setPipeline(this.pl[k]); pass.dispatchWorkgroups(x); };
-    let p = enc.beginComputePass();
-    p.setBindGroup(0, this.bg0); p.setBindGroup(1, this.bg1, [0]);
-    run(p, 'prep', nb); run(p, 'scan', 1); run(p, 'scatter', nb); run(p, 'collide', nb);
-    p.end();
-    p = enc.beginComputePass(); p.setBindGroup(0, this.bg0); p.setBindGroup(1, this.bg1, [0]); p.setBindGroup(2, this.bg2);
-    run(p, 'man_args', 1); p.end();
-    p = enc.beginComputePass(); p.setBindGroup(0, this.bg0); p.setBindGroup(1, this.bg1, [0]);
-    p.setPipeline(this.pl.color); p.dispatchWorkgroupsIndirect(this.argBuf, 96 * 4); p.end();
-    p = enc.beginComputePass(); p.setBindGroup(0, this.bg0); p.setBindGroup(1, this.bg1, [0]); p.setBindGroup(2, this.bg2);
-    run(p, 'color_scan', 1); p.end();
-    p = enc.beginComputePass(); p.setBindGroup(0, this.bg0); p.setBindGroup(1, this.bg1, [0]);
-    p.setPipeline(this.pl.color_scatter); p.dispatchWorkgroupsIndirect(this.argBuf, 96 * 4);
+    const stamp = this.ts && !this.qPending;
+    let si = -1;
+    const pass = (stage, args = false) => {
+      let desc = {};
+      if (stamp && stage !== null) { si = this.stages.indexOf(stage); desc = { timestampWrites: { querySet: this.qs, beginningOfPassWriteIndex: 2 * si, endOfPassWriteIndex: 2 * si + 1 } }; }
+      const p = enc.beginComputePass(desc);
+      p.setBindGroup(0, this.bg0); p.setBindGroup(1, this.bg1, [0]);
+      if (args) p.setBindGroup(2, this.bg2);
+      return p;
+    };
+    const run = (p, k, x) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(x); };
+    const ind = (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); };
+    let p = pass('broad'); run(p, 'prep', nb); run(p, 'scan', 1); run(p, 'scatter', nb); run(p, 'pairs', nb); p.end();
+    p = pass(null, true); run(p, 'pair_args', 1); p.end();
+    p = pass('narrow'); ind(p, 'narrow', 99 * 4); p.end();
+    p = pass(null, true); run(p, 'man_args', 1); p.end();
+    p = pass('colour'); ind(p, 'color', 96 * 4); run(p, 'adj_scan', 1); p.end();
+    p = pass(null, true); run(p, 'color_scan', 1); p.end();
+    p = pass('sub-steps');
+    ind(p, 'color_scatter', 96 * 4);
     const C = this.colorLimit;
     const colors = (k) => {
       p.setPipeline(this.pl[k]);
       for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); }
       p.setBindGroup(1, this.bg1, [0]);
-      run(p, k + '_ovf', 1);
+      ind(p, k + '_ovf', C * 12);
     };
     for (let s = 0; s < this.substeps; s++) {
-      run(p, 'integrate_vel', nb);
-      colors('warm'); colors('solve');
+      run(p, 'integrate_warm', nb);
+      colors('solve');
       run(p, 'integrate_pos', nb);
       colors('relax');
     }
     run(p, 'finish', nb);
     p.end();
+    if (stamp) {
+      enc.resolveQuerySet(this.qs, 0, 2 * this.stages.length, this.qBuf, 0);
+      enc.copyBufferToBuffer(this.qBuf, 0, this.qRead, 0, 16 * this.stages.length);
+      this.qCopied = true;
+    } else this.qCopied = false;
     if (!this.statPending) { enc.copyBufferToBuffer(this.intBuf, 0, this.statBuf, 0, 64); this.statCopied = true; } else this.statCopied = false;
     this.frame++;
   }
@@ -698,15 +782,30 @@ class GpuWorld {
     this.pollStats();
   }
 
+  pollTimes() {
+    if (!this.ts || !this.qCopied || this.qPending) return;
+    this.qPending = true;
+    this.qRead.mapAsync(GPUMapMode.READ).then(() => {
+      const t = new BigUint64Array(this.qRead.getMappedRange().slice(0, 16 * this.stages.length));
+      this.qRead.unmap();
+      const ms = {};
+      this.stages.forEach((k, i) => { ms[k] = Number(t[2 * i + 1] - t[2 * i]) / 1e6; });
+      // exponential average, so a single read is not noise
+      if (!this.gpuMs) this.gpuMs = ms; else for (const k in ms) this.gpuMs[k] = 0.8 * this.gpuMs[k] + 0.2 * ms[k];
+      this.qPending = false;
+    }, () => { this.qPending = false; });
+  }
+
   pollStats() {
+    this.pollTimes();
     if (!this.statCopied || this.statPending) return;
     this.statPending = true;
     this.statBuf.mapAsync(GPUMapMode.READ).then(() => {
       const u = new Uint32Array(this.statBuf.getMappedRange().slice(0));
       this.statBuf.unmap();
-      this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4] };
-      // adapt the number of colour dispatches to what the scene needs (with headroom)
-      this.colorLimit = Math.min(31, Math.max(8, u[2] + 3));
+      this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5] };
+      // colour dispatches follow what the scene needs (one spare, three after an overflow); the rest go to the overflow bucket
+      this.colorLimit = Math.min(31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
       this.statPending = false;
     }, () => { this.statPending = false; });
   }
@@ -729,6 +828,9 @@ class GpuWorld {
     return { pose: out, vel };
   }
 
-  destroy() { for (const b of [this.bodBuf, this.intBuf, this.manBuf, this.coldBuf, this.parBuf, this.colBuf, this.argBuf, this.statBuf]) b.destroy(); }
+  destroy() {
+    for (const b of [this.bodBuf, this.intBuf, this.manBuf, this.coldBuf, this.parBuf, this.colBuf, this.argBuf, this.statBuf, this.qBuf, this.qRead]) if (b) b.destroy();
+    if (this.qs) this.qs.destroy();
+  }
 }
 if (typeof window !== 'undefined') window.GpuWorld = GpuWorld;

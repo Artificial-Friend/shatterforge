@@ -41,6 +41,7 @@ table { width: 100%; border-collapse: collapse; font: 13px/1.4 var(--mono) }
 th { text-align: left; font-weight: 500; color: var(--mute); border-bottom: 1px solid var(--rule); padding: 6px 8px 6px 0; white-space: nowrap }
 td { border-bottom: 1px solid var(--rule); padding: 8px 8px 8px 0; vertical-align: top }
 td.res { white-space: nowrap }
+td.res:nth-child(3) { white-space: normal; min-width: 18ch }
 .badge { display: inline-block; font: 600 11px/1 var(--mono); letter-spacing: .06em; padding: 4px 6px; border-radius: 3px; border: 1px solid currentColor }
 .pass { color: var(--pass) } .fail { color: var(--fail) } .pend { color: var(--pending) } .info { color: var(--accent) }
 dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; font: 13px/1.45 var(--mono) }
@@ -245,7 +246,7 @@ async function gpuDevice() {
   if (!navigator.gpu) return null;
   const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!a) return null;
-  DEV = await a.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: a.limits.maxStorageBufferBindingSize, maxBufferSize: a.limits.maxBufferSize } });
+  DEV = await a.requestDevice({ requiredFeatures: a.features.has('timestamp-query') ? ['timestamp-query'] : [], requiredLimits: { maxStorageBufferBindingSize: a.limits.maxStorageBufferBindingSize, maxBufferSize: a.limits.maxBufferSize } });
   DEV.addEventListener('uncapturederror', e => console.error('GPU error:', e.error.message));
   return DEV;
 }
@@ -309,7 +310,8 @@ async function runGpu() {
     }
     const med = pct(batches, .5);
     const st = w.stats;
-    results[id] = { ok: id === 'g2k12' || id === 'g50k12' ? null : med < 5, text: `median ${med.toFixed(2)} ms, worst batch ${Math.max(...batches).toFixed(2)} ms · encode ${(enc / 180).toFixed(2)} ms · ${st.manifolds.toLocaleString()} contacts, ${st.colors} colours, ${st.overflow} overflow` };
+    const g = w.gpuMs ? ' · GPU ' + Object.entries(w.gpuMs).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(', ') + ' ms' : ' · no GPU timestamps';
+    results[id] = { ok: id === 'g2k12' || id === 'g50k12' ? null : med < 5, text: `median ${med.toFixed(2)} ms, worst batch ${Math.max(...batches).toFixed(2)} ms · encode ${(enc / 180).toFixed(2)} ms · ${st.manifolds.toLocaleString()} contacts, ${st.colors} colours, ${st.overflow} overflow${g}` };
     w.destroy(); renderRows();
   }
 }

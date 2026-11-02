@@ -17,7 +17,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ['box', 's
     const bytes = Uint8Array.from(atob(wasm), c => c.charCodeAt(0));
     const E = (await WebAssembly.instantiate(bytes, {})).instance.exports;
     const a = await navigator.gpu.requestAdapter();
-    const dev = await a.requestDevice();
+    const dev = await a.requestDevice({ requiredFeatures: a.features.has('timestamp-query') ? ['timestamp-query'] : [] });
     dev.addEventListener('uncapturederror', e => console.log('GPU error: ' + e.error.message));
     const grab = () => { const n = E.body_count(); return new Float32Array(E.memory.buffer, E.pose(), n * 10).slice(); };
     const out = {};
@@ -27,7 +27,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ['box', 's
       for (let f = 0; f < frames; f++) { w.step(1 / 60); if (f % 20 === 19) await dev.queue.onSubmittedWorkDone(); }
       await dev.queue.onSubmittedWorkDone();
       const ms = (performance.now() - t0) / frames;
-      const r = await w.readPose(); r.stats = w.stats; r.ms = ms; w.destroy(); return r;
+      const r = await w.readPose(); r.stats = w.stats; r.ms = ms; r.gpu = w.gpuMs; w.destroy(); return r;
     };
     const speed = (v, i) => Math.hypot(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
     if (scenes.includes('box')) {
@@ -59,7 +59,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ['box', 's
       // CPU reference after the same 120 frames
       E.pile_setup(2000, 4); for (let f = 0; f < 120; f++) E.step(1 / 60);
       const c = grab(); let cmin = 9, cmax = -9; for (let i = 0; i < 2000; i++) { cmin = Math.min(cmin, c[i * 10 + 1]); cmax = Math.max(cmax, c[i * 10 + 1]); }
-      out.pile = { gpu: { miny, maxy, maxv: mv, nan, stats: r.stats, ms: r.ms }, cpu: { miny: cmin, maxy: cmax, manifolds: E.manifolds() } };
+      out.pile = { gpu: { miny, maxy, maxv: mv, nan, stats: r.stats, ms: r.ms, stages: r.gpu }, cpu: { miny: cmin, maxy: cmax, manifolds: E.manifolds() } };
     }
     return out;
   }, { wasm, scenes });
