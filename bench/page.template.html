@@ -1,0 +1,250 @@
+<title>Shatterforge Phase-0 Bench</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --bg: #f3f1ec; --panel: #fbfaf7; --ink: #1d1c1a; --mute: #6b6760; --rule: #d9d4ca;
+  --accent: #c2410c; --pass: #2f7d4f; --fail: #b42318; --pending: #8a8378; --view: #e7e2d8; --brick: #b9a68c;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #151413; --panel: #1d1c1a; --ink: #ece8e1; --mute: #a39d93; --rule: #34312d;
+  --accent: #f08a4b; --pass: #5cc489; --fail: #f1786c; --pending: #8a8378; --view: #23211f; --brick: #a8957b; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #151413; --panel: #1d1c1a; --ink: #ece8e1; --mute: #a39d93; --rule: #34312d;
+  --accent: #f08a4b; --pass: #5cc489; --fail: #f1786c; --pending: #8a8378; --view: #23211f; --brick: #a8957b; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--sans); }
+.wrap { max-width: 1080px; margin: 0 auto; padding-block: 28px 56px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 22px; }
+header { display: flex; flex-direction: column; gap: 6px; border-bottom: 1px solid var(--rule); padding-bottom: 16px }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent) }
+h1 { font: 600 28px/1.15 var(--sans); margin: 0; text-wrap: balance }
+.lede { color: var(--mute); max-width: 68ch; margin: 0 }
+.grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 22px }
+@media (max-width: 860px) { .grid { grid-template-columns: minmax(0, 1fr) } }
+.card { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0 }
+.card h2 { font: 600 13px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; margin: 0; color: var(--mute) }
+.view { position: relative; aspect-ratio: 4 / 3; max-width: 100%; background: var(--view); border-radius: 4px; overflow: hidden }
+.view canvas { width: 100%; height: 100%; display: block }
+.overlay { position: absolute; left: 10px; top: 8px; font: 500 12px/1.4 var(--mono); color: var(--mute); pointer-events: none }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center }
+button { font: 600 14px/1 var(--sans); padding: 10px 16px; border-radius: 4px; border: 1px solid var(--ink); background: var(--ink); color: var(--bg); cursor: pointer }
+button.ghost { background: transparent; color: var(--ink) }
+button:disabled { opacity: .45; cursor: default }
+.status { font: 13px/1.4 var(--mono); color: var(--mute) }
+.tablebox { overflow-x: auto }
+table { width: 100%; border-collapse: collapse; font: 13px/1.4 var(--mono) }
+th { text-align: left; font-weight: 500; color: var(--mute); border-bottom: 1px solid var(--rule); padding: 6px 8px 6px 0; white-space: nowrap }
+td { border-bottom: 1px solid var(--rule); padding: 8px 8px 8px 0; vertical-align: top }
+td.res { white-space: nowrap }
+.badge { display: inline-block; font: 600 11px/1 var(--mono); letter-spacing: .06em; padding: 4px 6px; border-radius: 3px; border: 1px solid currentColor }
+.pass { color: var(--pass) } .fail { color: var(--fail) } .pend { color: var(--pending) } .info { color: var(--accent) }
+dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; font: 13px/1.45 var(--mono) }
+dt { color: var(--mute) } dd { margin: 0; overflow-wrap: anywhere }
+.note { color: var(--mute); font-size: 14px; max-width: 68ch; margin: 0 }
+textarea { width: 100%; min-height: 150px; font: 12px/1.45 var(--mono); background: var(--bg); color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; padding: 8px }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Shatterforge engine · phase 0</div>
+    <h1>Phase-0 gates on your machine</h1>
+    <p class="lede">The new engine's brick store and box rigid-body solver, compiled to WebAssembly and run in this tab on one CPU thread. Press Run, wait about a minute, then copy the results back into the chat. The throughput rows are the CPU baseline that the phase-2 WebGPU solver has to beat.</p>
+  </header>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Live view</h2>
+      <div class="view"><canvas id="cv"></canvas><div class="overlay" id="ov">idle</div></div>
+      <div class="controls">
+        <button id="run">Run all gates</button>
+        <button id="copy" class="ghost" disabled>Copy results</button>
+        <span class="status" id="st">Loading engine…</span>
+      </div>
+    </section>
+    <section class="card">
+      <h2>This machine</h2>
+      <dl id="sys"></dl>
+      <p class="note">WebGPU is where the 20,000-body target is meant to be met. Shared-memory threads need cross-origin isolation, which this hosted page cannot turn on, so they are listed for the record only.</p>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Gates</h2>
+    <div class="tablebox"><table>
+      <thead><tr><th>Gate</th><th>Target</th><th>Result</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </section>
+
+  <section class="card" id="outcard" hidden>
+    <h2>Results to paste back</h2>
+    <textarea id="out" readonly></textarea>
+  </section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const WASM_B64 = "__WASM_B64__";
+const GATES = [
+  { id: 'split', name: 'Split: 7.5 × 3.75 × 0.25 m panel refined to 0.125 m within 0.5 m of a hit', target: 'p99 < 1 ms' },
+  { id: 'mem', name: 'Brick memory, records and joints', target: '≤ 96 B/brick' },
+  { id: 'stack', name: 'Stack of 20 × 0.5 m cubes, 10 s, no sleeping', target: '< 10 mm drift, < 10 mm/s' },
+  { id: 'p2k4', name: 'Pile of 2,000 bricks, 4 sub-steps', target: 'info' },
+  { id: 'p2k12', name: 'Pile of 2,000 bricks, 12 sub-steps (default)', target: 'info' },
+  { id: 'p20k4', name: 'Pile of 20,000 bricks, 4 sub-steps', target: '< 5 ms (GPU target)' },
+  { id: 'p20k12', name: 'Pile of 20,000 bricks, 12 sub-steps (default)', target: '< 5 ms (GPU target)' },
+];
+const $ = id => document.getElementById(id);
+const results = {};
+const sys = {};
+let E = null;
+
+function row(g) {
+  const r = results[g.id];
+  const badge = !r ? '<span class="badge pend">PENDING</span>' : r.ok === null ? '<span class="badge info">CPU BASELINE</span>' : r.ok ? '<span class="badge pass">PASS</span>' : '<span class="badge fail">MISS</span>';
+  return `<tr><td>${g.name}</td><td class="res">${g.target}</td><td class="res">${r ? r.text : '—'}</td><td>${badge}</td></tr>`;
+}
+function renderRows() { $('rows').innerHTML = GATES.map(row).join(''); }
+renderRows();
+
+// ---- three.js view
+const cv = $('cv');
+const renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+const scene = new THREE.Scene();
+const cam = new THREE.PerspectiveCamera(40, 4 / 3, 0.05, 500);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x666055, 0.85));
+const sun = new THREE.DirectionalLight(0xffffff, 0.75); sun.position.set(6, 12, 8); scene.add(sun);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400), new THREE.MeshLambertMaterial({ color: 0x9a948a }));
+ground.rotation.x = -Math.PI / 2; scene.add(ground);
+let inst = null;
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function themeColors() {
+  scene.background = new THREE.Color(cssVar('--view') || '#e7e2d8');
+  if (inst) inst.material.color.set(cssVar('--brick') || '#b9a68c');
+}
+function resize() { const w = cv.clientWidth, h = cv.clientHeight; if (w && h) { renderer.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix(); } }
+new ResizeObserver(resize).observe(cv);
+try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', themeColors); } catch (e) {}
+new MutationObserver(themeColors).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), P = new THREE.Vector3(), S = new THREE.Vector3();
+function draw(frame) {
+  const n = E.body_count();
+  if (!inst || inst.count !== n) {
+    if (inst) { scene.remove(inst); inst.geometry.dispose(); inst.material.dispose(); }
+    inst = new THREE.InstancedMesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshLambertMaterial({ color: cssVar('--brick') }), n);
+    inst.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    scene.add(inst); frame = true;
+  }
+  const f = new Float32Array(E.memory.buffer, E.pose(), n * 10);
+  let lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  for (let i = 0; i < n; i++) {
+    const o = i * 10;
+    P.set(f[o], f[o + 1], f[o + 2]); Q.set(f[o + 3], f[o + 4], f[o + 5], f[o + 6]); S.set(f[o + 7], f[o + 8], f[o + 9]);
+    M.compose(P, Q, S); inst.setMatrixAt(i, M);
+    for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], f[o + k]); hi[k] = Math.max(hi[k], f[o + k]); }
+  }
+  inst.instanceMatrix.needsUpdate = true;
+  if (frame) {
+    const c = new THREE.Vector3((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2);
+    const r = Math.max(2, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.62);
+    cam.position.set(c.x + r * 1.25, c.y + r * 0.7, c.z + r * 1.6); cam.lookAt(c);
+  }
+  renderer.render(scene, cam);
+}
+const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
+const pct = (a, p) => { const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(s.length * p))]; };
+const ov = t => { $('ov').textContent = t; };
+
+async function sysInfo() {
+  sys.browser = navigator.userAgent;
+  sys.cores = navigator.hardwareConcurrency || '?';
+  sys.memory = navigator.deviceMemory ? `≥ ${navigator.deviceMemory} GB (browser-capped)` : 'not reported';
+  sys.isolated = self.crossOriginIsolated ? 'yes' : 'no (threads unavailable here)';
+  sys.webgpu = 'not available';
+  try {
+    if (navigator.gpu) {
+      const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+      if (a) {
+        const i = a.info || (a.requestAdapterInfo ? await a.requestAdapterInfo() : {});
+        sys.webgpu = [i.vendor, i.architecture, i.device, i.description].filter(Boolean).join(' · ') || 'available';
+        sys.gpuLimits = `max storage buffer ${(a.limits.maxStorageBufferBindingSize / 2 ** 20).toFixed(0)} MB, workgroup ${a.limits.maxComputeInvocationsPerWorkgroup}`;
+      }
+    }
+  } catch (e) { sys.webgpu = 'error: ' + e.message; }
+  const lab = { browser: 'Browser', cores: 'Logical cores', memory: 'Memory', webgpu: 'WebGPU', gpuLimits: 'GPU limits', isolated: 'Threads' };
+  $('sys').innerHTML = Object.keys(lab).filter(k => sys[k]).map(k => `<dt>${lab[k]}</dt><dd>${sys[k]}</dd>`).join('');
+}
+
+async function runAll() {
+  $('run').disabled = true; $('copy').disabled = true;
+  for (const k in results) delete results[k];
+  renderRows();
+  // split
+  $('st').textContent = 'Split gate…'; await nextFrame();
+  const st = []; let bricks = 0;
+  for (let k = 0; k < 100; k++) { E.split_setup(); E.split_run(8 + (k % 45)); }  // let the wasm tier up first
+  for (let k = 0; k < 400; k++) { E.split_setup(); const t = performance.now(); bricks = E.split_run(8 + (k % 45)); st.push(performance.now() - t); }
+  const p99 = pct(st, 0.99);
+  results.split = { ok: p99 < 1, text: `median ${pct(st, .5).toFixed(3)} ms, p99 ${p99.toFixed(3)} ms (${bricks} bricks)` };
+  const bpb = E.split_bytes_per_brick();
+  results.mem = { ok: bpb <= 96, text: `${bpb.toFixed(1)} B/brick` };
+  renderRows();
+  // stack
+  $('st').textContent = 'Stacking gate…';
+  E.stack_setup(20, 12, 0);
+  const top0 = E.body_pos(19, 1); let mv = 0;
+  for (let f = 0; f < 600; f++) {
+    E.step(1 / 60); if (f >= 540) mv = Math.max(mv, E.max_speed());
+    if (f % 2 === 0) { draw(f === 0); ov(`stack · t ${((f + 1) / 60).toFixed(1)} s`); await nextFrame(); }
+  }
+  const drift = Math.hypot(E.body_pos(19, 0), E.body_pos(19, 1) - top0, E.body_pos(19, 2)) * 1e3;
+  results.stack = { ok: drift < 10 && mv * 1e3 < 10, text: `drift ${drift.toFixed(2)} mm, max ${(mv * 1e3).toFixed(2)} mm/s` };
+  renderRows();
+  // piles
+  for (const [id, n, sub] of [['p2k4', 2000, 4], ['p2k12', 2000, 12], ['p20k4', 20000, 4], ['p20k12', 20000, 12]]) {
+    $('st').textContent = `Pile ${n.toLocaleString()}, ${sub} sub-steps…`;
+    E.pile_setup(n, sub);
+    const frames = n > 5000 ? 90 : 180, t = [];
+    for (let f = 0; f < frames; f++) {
+      const a = performance.now(); E.step(1 / 60); const ms = performance.now() - a;
+      if (f >= frames / 3) t.push(ms);
+      draw(f === 0); ov(`pile ${n.toLocaleString()} · ${sub} sub-steps · frame ${f + 1}/${frames} · ${ms.toFixed(1)} ms`);
+      await nextFrame();
+    }
+    const med = pct(t, .5);
+    results[id] = { ok: n > 5000 ? (med < 5 ? true : null) : null, text: `median ${med.toFixed(2)} ms, p95 ${pct(t, .95).toFixed(2)} ms · ${E.manifolds().toLocaleString()} contacts` };
+    renderRows();
+  }
+  ov('done');
+  $('st').textContent = 'Done. Copy the results into the chat.';
+  const lines = ['Shatterforge phase-0 bench', ...Object.entries(sys).map(([k, v]) => `${k}: ${v}`), ...GATES.map(g => `${g.id}: ${results[g.id] ? results[g.id].text : '—'} [target ${g.target}]`)];
+  $('out').value = lines.join('\n'); $('outcard').hidden = false;
+  $('run').disabled = false; $('copy').disabled = false;
+}
+
+$('copy').addEventListener('click', () => {
+  const t = $('out');
+  const fallback = () => { t.focus(); t.select(); $('st').textContent = 'Selected; press Ctrl+C to copy.'; };
+  try { navigator.clipboard.writeText(t.value).then(() => { $('st').textContent = 'Copied.'; }, fallback); } catch (e) { fallback(); }
+});
+$('run').addEventListener('click', () => runAll().catch(e => { $('st').textContent = 'Error: ' + e.message; $('run').disabled = false; }));
+
+(async () => {
+  try {
+    const bytes = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
+    const { instance } = await WebAssembly.instantiate(bytes, {});
+    E = instance.exports;
+    resize(); themeColors();
+    E.stack_setup(20, 12, 0); draw(true); ov('stack of 20 · ready');
+    $('st').textContent = 'Ready.';
+  } catch (e) { $('st').textContent = 'Could not start the engine: ' + e.message; $('run').disabled = true; }
+  sysInfo();
+})();
+</script>

@@ -2,6 +2,8 @@
 
 A destructible-environment game and structural-physics engine written in Rust (`no_std`) and compiled to WebAssembly. Inspired by Volition's Geo-Mod. Everything in the world is built from 0.5 m bricks of real materials, and buildings stand or fall by their actual load paths.
 
+> **Engine rewrite in progress.** A new engine with real-size adaptive bricks is being built in `engine/` (see `docs/SPEC.md` and `docs/PHASE0.md`). The engine described below (`src/`) is retired and kept only as a reference until the new one runs the tower.
+
 **Play:** open `dist/shatterforge.html` in a desktop browser. It is a single self-contained file: the engine is embedded as base64, and three.js loads from cdnjs.
 
 ## The game
