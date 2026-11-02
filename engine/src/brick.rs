@@ -72,6 +72,56 @@ pub struct Bricks {
     ((l as u64) << 60) | (((c[0] + (1 << 19)) as u64 & 0xfffff) << 40) | (((c[1] + (1 << 19)) as u64 & 0xfffff) << 20) | ((c[2] + (1 << 19)) as u64 & 0xfffff)
 }
 
+/// Raw save and load of a brick store (to hand it between a worker and the page): every array as its length
+/// and bytes, little endian.
+trait Pod: Copy + Default {}
+impl Pod for u8 {} impl Pod for i16 {} impl Pod for u16 {} impl Pod for u32 {} impl Pod for u64 {}
+fn put<T: Pod>(out: &mut Vec<u8>, v: &[T]) {
+    out.extend_from_slice(&(v.len() as u32).to_le_bytes());
+    let bytes = unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * core::mem::size_of::<T>()) };
+    out.extend_from_slice(bytes);
+    while out.len() % 8 != 0 { out.push(0); }
+}
+fn get<T: Pod>(src: &[u8], at: &mut usize) -> Vec<T> {
+    let n = u32::from_le_bytes([src[*at], src[*at + 1], src[*at + 2], src[*at + 3]]) as usize; *at += 4;
+    let sz = n * core::mem::size_of::<T>();
+    let mut v = alloc::vec![T::default(); n];
+    unsafe { core::ptr::copy_nonoverlapping(src[*at..*at + sz].as_ptr(), v.as_mut_ptr() as *mut u8, sz); }
+    *at += sz;
+    while *at % 8 != 0 { *at += 1; }
+    v
+}
+impl Bricks {
+    pub fn save(&self, out: &mut Vec<u8>) {
+        out.clear();
+        put(out, &self.x); put(out, &self.y); put(out, &self.z);
+        put(out, &self.sx); put(out, &self.sy); put(out, &self.sz);
+        put(out, &self.mat); put(out, &self.paint); put(out, &self.flags);
+        put(out, &self.structure); put(out, &self.body); put(out, &self.jhead); put(out, &self.damage);
+        put(out, &self.ja); put(out, &self.jb); put(out, &self.jna); put(out, &self.jnb);
+        put(out, &self.jarea); put(out, &self.jaxis); put(out, &self.jdmg);
+        put(out, &self.jfree); put(out, &[self.live_joints as u32]);
+        let keys: Vec<u64> = self.cells.keys().copied().collect();
+        let vals: Vec<u32> = keys.iter().map(|k| self.cells[k]).collect();
+        put(out, &keys); put(out, &vals); put(out, &self.cnext);
+    }
+    pub fn load(src: &[u8]) -> Bricks {
+        let at = &mut 0usize;
+        let mut b = Bricks::default();
+        b.x = get(src, at); b.y = get(src, at); b.z = get(src, at);
+        b.sx = get(src, at); b.sy = get(src, at); b.sz = get(src, at);
+        b.mat = get(src, at); b.paint = get(src, at); b.flags = get(src, at);
+        b.structure = get(src, at); b.body = get(src, at); b.jhead = get(src, at); b.damage = get(src, at);
+        b.ja = get(src, at); b.jb = get(src, at); b.jna = get(src, at); b.jnb = get(src, at);
+        b.jarea = get(src, at); b.jaxis = get(src, at); b.jdmg = get(src, at);
+        b.jfree = get(src, at); b.live_joints = get::<u32>(src, at)[0] as usize;
+        let keys: Vec<u64> = get(src, at); let vals: Vec<u32> = get(src, at);
+        b.cells = keys.into_iter().zip(vals).collect();
+        b.cnext = get(src, at);
+        b
+    }
+}
+
 impl Bricks {
     pub fn new() -> Self { Self::default() }
     #[inline] pub fn len(&self) -> usize { self.x.len() }
@@ -474,5 +524,21 @@ mod tests {
             w.alive_count(), w.live_joints, w.bytes_per_brick(), { let (mut b, _) = panel(); b.refine_sphere([30.0, 15.0, 2.0], 4.0, 1); b.bytes_per_brick() });
         assert!(p99 < 1.0, "split gate");
         assert!(w.bytes_per_brick() <= 96.0);
+    }
+}
+#[cfg(test)]
+mod snap_tests {
+    #[test] fn save_and_load_round_trip() {
+        let mut g = crate::game::Game::new(3);
+        g.blast(crate::math::v3(-2.0, 3.875, -2.0), 0.6);
+        let mut buf = alloc::vec::Vec::new();
+        g.b.save(&mut buf);
+        let c = super::Bricks::load(&buf);
+        assert_eq!(c.len(), g.b.len());
+        assert_eq!(c.joint_set(), g.b.joint_set());
+        let mut q1 = alloc::vec::Vec::new(); let mut q2 = alloc::vec::Vec::new();
+        g.b.query([-40, 0, -40], [40, 40, 40], true, &mut q1); c.query([-40, 0, -40], [40, 40, 40], true, &mut q2);
+        q1.sort(); q2.sort(); assert_eq!(q1, q2);
+        extern crate std; std::println!("store of {} bricks: {} KB", c.len(), buf.len() / 1024);
     }
 }

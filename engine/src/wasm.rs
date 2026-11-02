@@ -59,6 +59,23 @@ static mut GAME: Option<Game> = None;
 fn game() -> &'static mut Game { unsafe { GAME.as_mut().unwrap() } }
 
 #[no_mangle] pub extern "C" fn game_new(storeys: u32) { unsafe { GAME = Some(Game::new(storeys as i32)); } }
+// ---- handing the brick store between the simulation worker and the page
+static mut SNAP: Vec<u8> = Vec::new();
+#[allow(static_mut_refs)]
+#[no_mangle] pub extern "C" fn snap_save() -> u32 { unsafe { game().b.save(&mut SNAP); SNAP.len() as u32 } }
+#[allow(static_mut_refs)]
+#[no_mangle] pub extern "C" fn snap_ptr() -> *mut u8 { unsafe { SNAP.as_mut_ptr() } }
+#[allow(static_mut_refs)]
+#[no_mangle] pub extern "C" fn snap_in(len: u32) -> *mut u8 { unsafe { SNAP.clear(); SNAP.resize(len as usize, 0); SNAP.as_mut_ptr() } }
+/// Replace the store with the one written by `snap_in`, then remesh chunks lo..=hi.
+#[allow(static_mut_refs)]
+#[no_mangle] pub extern "C" fn snap_load(lo: i32, hi: i32) {
+    let g = game();
+    g.b = unsafe { crate::brick::Bricks::load(&SNAP) };
+    for k in lo..=hi { g.remesh(k); }
+    g.dirty = (lo.max(0), hi.min(g.chunks.len() as i32 - 1));
+}
+#[no_mangle] pub extern "C" fn game_mesh(on: u32) { game().mesh = on != 0; }
 #[no_mangle] pub extern "C" fn chunk_count() -> u32 { game().chunks.len() as u32 }
 #[no_mangle] pub extern "C" fn chunk_vptr(k: u32) -> *const f32 { game().chunks[k as usize].v.as_ptr() }
 #[no_mangle] pub extern "C" fn chunk_vlen(k: u32) -> u32 { game().chunks[k as usize].v.len() as u32 }
@@ -82,6 +99,10 @@ fn game() -> &'static mut Game { unsafe { GAME.as_mut().unwrap() } }
 #[no_mangle] pub extern "C" fn player_on_ground() -> u32 { game().player.on_ground as u32 }
 #[no_mangle] pub extern "C" fn structure_step(max_fail: u32) -> u32 { game().structure_step(max_fail as usize) as u32 }
 #[no_mangle] pub extern "C" fn structure_ratio() -> f32 { game().max_ratio }
+/// Room for `n` impact records (11 floats each, see `Game::impacts`); returns where to write them.
+#[no_mangle] pub extern "C" fn impacts_in(n: u32) -> *mut f32 { let g = game(); g.inp.clear(); g.inp.resize(n as usize * 11, 0.0); g.inp.as_mut_ptr() }
+#[no_mangle] pub extern "C" fn impacts(dt: f32) -> u32 { game().impacts(dt) as u32 }
+#[no_mangle] pub extern "C" fn dust_bricks() -> u32 { game().dust as u32 }
 #[no_mangle] pub extern "C" fn piece_impact(piece: u32, px: f32, py: f32, pz: f32, dx: f32, dy: f32, dz: f32, impulse: f32, approach: f32, dt: f32) -> u32 {
     game().impact(piece, v3(px, py, pz), v3(dx, dy, dz), impulse, approach, dt) as u32
 }

@@ -452,6 +452,13 @@ fn wake(i: u32) {
   if (i != 0u && asleep(i)) { setB(i, F_FL, vec4f(0.0, B(i, F_P).xyz)); setB(i, F_RQ, B(i, F_Q)); let il = B(i, F_IL); setB(i, F_IL, vec4f(il.xyz, 0.0)); }
 }
 
+// wake every sleeping body (the static structure under them changed)
+@compute @workgroup_size(64) fn wake_all(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x + 1u; if (i >= P.n1) { return; }
+  if (B(i, F_P).w == 0.0) { return; }
+  wake(i);
+}
+
 @compute @workgroup_size(64) fn narrow(@builtin(global_invocation_id) g: vec3u) {
   let k = g.x; if (k >= min(ld(C_NPAIR), P.max_pairs)) { return; }
   let si = ld(P.o_pairs + 2u * k); let sj = ld(P.o_pairs + 2u * k + 1u);
@@ -877,7 +884,7 @@ function buildBodies(list) {
     const bi = bodies.length + 1;
     bodies.push({ p: com, q, im: M > 0 ? 1 / M : 0, il, v: b.v || [0, 0, 0], w: b.w || [0, 0, 0], mass: M });
     for (const s of b.shapes) {
-      shapes.push({ body: bi, mat: s.mat, lp: mtv(Rb, [0, 1, 2].map(i => s.p[i] - com[i])), lq: qmulJ(qconj(q), s.q), h: s.h });
+      shapes.push({ body: bi, mat: s.mat, col: s.col ?? s.mat, lp: mtv(Rb, [0, 1, 2].map(i => s.p[i] - com[i])), lq: qmulJ(qconj(q), s.q), h: s.h });
     }
   }
   return { bodies, shapes };
@@ -982,7 +989,7 @@ class GpuWorld {
     const mod = await compile(WGSL, 'WGSL'), modA = await compile(WGSL_ARGS, 'WGSL args');
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events'];
+                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); })]);
@@ -1041,7 +1048,9 @@ class GpuWorld {
     };
     const run = (p, k, x) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(x); };
     const ind = (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); };
-    let p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'pairs', nsh); p.end();
+    let p;
+    if (this.wakeReq) { this.wakeReq = false; p = pass(null); run(p, 'wake_all', nb); p.end(); }
+    p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'pairs', nsh); p.end();
     p = pass(null, true); run(p, 'pair_args', 1); p.end();
     p = pass('narrow'); ind(p, 'narrow', 99 * 4); p.end();
     p = pass(null, true); run(p, 'man_args', 1); p.end();
@@ -1123,6 +1132,8 @@ class GpuWorld {
     this.device.queue.writeBuffer(this.bodBuf, body * 80 + 48, new Float32Array([1, 0, -1000, 0]));
   }
   // Take the impact events collected since the last call.
+  // Wake all sleeping bodies at the next step (call when static shapes under them were removed).
+  wakeAll() { this.wakeReq = true; }
   takeEvents() { const e = this.events; this.events = []; return e; }
   killShape(slot) {
     const s = this.shapes[slot - 1]; if (!s) return;
@@ -1187,14 +1198,15 @@ class GpuWorld {
   // materials in `mats`; dead shapes are skipped.
   async readPose(minBody = 0) {
     const bod = await this.read(this.bodBuf, this.n1 * 80), sol = await this.read(this.solBuf, this.n1 * 96);
-    const list = minBody ? this.shapes.filter(s => s && !s.dead && s.body >= minBody) : this.shapes;
-    const pose = new Float32Array(list.length * 10), mats = new Uint8Array(list.length);
+    const list = [], slots = [];
+    this.shapes.forEach((s, k) => { if (!minBody || (s && !s.dead && s.body >= minBody)) { list.push(s); slots.push(k + 1); } });
+    const pose = new Float32Array(list.length * 10), mats = new Uint8Array(list.length), cols = new Uint16Array(list.length);
     list.forEach((s, k) => {
       if (!s) return;
       const b = s.body * 20, p = [bod[b], bod[b + 1], bod[b + 2]], q = [bod[b + 4], bod[b + 5], bod[b + 6], bod[b + 7]];
       const wp = mv(q2m(q), s.lp), wq = qmulJ(q, s.lq);
       pose.set([p[0] + wp[0], p[1] + wp[1], p[2] + wp[2], ...wq, ...s.h], k * 10);
-      mats[k] = s.mat;
+      mats[k] = s.mat; cols[k] = s.col ?? s.mat;
     });
     const body = new Float32Array(this.n * 7), vel = new Float32Array(this.n * 3), ang = new Float32Array(this.n * 3), sleeping = new Uint8Array(this.n);
     for (let i = 0; i < this.n; i++) {
@@ -1203,7 +1215,7 @@ class GpuWorld {
       vel.set(sol.subarray(s, s + 3), i * 3); ang.set(sol.subarray(s + 4, s + 7), i * 3);
       sleeping[i] = bod[b + 12] > 0.5 ? 1 : 0;
     }
-    return { pose, mats, body, vel, ang, sleeping };
+    return { pose, mats, cols, slots: Uint32Array.from(slots), body, vel, ang, sleeping };
   }
 
   // This step's contacts: bodies, restitution, normal impulse total (N s) and approach speed (m/s) per contact,

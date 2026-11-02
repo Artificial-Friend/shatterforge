@@ -29,7 +29,24 @@ pub struct Game {
     /// last structural check: worst joint stress / strength
     pub max_ratio: f32,
     pub failed_total: usize,
+    /// input records for `impacts`
+    pub inp: Vec<f32>,
+    /// the last piece analysed on impact: worst ratio and [failed joints, cracks, contact bricks, bricks]
+    pub piece_ratio: f32,
+    pub piece_info: [f32; 4],
+    pub dbg: Vec<f32>,
+    caps: Vec<f32>,
+    /// bricks removed as dust (rubble beyond the budget)
+    pub dust: usize,
+    /// build meshes (off in a worker that only simulates)
+    pub mesh: bool,
 }
+
+/// fragments of fewer bricks than this count as rubble; at most RUBBLE_KEEP of them per impact stay as bodies
+const RUBBLE_MIN: usize = 16;
+const RUBBLE_KEEP: usize = 48;
+/// crumbs kept as bodies per impacts call (the rest of the crushed material goes as dust)
+const CRUMB_KEEP: usize = 256;
 
 fn chunk_of(y: i32) -> i32 { y.div_euclid(tower::STOREY) }
 
@@ -38,20 +55,22 @@ impl Game {
         let b = tower::build(storeys, 1);
         let n = (storeys + 2) as usize;
         let mut g = Game { b, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0 };
+                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true };
         for k in 0..n as i32 { g.remesh(k); }
         g
     }
 
     pub fn remesh(&mut self, k: i32) {
+        if !self.mesh { return; }
         if k < 0 || k as usize >= self.chunks.len() { return; }
         let (y0, y1) = (k * tower::STOREY, (k + 1) * tower::STOREY);
         self.chunks[k as usize] = mesh::build_filtered(&self.b, |b, i| { let y = b.y[i as usize] as i32; y >= y0 && y < y1 });
     }
 
+    /// A brick as [x, y, z, sx, sy, sz (ticks), material + 16 x paint].
     fn push_box(out: &mut Vec<f32>, b: &Bricks, i: u32) {
         let t = b.tbox(i);
-        out.extend_from_slice(&[t.min[0] as f32, t.min[1] as f32, t.min[2] as f32, (t.max[0] - t.min[0]) as f32, (t.max[1] - t.min[1]) as f32, (t.max[2] - t.min[2]) as f32, b.mat[i as usize] as f32]);
+        out.extend_from_slice(&[t.min[0] as f32, t.min[1] as f32, t.min[2] as f32, (t.max[0] - t.min[0]) as f32, (t.max[1] - t.min[1]) as f32, (t.max[2] - t.min[2]) as f32, (b.mat[i as usize] as u32 + 16 * b.paint[i as usize] as u32) as f32]);
     }
 
     /// All static bricks: [n, (index, x, y, z, sx, sy, sz, material) ...] in ticks.
@@ -104,6 +123,8 @@ impl Game {
 
     /// Detach everything no longer connected to the ground as pieces; returns their ids.
     fn detach(&mut self) -> Vec<u32> {
+        let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
+        sever_infill(&mut self.b, &set);
         let groups = self.b.detached();
         let mut ids = Vec::new();
         for g in groups {
@@ -243,6 +264,219 @@ impl Game {
         crumbs.len() + ids.len()
     }
 
+    /// A frame's hard contacts, both sides (`inp`, 11 floats each): body (piece id, or -1 for the standing
+    /// structure), contact point (m, tower frame), unit direction the contact pushes this body (tower frame),
+    /// normal impulse J (N s), approach speed v (m/s), material of the other side (-1 unknown).
+    ///
+    /// The impact energy 1/2 J v crushes the same volume on both sides, V = E / (c_self + c_other), so concrete
+    /// on concrete crushes half each and glass on concrete crushes the glass. The standing structure takes
+    /// the contact force J/dt as a load in its structural check; a piece takes its inertia, drawn to all of
+    /// its contacts. Output: the static changes and new static pieces (as `emit`), then
+    /// `[n_broken, (parent, n_children, crush force, (id or -1, hit, n, boxes 7 each)...)...]`. The crush force
+    /// (N) is what the section that gave way could carry: it slows the parts cut free. `hit` is 1 for a part that
+    /// holds a contact (it was stopped) and 0 for a part cut free of every contact (it keeps falling).
+    pub fn impacts(&mut self, dt: f32) -> usize {
+        let inp = core::mem::take(&mut self.inp);
+        struct Hit { who: i32, p: [f32; 3], d: V3, j: f32, v: f32, other: i32 }
+        let hits: Vec<Hit> = inp.chunks_exact(11).map(|r| Hit {
+            who: r[0] as i32, p: [r[1] / TICK, r[2] / TICK, r[3] / TICK], d: v3(r[4], r[5], r[6]), j: r[7], v: r[8], other: r[9] as i32,
+        }).collect();
+        let ce = |m: i32| if m < 0 { 0.0 } else { structure::crush_energy(m as u8) };
+        let crush_r = |e: f32, cs: f32, co: f32| { let co = if co > 0.0 { co } else { cs }; cbrt(3.0 * e / (cs + co) / (4.0 * core::f32::consts::PI)).min(1.5) };
+        self.b.log.clear();
+        // ---- the standing structure
+        let mut scrumbs = Vec::new();
+        let mut extra: Vec<(u32, f32)> = Vec::new();
+        for h in hits.iter().filter(|h| h.who < 0) {
+            let mut near = Vec::new();
+            let lo = [floor(h.p[0]) as i32 - 3, floor(h.p[1]) as i32 - 3, floor(h.p[2]) as i32 - 3];
+            self.b.query(lo, [lo[0] + 7, lo[1] + 7, lo[2] + 7], true, &mut near);
+            let Some(&first) = near.iter().min_by(|&&x, &&y| dist2(&self.b, x, h.p).partial_cmp(&dist2(&self.b, y, h.p)).unwrap()) else { continue };
+            let cs = structure::crush_energy(self.b.mat[first as usize]);
+            let r = crush_r(0.5 * h.j * h.v, cs, ce(h.other));
+            let rt = r / TICK;
+            if r > 0.12 {
+                self.b.refine_sphere(h.p, rt + 1.0, 2);
+                let mut near = Vec::new();
+                let lo = [floor(h.p[0] - rt) as i32 - 1, floor(h.p[1] - rt) as i32 - 1, floor(h.p[2] - rt) as i32 - 1];
+                let w = 2 * rt as i32 + 4;
+                self.b.query(lo, [lo[0] + w, lo[1] + w, lo[2] + w], false, &mut near);
+                for &i in &near { if dist2(&self.b, i, h.p) <= rt * rt { scrumbs.push(i); } }
+                for &i in &scrumbs { if self.b.flags[i as usize] & F_ALIVE != 0 { self.b.remove(i); } }
+            }
+            // the contact force loads the bricks around the contact (its downward part: the check is vertical)
+            let f = h.j / dt * (-h.d.y).max(0.0);
+            if f <= 0.0 { continue; }
+            let rr = rt.max(2.0) + 3.0;
+            let mut near = Vec::new();
+            let lo = [floor(h.p[0] - rr) as i32, floor(h.p[1] - rr) as i32, floor(h.p[2] - rr) as i32];
+            let w = 2 * rr as i32 + 2;
+            self.b.query(lo, [lo[0] + w, lo[1] + w, lo[2] + w], true, &mut near);
+            near.retain(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && sphere_hits(&self.b, i, h.p, rr));
+            if near.is_empty() { continue; }
+            let share = f / near.len() as f32;
+            for &i in &near { extra.push((i, share)); }
+        }
+        scrumbs.sort_unstable(); scrumbs.dedup();
+        // crumb budget: beyond it, crushed material goes as dust (an even sample of the crumbs stays)
+        let thin = |v: &mut Vec<u32>, keep: usize, dust: &mut usize| { if v.len() > keep { let n = v.len(); let kept: Vec<u32> = (0..keep).map(|k| v[k * n / keep]).collect(); *dust += n - keep; *v = kept; } };
+        thin(&mut scrumbs, CRUMB_KEEP, &mut self.dust);
+        let mut spieces = Vec::new();
+        if !extra.is_empty() || !scrumbs.is_empty() {
+            let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
+            let mut idx = vec![NONE; self.b.len()];
+            for (k, &i) in set.iter().enumerate() { idx[i as usize] = k as u32; }
+            let mut load: Vec<f32> = set.iter().map(|&i| structure::mass(&self.b, i) * 9.81).collect();
+            for &(i, f) in &extra { let k = idx[i as usize]; if k != NONE { load[k as usize] += f; } }
+            let sink: Vec<bool> = set.iter().map(|&i| self.b.y[i as usize] <= 0).collect();
+            if !extra.is_empty() {
+                let a = structure::analyse(&self.b, &set, &load, &sink, v3(0.0, -1.0, 0.0));
+                self.max_ratio = self.max_ratio.max(a.max_ratio);
+                let work = self.apply_failures(&a, 256);
+                self.failed_total += work.len();
+            }
+            spieces = self.detach();
+        }
+        self.emit(&scrumbs, &spieces);
+        // ---- falling pieces
+        let mut ids: Vec<i32> = hits.iter().filter(|h| h.who >= 0).map(|h| h.who).collect();
+        ids.sort_unstable(); ids.dedup();
+        let mut broken: Vec<(u32, Vec<(i32, bool, Vec<u32>)>)> = Vec::new();
+        for pid in ids {
+            let pid = pid as usize;
+            if pid >= self.pieces.len() || self.pieces[pid].is_empty() { continue; }
+            let mine: Vec<&Hit> = hits.iter().filter(|h| h.who == pid as i32).collect();
+            let mut set = core::mem::take(&mut self.pieces[pid]);
+            let total_mass: f32 = set.iter().map(|&i| structure::mass(&self.b, i)).sum();
+            let mut crumbs = Vec::new();
+            let mut rs = Vec::new();
+            for h in &mine {
+                let Some(&nearest) = set.iter().min_by(|&&x, &&y| dist2(&self.b, x, h.p).partial_cmp(&dist2(&self.b, y, h.p)).unwrap()) else { break };
+                let r = crush_r(0.5 * h.j * h.v, structure::crush_energy(self.b.mat[nearest as usize]), ce(h.other));
+                rs.push(r);
+                if r <= 0.12 { continue; }
+                let rt = r / TICK;
+                let near: Vec<u32> = set.iter().copied().filter(|&i| sphere_hits(&self.b, i, h.p, rt + 1.0)).collect();
+                let mut created = Vec::new();
+                self.b.refine_bricks(near, h.p, rt + 1.0, 2, &mut created);
+                set.extend_from_slice(&created);
+                for k in (0..set.len()).rev() {
+                    let i = set[k];
+                    if dist2(&self.b, i, h.p) <= rt * rt && set.len() > 1 { crumbs.push(i); set.swap_remove(k); }
+                }
+            }
+            for &i in &crumbs { self.b.flags[i as usize] &= !F_DYNAMIC; self.b.remove(i); self.b.flags[i as usize] |= F_DYNAMIC; }
+            { let keep = CRUMB_KEEP / 2; if crumbs.len() > keep { let n = crumbs.len(); let kept: Vec<u32> = (0..keep).map(|k| crumbs[k * n / keep]).collect(); self.dust += n - keep; crumbs = kept; } }
+            // crush-down: the weakest section within a storey of the contacts carries at most its crushing
+            // force; when stopping the piece takes more, that section gives way and everything beyond it is cut free
+            let mut cracked = 0;
+            let mut cap_used = 0.0f32;
+            let mut cut_at: Option<(usize, i32, i32)> = None;
+            {
+                let mut jd = v3(0.0, 0.0, 0.0);
+                let mut jabs = v3(0.0, 0.0, 0.0);
+                let mut jsum = 0.0;
+                for h in &mine { jd = jd + h.d * h.j; jabs = jabs + v3(h.d.x.abs(), h.d.y.abs(), h.d.z.abs()) * h.j; jsum += h.j; }
+                // a piece stopped from one side carries the net impulse; one squeezed between two sides (a storey
+                // between the floors falling on it and the ground) carries the larger of the two: (sum + net) / 2
+                let net = jd.len();
+                let f_req = 0.5 * (jsum + net) / dt;
+                let squeezed = net < 0.5 * jsum;
+                let dn = if squeezed { jabs.norm() } else { jd.norm() };
+                let comps = [dn.x.abs(), dn.y.abs(), dn.z.abs()];
+                let ax = if comps[0] >= comps[1] && comps[0] >= comps[2] { 0 } else if comps[1] >= comps[2] { 1 } else { 2 };
+                let sg = if [dn.x, dn.y, dn.z][ax] >= 0.0 { 1 } else { -1 };
+                if f_req > 0.0 {
+                    let band = if squeezed { i32::MAX / 4 } else { tower::STOREY + 4 };
+                    let from: Vec<f32> = if squeezed { set.iter().map(|&i| { let t = self.b.tbox(i); if sg > 0 { t.min[ax] as f32 } else { t.max[ax] as f32 } }).collect() } else { mine.iter().map(|h| h.p[ax]).collect() };
+                    if let Some((at, cap)) = weakest_section(&self.b, &set, ax, sg, &from, band) {
+                        if f_req > cap {
+                            cap_used = cap;
+                            cut_at = Some((ax, sg, at));
+                            cracked += cut_section(&mut self.b, &mut set, ax, at);
+                        }
+                    }
+                }
+            }
+            // inertia: every brick decelerates with the piece, its load flows to the contacts
+            let near_contact = |b: &Bricks, i: u32| mine.iter().zip(rs.iter()).any(|(h, &r)| { let rt = (r / TICK).max(2.0) + 2.0; dist2(b, i, h.p) <= rt * rt });
+            if !set.is_empty() {
+                let mut jd = v3(0.0, 0.0, 0.0);
+                for h in &mine { jd = jd + h.d * h.j; }
+                let jl = jd.len();
+                if jl > 0.0 {
+                    let accel = jl / (total_mass * dt);
+                    let load: Vec<f32> = set.iter().map(|&i| structure::mass(&self.b, i) * accel).collect();
+                    let mut sink: Vec<bool> = set.iter().map(|&i| near_contact(&self.b, i)).collect();
+                    if !sink.iter().any(|&s| s) {
+                        let h = mine[0];
+                        let k = (0..set.len()).min_by(|&x, &y| dist2(&self.b, set[x], h.p).partial_cmp(&dist2(&self.b, set[y], h.p)).unwrap()).unwrap();
+                        sink[k] = true;
+                    }
+                    let before = self.b.len();
+                    let mut a = structure::analyse(&self.b, &set, &load, &sink, jd * (-1.0 / jl));
+                    // a rigid stop in one frame would load every storey with the full deceleration. In reality the
+                    // material next to the contacts gives way first, at the force it can carry, and the rest keeps
+                    // moving: so only failures within one storey of the contacts count; parts cut free above them
+                    // carry on and meet the crushed zone again (a crush-down, storey by storey)
+                    let dn = jd * (1.0 / jl);
+                    let s0 = mine.iter().map(|h| dn.dot(v3(h.p[0], h.p[1], h.p[2]))).fold(f32::MAX, f32::min);
+                    let band = tower::STOREY as f32 + 4.0;
+                    let up = |b: &Bricks, i: u32| { let c = centre(b, i); dn.dot(v3(c[0], c[1], c[2])) - s0 };
+                    let b = &self.b;
+                    a.failed.retain(|&(j, _)| { let (p, q) = (b.ja[j as usize], b.jb[j as usize]); p != NONE && 0.5 * (up(b, p) + up(b, q)) <= band });
+                    a.cracks.retain(|c| up(b, c.brick) <= band);
+                    if cfg!(test) {
+                        self.dbg.clear();
+                        for &(j, _) in &a.failed { let (p, q) = (self.b.ja[j as usize], self.b.jb[j as usize]); if p != NONE { self.dbg.push(((self.b.y[p as usize] as i32).max(self.b.y[q as usize] as i32)) as f32); self.dbg.push(self.b.jaxis[j as usize] as f32); } }
+                    }
+                    cracked = self.apply_failures(&a, usize::MAX).len();
+                    self.piece_ratio = a.max_ratio; self.piece_info = [a.failed.len() as f32, a.cracks.len() as f32, sink.iter().filter(|&&s| s).count() as f32, set.len() as f32];
+                    for i in before..self.b.len() { set.push(i as u32); }
+                }
+            }
+            if crumbs.is_empty() && cracked == 0 { self.pieces[pid] = set; continue; }
+            self.caps.push(cap_used);
+            let mut kids: Vec<(i32, bool, Vec<u32>)> = crumbs.iter().map(|&i| (-1, true, vec![i])).collect();
+            sever_infill(&mut self.b, &set);
+            // rubble budget: a crushed zone falls apart into many fragments; the biggest stay as bodies, the
+            // finest go as dust (removed) so a collapse does not run out of bodies
+            let mut groups = components(&self.b, &set);
+            groups.sort_by_key(|g| core::cmp::Reverse(g.len()));
+            let mut small = 0;
+            groups.retain(|g| {
+                if g.len() >= RUBBLE_MIN { return true; }
+                small += 1;
+                if small <= RUBBLE_KEEP { return true; }
+                for &i in g { self.b.flags[i as usize] &= !F_DYNAMIC; self.b.remove(i); self.b.flags[i as usize] |= F_DYNAMIC; }
+                self.dust += g.len();
+                false
+            });
+            for g in groups {
+                // with a section cut, the parts wholly beyond it were cut free; otherwise the parts at a contact
+                let hit = match cut_at {
+                    Some((ax, sg, at)) => g.iter().any(|&i| { let t = self.b.tbox(i); (t.min[ax] * sg).min(t.max[ax] * sg) < at }),
+                    None => g.iter().any(|&i| near_contact(&self.b, i)),
+                };
+                let id = self.new_piece(g.clone());
+                kids.push((id as i32, hit, g));
+            }
+            broken.push((pid as u32, kids));
+        }
+        self.out.push(broken.len() as f32);
+        let mut n = 0;
+        let caps = core::mem::take(&mut self.caps);
+        for (k, (parent, kids)) in broken.iter().enumerate() {
+            self.out.push(*parent as f32); self.out.push(kids.len() as f32); self.out.push(caps[k]);
+            for (id, hit, g) in kids {
+                self.out.push(*id as f32); self.out.push(if *hit { 1.0 } else { 0.0 }); self.out.push(g.len() as f32);
+                for &i in g { Self::push_box(&mut self.out, &self.b, i); }
+                n += 1;
+            }
+        }
+        n + scrumbs.len() + spieces.len()
+    }
+
     /// Ray from o along unit d (m): distance to the first static brick, or a negative value.
     pub fn raycast(&mut self, o: V3, d: V3, max: f32) -> f32 {
         match self.b.raycast([o.x / TICK, o.y / TICK, o.z / TICK], [d.x, d.y, d.z], max / TICK) { Some((_, t, _)) => t * TICK, None => -1.0 }
@@ -257,6 +491,148 @@ fn sphere_hits(b: &Bricks, i: u32, c: [f32; 3], r: f32) -> bool {
     d2 < r * r
 }
 fn cbrt(x: f32) -> f32 { if x <= 0.0 { 0.0 } else { let mut y = x.max(1e-3); for _ in 0..40 { y = y - (y * y * y - x) / (3.0 * y * y); } y } }
+/// The weakest section of `set` across axis `ax` within `band` ticks beyond the contacts (`sg` is the direction
+/// the contacts push, the contacts at coordinates `at` along `ax`): (plane, crushing force it can carry in N).
+/// A section's capacity is the compressive strength times the area of the structural bricks it cuts, and of the
+/// joints lying in it.
+fn weakest_section(b: &Bricks, set: &[u32], ax: usize, sg: i32, at: &[f32], band: i32) -> Option<(i32, f32)> {
+    use crate::brick::F_INFILL;
+    let s0 = at.iter().map(|&p| p * sg as f32).fold(f32::MAX, f32::min);
+    // planes right at the contacts would only shave off the crushed layer
+    let (lo, hi) = (s0 as i32 + 3, s0 as i32 + band);
+    let mut idx = vec![NONE; b.len()];
+    for (k, &i) in set.iter().enumerate() { idx[i as usize] = k as u32; }
+    let (a1, a2) = ((ax + 1) % 3, (ax + 2) % 3);
+    let orient = |t: &crate::brick::TBox| { let (p, q) = (t.min[ax] * sg, t.max[ax] * sg); (p.min(q), p.max(q)) };
+    // candidate planes: brick faces inside the band
+    let mut planes: Vec<i32> = Vec::new();
+    for &i in set { let (p, q) = orient(&b.tbox(i)); for v in [p, q] { if v > lo && v < hi { planes.push(v); } } }
+    planes.sort_unstable(); planes.dedup();
+    if planes.len() > 64 { let step = planes.len() / 64 + 1; planes = planes.into_iter().step_by(step).collect(); }
+    let mut best: Option<(i32, f32)> = None;
+    for &y in &planes {
+        let mut cap = 0.0f32;
+        for &i in set {
+            if b.flags[i as usize] & F_INFILL != 0 { continue; }
+            let t = b.tbox(i); let (p, q) = orient(&t);
+            let sc = structure::strength(b.mat[i as usize])[0];
+            if p < y && y < q {
+                cap += ((t.max[a1] - t.min[a1]) * (t.max[a2] - t.min[a2])) as f32 * TICK * TICK * sc;
+            } else if p == y {
+                // joints across the plane: to bricks on the near side
+                let mut j = b.jhead[i as usize];
+                while j != NONE {
+                    let o = b.joint_other(j, i);
+                    if b.jaxis[j as usize] as usize == ax && idx[o as usize] != NONE && b.flags[o as usize] & F_INFILL == 0 && orient(&b.tbox(o)).1 == y {
+                        let so = structure::strength(b.mat[o as usize])[0];
+                        cap += b.jarea[j as usize] as f32 * TICK * TICK * sc.min(so);
+                    }
+                    j = b.joint_next(j, i);
+                }
+            }
+        }
+        if cap > 0.0 && best.map_or(true, |(_, c)| cap < c) { best = Some((y, cap)); }
+    }
+    best
+}
+
+/// Cut `set` at oriented plane `at` across `ax`: bricks crossing it split (the pieces join `set`), and every
+/// joint lying in the plane goes. Returns the number of cuts.
+fn cut_section(b: &mut Bricks, set: &mut Vec<u32>, ax: usize, at_oriented: i32) -> usize {
+    let mut n = 0;
+    // the plane in real coordinates: oriented = coord * sg, so coord = +-at
+    for &plane in &[at_oriented, -at_oriented] {
+        let mut hit = false;
+        for k in 0..set.len() { let t = b.tbox(set[k]); if t.min[ax] == plane || t.max[ax] == plane || (t.min[ax] < plane && plane < t.max[ax]) { hit = true; break; } }
+        if !hit { continue; }
+        let mut idx = vec![false; b.len()];
+        for &i in set.iter() { idx[i as usize] = true; }
+        let len0 = set.len();
+        for k in 0..len0 {
+            let i = set[k];
+            let t = b.tbox(i);
+            if t.min[ax] < plane && plane < t.max[ax] {
+                let m = b.split(i, ax, plane);
+                let mut jj = b.jhead[m as usize];
+                while jj != NONE { if b.joint_other(jj, m) == i { b.remove_joint(jj); break; } jj = b.joint_next(jj, m); }
+                set.push(m); n += 1;
+            }
+        }
+        let mut idx2 = vec![false; b.len()];
+        for &i in set.iter() { idx2[i as usize] = true; }
+        let mut cut = Vec::new();
+        for &i in set.iter() {
+            let t = b.tbox(i);
+            if t.max[ax] != plane { continue; }
+            let mut j = b.jhead[i as usize];
+            while j != NONE { let o = b.joint_other(j, i); if b.jaxis[j as usize] as usize == ax && idx2[o as usize] && b.tbox(o).min[ax] == plane { cut.push(j); } j = b.joint_next(j, i); }
+        }
+        cut.sort_unstable(); cut.dedup();
+        for &j in &cut { b.remove_joint(j); n += 1; }
+        let _ = idx;
+        break;
+    }
+    n
+}
+
+/// Infill (glass, cladding, partitions) carries no load, so it must not hold structure together either: where
+/// the structural bricks of `set` have come apart, the infill joints bridging the parts are cut. Each infill
+/// brick stays with the structural part it is joined to lowest down (it hangs on or stands on that).
+/// Returns the number of joints cut.
+fn sever_infill(b: &mut Bricks, set: &[u32]) -> usize {
+    use crate::brick::F_INFILL;
+    let mut idx = vec![NONE; b.len()];
+    for (k, &i) in set.iter().enumerate() { idx[i as usize] = k as u32; }
+    let infill = |b: &Bricks, i: u32| b.flags[i as usize] & F_INFILL != 0;
+    // structural parts
+    let mut comp = vec![NONE; set.len()];
+    let mut nc = 0u32;
+    for s in 0..set.len() {
+        if comp[s] != NONE || infill(b, set[s]) { continue; }
+        let mut st = vec![s as u32]; comp[s] = nc;
+        while let Some(k) = st.pop() {
+            let i = set[k as usize];
+            let mut j = b.jhead[i as usize];
+            while j != NONE { let o = b.joint_other(j, i); let l = idx[o as usize]; if l != NONE && comp[l as usize] == NONE && !infill(b, o) { comp[l as usize] = nc; st.push(l); } j = b.joint_next(j, i); }
+        }
+        nc += 1;
+    }
+    if nc <= 1 { return 0; }
+    // infill: the lowest structural neighbour, then (for infill joined only to infill) a neighbour's part
+    for s in 0..set.len() {
+        let i = set[s];
+        if !infill(b, i) { continue; }
+        let (mut best, mut by) = (NONE, i32::MAX);
+        let mut j = b.jhead[i as usize];
+        while j != NONE { let o = b.joint_other(j, i); let l = idx[o as usize];
+            if l != NONE && !infill(b, o) && (b.y[o as usize] as i32) < by { by = b.y[o as usize] as i32; best = comp[l as usize]; }
+            j = b.joint_next(j, i); }
+        comp[s] = best;
+    }
+    for _ in 0..8 {
+        let mut changed = false;
+        for s in 0..set.len() {
+            if comp[s] != NONE { continue; }
+            let i = set[s];
+            let mut j = b.jhead[i as usize];
+            while j != NONE { let o = b.joint_other(j, i); let l = idx[o as usize]; if l != NONE && comp[l as usize] != NONE { comp[s] = comp[l as usize]; changed = true; break; } j = b.joint_next(j, i); }
+        }
+        if !changed { break; }
+    }
+    let mut cut = Vec::new();
+    for s in 0..set.len() {
+        let i = set[s];
+        if !infill(b, i) { continue; }
+        let mut j = b.jhead[i as usize];
+        while j != NONE { let o = b.joint_other(j, i); let l = idx[o as usize];
+            if l != NONE && comp[s] != NONE && comp[l as usize] != NONE && comp[s] != comp[l as usize] { cut.push(j); }
+            j = b.joint_next(j, i); }
+    }
+    cut.sort_unstable(); cut.dedup();
+    for &j in &cut { b.remove_joint(j); }
+    cut.len()
+}
+
 /// Connected groups of `set` through joints.
 fn components(b: &Bricks, set: &[u32]) -> Vec<Vec<u32>> {
     let mut idx = vec![NONE; b.len()];
@@ -335,5 +711,85 @@ mod tests {
         let n = g.impact(id, v3(25.0, 12.5, 0.0), v3(0.0, 1.0, 0.0), m * 8.0, 8.0, 1.0 / 60.0);
         std::println!("slab impact: mass {m:.0} kg -> {n} bodies (crumbs + pieces)");
         assert!(n > 1, "it breaks");
+    }
+    #[test] fn a_dropped_tower_crushes_its_stumps_and_its_lowest_storey() {
+        // cut the whole ground storey at 1.6 m: the tower above falls 1.4 m and lands at 5.2 m/s on the stumps
+        let mut g = Game::new(8);
+        let mut x = -11.6f32;
+        let mut piece = -1i32;
+        while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 {
+            g.blast(v3(x, 1.6, z), 0.7);
+            for (id, sz) in bodies_in(&g.out) { if id >= 0 && sz > 100 { piece = id; } }
+            z += 0.8; } x += 0.8; }
+        assert!(piece >= 0, "the tower came loose");
+        let m: f32 = g.pieces[piece as usize].iter().map(|&i| structure::mass(&g.b, i)).sum();
+        let low = g.pieces[piece as usize].iter().map(|&i| g.b.y[i as usize] as i32).min().unwrap();
+        // the stumps: static bricks reaching up to the cut
+        let tops: std::vec::Vec<u32> = (0..g.b.len() as u32).filter(|&i| g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && {
+            let t = g.b.tbox(i); t.max[1] >= 5 && t.max[1] <= low && g.b.flags[i as usize] & crate::brick::F_INFILL == 0 }).collect();
+        assert!(!tops.is_empty());
+        let v = 5.2; let j = m * v / tops.len() as f32;
+        // the stumps fell short of the piece by the crushed gap; they meet at the stump tops after the fall
+        for &i in &tops {
+            let t = g.b.tbox(i);
+            let p = [(t.min[0] + t.max[0]) as f32 * 0.5 * TICK, t.max[1] as f32 * TICK, (t.min[2] + t.max[2]) as f32 * 0.5 * TICK];
+            // the piece's contact point is at its underside, shifted down by the fall
+            let fall = (low - t.max[1]) as f32 * TICK;
+            g.inp.extend_from_slice(&[-1.0, p[0], p[1], p[2], 0.0, -1.0, 0.0, j, v, 0.0, 0.0]);
+            g.inp.extend_from_slice(&[piece as f32, p[0], p[1] + fall, p[2], 0.0, 1.0, 0.0, j, v, 0.0, 0.0]);
+        }
+        let t = std::time::Instant::now();
+        let n = g.impacts(1.0 / 60.0);
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        // read the output
+        let o = &g.out; let nu = o[0] as usize; let mut k = 1 + nu * 9; let nb = o[k] as usize; k += 1;
+        let mut static_crumbs = 0; for _ in 0..nb { let id = o[k] as i32; let c = o[k + 1] as usize; if id < 0 { static_crumbs += 1; } k += 2 + c * 7; }
+        let nbr = o[k] as usize; k += 1;
+        let (mut free, mut free_bricks, mut held, mut crumbs) = (0, 0, 0, 0);
+        let mut cap = 0.0; for _ in 0..nbr { k += 1; let nk = o[k] as usize; cap = o[k + 1]; k += 2; for _ in 0..nk {
+            let id = o[k] as i32; let hit = o[k + 1] > 0.5; let c = o[k + 2] as usize; k += 3 + c * 7;
+            let (mut y0, mut y1) = (f32::MAX, f32::MIN); for q in 0..c { let bx = &o[k - c * 7 + q * 7..]; y0 = y0.min(bx[1]); y1 = y1.max(bx[1] + bx[4]); }
+            if id >= 0 { std::println!("  part {id}: hit {hit}, {c} bricks, y {y0}..{y1} ticks"); }
+            if id < 0 { crumbs += 1 } else if hit { held += 1 } else { free += 1; free_bricks += c; } } }
+        std::println!("tower of {m:.0} kg lands on {} stumps: {n} new bodies in {ms:.0} ms; static: {} changes, {static_crumbs} crumbs, {} joints failed; piece: {crumbs} crumbs, {held} parts at the contacts, {free} parts cut free ({free_bricks} bricks)", tops.len(), nu, g.failed_total);
+        std::println!("crush force of the section that gave way: {:.0} MN (stopping the tower in a frame takes {:.0} MN)", cap / 1e6, m * v * 60.0 / 1e6);
+        std::println!("piece analysis: worst {:.2}, info {:?}, piece starts at y {low}", g.piece_ratio, g.piece_info);
+        let mut h = std::collections::BTreeMap::new(); for c in g.dbg.chunks(2) { *h.entry((c[0] as i32 / 10 * 10, c[1] as i32)).or_insert(0) += 1; }
+        std::println!("failed joints by (y tick /10, axis): {:?}", h);
+        assert!(static_crumbs > 0, "the stumps are crushed");
+        assert!(free > 0 && free_bricks > 100, "the floors above are cut free of the crushed storey and keep falling");
+        // the next frames: the upper tower meets the storey it left behind, which sits on the crushed stumps
+        let mut total_free_cuts = 0;
+        for round in 0..4 {
+            let live: std::vec::Vec<usize> = (0..g.pieces.len()).filter(|&p| g.pieces[p].len() > 50).collect();
+            let top = *live.iter().max_by_key(|&&p| g.pieces[p].iter().map(|&i| g.b.y[i as usize] as i32 + g.b.sy[i as usize] as i32).max().unwrap()).unwrap();
+            let tlow = g.pieces[top].iter().map(|&i| g.b.y[i as usize] as i32).min().unwrap();
+            let below: std::vec::Vec<usize> = live.iter().copied().filter(|&p| p != top).collect();
+            let mt: f32 = g.pieces[top].iter().map(|&i| structure::mass(&g.b, i)).sum();
+            let mut recs = std::vec::Vec::new();
+            for &p in &below { for &i in &g.pieces[p] { let t = g.b.tbox(i); if t.max[1] <= tlow && t.max[1] >= tlow - 8 && g.b.flags[i as usize] & crate::brick::F_INFILL == 0 {
+                recs.push((p, [(t.min[0] + t.max[0]) as f32 * 0.5 * TICK, t.max[1] as f32 * TICK, (t.min[2] + t.max[2]) as f32 * 0.5 * TICK])); } } }
+            if recs.is_empty() { std::println!("round {round}: nothing under the top piece {top} (bottom {tlow}); below: {:?}", below.iter().map(|&p| (p, g.pieces[p].len(), g.pieces[p].iter().map(|&i| g.b.y[i as usize] as i32 + g.b.sy[i as usize] as i32).max().unwrap())).collect::<std::vec::Vec<_>>()); break; }
+            let j = mt * 5.0 / recs.len() as f32;
+            for (p, c) in &recs {
+                g.inp.extend_from_slice(&[top as f32, c[0], c[1], c[2], 0.0, 1.0, 0.0, j, 5.0, 0.0, 0.0]);
+                g.inp.extend_from_slice(&[*p as f32, c[0], c[1], c[2], 0.0, -1.0, 0.0, j, 5.0, 0.0, 0.0]);
+                // the storey below passes the load on to the ground
+                g.inp.extend_from_slice(&[*p as f32, c[0], 2.0, c[2], 0.0, 1.0, 0.0, j, 0.5, 0.0, 0.0]);
+            }
+            g.impacts(1.0 / 60.0);
+            let o = &g.out; let nu = o[0] as usize; let mut k = 1 + nu * 9; let nb = o[k] as usize; k += 1;
+            for _ in 0..nb { let c = o[k + 1] as usize; k += 2 + c * 7; }
+            let nbr = o[k] as usize; k += 1;
+            let mut cut_free = std::vec::Vec::new();
+            for _ in 0..nbr { let parent = o[k] as usize; let nk = o[k + 1] as usize; if parent == top { std::println!("    top broke: crush force {:.0} MN, {nk} parts", o[k + 2] / 1e6); } k += 3; for _ in 0..nk {
+                let id = o[k] as i32; let hit = o[k + 1] > 0.5; let c = o[k + 2] as usize; k += 3 + c * 7;
+                if id >= 0 && c > 20 && parent == top { let (mut y0, mut y1) = (f32::MAX, f32::MIN); for q in 0..c { let bx = &o[k - c * 7 + q * 7..]; y0 = y0.min(bx[1]); y1 = y1.max(bx[1] + bx[4]); } std::println!("    part {id} hit {hit} {c} bricks y {y0}..{y1}"); }
+                if id >= 0 && !hit && parent == top && c > 20 { cut_free.push(c); } } }
+            std::println!("round {round}: top piece ({} kg, bottom at {tlow}) on {} contacts -> parts cut free above: {:?}", mt as i64, recs.len(), cut_free);
+            if cut_free.is_empty() { break; }
+            total_free_cuts += 1;
+        }
+        assert!(total_free_cuts >= 2, "the crush-down goes on storey by storey");
     }
 }
