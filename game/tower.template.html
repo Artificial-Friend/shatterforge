@@ -116,11 +116,14 @@ dMesh.setColorAt(0, new THREE.Color(0xffffff));   // creates the per-instance co
 scene.add(dMesh);
 const MATCOL = [0x9c9a94, 0x9a5a44, 0x6f7377, 0x7aa0b4, 0xd8d2c4, 0xcccccc, 0x777777, 0x9c9a94].map(c => new THREE.Color(c));
 const M4 = new THREE.Matrix4(), QQ = new THREE.Quaternion(), PP = new THREE.Vector3(), SS = new THREE.Vector3();
-let reading = false, debrisShapes = 0;
+let reading = false, debrisShapes = 0, pendingChunks = null, readGen = 0, blastGen = 0;
 function pullDebris() {
   if (!gpu || reading) return;
   reading = true;
+  const gen = blastGen;
   gpu.readPose(debrisFrom).then(r => {
+    // the tower mesh changes in the same frame as the debris that replaces it appears (no gap)
+    if (pendingChunks && gen === blastGen) { for (const k of pendingChunks) chunkMesh(k); pendingChunks = null; }
     const n = Math.min(MAXD, r.pose.length / 10);
     for (let k = 0; k < n; k++) {
       const o = k * 10;
@@ -161,7 +164,8 @@ function doBlast() {
   const t0 = performance.now();
   const nb = E.blast(p.x, p.y, p.z, radius);
   const { updates, bodies } = readLog();
-  for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) chunkMesh(k);
+  const dirty = []; for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) dirty.push(k);
+  if (gpu) { pendingChunks = (pendingChunks || []).concat(dirty); blastGen++; } else dirty.forEach(chunkMesh);
   const ms = performance.now() - t0;
   if (gpu) {
     for (const u of updates) {

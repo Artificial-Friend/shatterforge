@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'sleep', 'pile'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -140,6 +140,20 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
                     box([0, 1.5, 0], [4, 0.15, 0.15], MAT.steel)];
       const r = await run(list, 180);
       check('beam', r.pose[31] > 0.6 && r.pose[31] < 0.7, { beam_y: r.pose[31], expected: 0.65 }); done(r);
+    }
+    if (scenes.includes('plate')) {
+      // one body of 12 x 12 bricks (a slab piece) dropped flat on 144 loose blocks: 144 contacts on one body,
+      // far more than the colours, so most are solved as overflow with mass splitting
+      const shapes = [];
+      for (let i = 0; i < 12; i++) for (let k = 0; k < 12; k++) shapes.push({ p: [i * 0.5 - 2.75, 1.0, k * 0.5 - 2.75], q: [0, 0, 0, 1], h: [0.25, 0.125, 0.25], mat: MAT.concrete });
+      const list = [{ shapes }];
+      for (let i = 0; i < 12; i++) for (let k = 0; k < 12; k++) list.push(box([i * 0.5 - 2.75, 0.25, k * 0.5 - 2.75], [0.2, 0.25, 0.2], MAT.masonry));
+      const r = await run(list, 240);
+      let ys = []; for (let k = 0; k < 144; k++) ys.push(r.pose[k * 10 + 1]);
+      const lo = Math.min(...ys), hi = Math.max(...ys);
+      // resting on the blocks: block top 0.5 m + half the plate 0.125
+      check('plate', lo > 0.6 && hi < 0.65 && speed(r.vel, 0) < 0.02, { plate_y: [+lo.toFixed(4), +hi.toFixed(4)], expected: 0.625, speed: speed(r.vel, 0), stats: r.stats });
+      done(r);
     }
     if (scenes.includes('sleep')) {
       E.pile_setup(300, 12);

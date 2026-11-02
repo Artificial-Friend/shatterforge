@@ -98,6 +98,7 @@ struct Params {
   o_blist: u32, o_par: u32, o_mint: u32, allow_sleep: u32,
   sleep_time: f32, sleep_lin: f32, sleep_ang: f32, ns1: u32,
   levels: u32, ground_mat: u32, sleep_dist: f32, sleep_rot: f32,
+  o_ocount: u32, o_acc: u32, pad2: u32, pad3: u32,
   mat: array<vec4f, 8>,   // friction, restitution, -, -
 }
 struct ColorU { c: u32 }
@@ -549,7 +550,11 @@ fn mhdr(m: u32) -> vec2u { let h = man[m * MS]; return vec2u(u32(h.x), u32(h.y))
   }
   st(P.o_mcolor + mi, col);
   atomicAdd(&ints[P.o_ccount + col], 1u);
-  if (col == P.color_limit) { atomicAdd(&ints[C_OVF], 1u); } else { atomicMax(&ints[C_COLORS], col + 1u); }
+  if (col == P.color_limit) {
+    atomicAdd(&ints[C_OVF], 1u);
+    if (da) { atomicAdd(&ints[P.o_ocount + a], 1u); }
+    if (db) { atomicAdd(&ints[P.o_ocount + b], 1u); }
+  } else { atomicMax(&ints[C_COLORS], col + 1u); }
   if (da) { atomicAdd(&ints[P.o_bcount + a], 1u); }
   if (db) { atomicAdd(&ints[P.o_bcount + b], 1u); }
 }
@@ -608,13 +613,19 @@ fn mhdr(m: u32) -> vec2u { let h = man[m * MS]; return vec2u(u32(h.x), u32(h.y))
   setB(i, F_Q, normalize(q + 0.5 * P.h * qmul(vec4f(w, 0.0), q)));
 }
 
-fn solve_man(m: u32, use_bias: bool) {
+// split = an overflow contact solved in parallel with others on the same bodies (Jacobi with mass
+// splitting): each body acts as if it had 1/k of its mass for its k overflow contacts, and the velocity
+// changes are summed atomically and averaged afterwards (ovf_apply).
+fn solve_man(m: u32, use_bias: bool, split: bool) {
   let base = m * MS;
   let hd = man[base]; let a = u32(hd.x); let b = u32(hd.y); let cnt = u32(hd.z);
   let va4 = S(a, S_V); let vb4 = S(b, S_V);
   var va = va4.xyz; var wa = S(a, S_W).xyz; var vb = vb4.xyz; var wb = S(b, S_W).xyz;
-  let ima = va4.w; let imb = vb4.w;
-  let A0 = S(a, S_I0); let A1 = S(a, S_I1); let B0 = S(b, S_I0); let B1 = S(b, S_I1);
+  let va0 = va; let wa0 = wa; let vb0 = vb; let wb0 = wb;
+  var ka = 1.0; var kb = 1.0;
+  if (split) { ka = f32(max(ld(P.o_ocount + a), 1u)); kb = f32(max(ld(P.o_ocount + b), 1u)); }
+  let ima = va4.w * ka; let imb = vb4.w * kb;
+  let A0 = S(a, S_I0) * ka; let A1 = S(a, S_I1) * ka; let B0 = S(b, S_I0) * kb; let B1 = S(b, S_I1) * kb;
   let tha = S(a, S_TH).xyz; let thb = S(b, S_TH).xyz;
   let dpab = S(b, S_DP).xyz - S(a, S_DP).xyz;
   let n4 = man[base + M_N]; let n = n4.xyz;
@@ -630,7 +641,9 @@ fn solve_man(m: u32, use_bias: bool) {
     else if (use_bias) { bias = max(P.bias_rate * s, -P.max_push); ms = P.mass_scale; is_ = P.imp_scale; }
     let vn = dot(vb - va, n) + dot(wb, rbxn) - dot(wa, raxn);
     let j0 = jn[k];
-    let nj = max(j0 - pb.w * ms * (vn + bias) - is_ * j0, 0.0);
+    var nm = pb.w;
+    if (split) { let kk = ima + imb + dot(raxn, imul(A0, A1, raxn)) + dot(rbxn, imul(B0, B1, rbxn)); nm = select(0.0, 1.0 / kk, kk > 0.0); }
+    let nj = max(j0 - nm * ms * (vn + bias) - is_ * j0, 0.0);
     let imp = nj - j0;
     jn[k] = nj; tot += nj;
     va -= n * (imp * ima); wa -= imul(A0, A1, raxn) * imp;
@@ -654,8 +667,15 @@ fn solve_man(m: u32, use_bias: bool) {
     ms = P.mass_scale; is_ = P.imp_scale;
   }
   let o1 = jt.x; let o2 = jt.y;
-  var j1 = o1 - fa4.w * ms * (v1 + b1) - is_ * o1;
-  var j2 = o2 - fb4.w * ms * (v2 + b2) - is_ * o2;
+  var tm1 = fa4.w; var tm2 = fb4.w; var twm = e04.w;
+  if (split) {
+    let k1 = ima + imb + dot(ca1, imul(A0, A1, ca1)) + dot(cb1, imul(B0, B1, cb1));
+    let k2 = ima + imb + dot(ca2, imul(A0, A1, ca2)) + dot(cb2, imul(B0, B1, cb2));
+    let kt = dot(n, imul(A0, A1, n)) + dot(n, imul(B0, B1, n));
+    tm1 = select(0.0, 1.0 / k1, k1 > 0.0); tm2 = select(0.0, 1.0 / k2, k2 > 0.0); twm = select(0.0, 1.0 / kt, kt > 0.0);
+  }
+  var j1 = o1 - tm1 * ms * (v1 + b1) - is_ * o1;
+  var j2 = o2 - tm2 * ms * (v2 + b2) - is_ * o2;
   let l2 = j1 * j1 + j2 * j2;
   if (l2 > lim * lim) { let kk = lim * inverseSqrt(max(l2, 1e-30)); j1 *= kk; j2 *= kk; stick = 0.0; }
   let d1 = j1 - o1; let d2 = j2 - o2;
@@ -664,15 +684,43 @@ fn solve_man(m: u32, use_bias: bool) {
   vb += pt * imb; wb += imul(B0, B1, cb1 * d1 + cb2 * d2);
   // twist
   let wl = lim * jt.w;
-  let jtw = clamp(jt.z - e04.w * dot(wb - wa, n), -wl, wl);
+  let jtw = clamp(jt.z - twm * dot(wb - wa, n), -wl, wl);
   let dtw = jtw - jt.z;
   wa -= imul(A0, A1, n) * dtw; wb += imul(B0, B1, n) * dtw;
   man[base + M_JT] = vec4f(j1, j2, jtw, jt.w);
   if (stick != hd.w) { man[base] = vec4f(hd.xyz, stick); }
   // the relax pass ends each sub-step: its normal impulses are what the sub-step applied
   if (!use_bias) { let o = man[base + M_OUT]; man[base + M_OUT] = vec4f(o.x, o.y + tot, o.zw); }
+  if (split) {
+    if (ima > 0.0) { acc_add(a, va - va0, wa - wa0); }
+    if (imb > 0.0) { acc_add(b, vb - vb0, wb - wb0); }
+    return;
+  }
   if (ima > 0.0) { setS(a, S_V, vec4f(va, ima)); setS(a, S_W, vec4f(wa, 0.0)); }
   if (imb > 0.0) { setS(b, S_V, vec4f(vb, imb)); setS(b, S_W, vec4f(wb, 0.0)); }
+}
+
+// fixed-point accumulation of velocity changes (there are no float atomics): 2^18 per m/s
+const ACC = 262144.0;
+fn acc_add(i: u32, dv: vec3f, dw: vec3f) {
+  let o = P.o_acc + i * 6u;
+  for (var k = 0u; k < 3u; k++) {
+    atomicAdd(&ints[o + k], bitcast<u32>(i32(round(dv[k] * ACC))));
+    atomicAdd(&ints[o + 3u + k], bitcast<u32>(i32(round(dw[k] * ACC))));
+  }
+}
+@compute @workgroup_size(64) fn ovf_apply(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x + 1u; if (i >= P.n1) { return; }
+  let c = ld(P.o_ocount + i); if (c == 0u) { return; }
+  let o = P.o_acc + i * 6u;
+  var dv = vec3f(0.0); var dw = vec3f(0.0);
+  for (var k = 0u; k < 3u; k++) {
+    dv[k] = f32(bitcast<i32>(atomicExchange(&ints[o + k], 0u))) / ACC;
+    dw[k] = f32(bitcast<i32>(atomicExchange(&ints[o + 3u + k], 0u))) / ACC;
+  }
+  let v4 = S(i, S_V); if (v4.w == 0.0) { return; }
+  let inv = 1.0 / f32(c);
+  setS(i, S_V, vec4f(v4.xyz + dv * inv, v4.w)); setS(i, S_W, vec4f(S(i, S_W).xyz + dw * inv, 0.0));
 }
 
 // restitution after the sub-steps (Box2D v3 style): points that approached faster than the threshold get
@@ -709,14 +757,20 @@ fn color_item(g: u32) -> u32 {
   if (g >= ld(P.o_ccount + c)) { return 0xffffffffu; }
   return ld(P.o_order + ld(P.o_cstart + c) + g);
 }
-@compute @workgroup_size(64) fn solve(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { solve_man(m, true); } }
-@compute @workgroup_size(64) fn relax(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { solve_man(m, false); } }
+@compute @workgroup_size(64) fn solve(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { solve_man(m, true, false); } }
+@compute @workgroup_size(64) fn relax(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { solve_man(m, false, false); } }
 @compute @workgroup_size(64) fn restitute(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { restitute_man(m); } }
 // overflow contacts (no free colour): one thread, in sequence
 fn ovf_range() -> vec2u { let c = P.color_limit; let s = ld(P.o_cstart + c); return vec2u(s, s + ld(P.o_ccount + c)); }
-@compute @workgroup_size(1) fn solve_ovf() { let r = ovf_range(); for (var k = r.x; k < r.y; k++) { solve_man(ld(P.o_order + k), true); } }
-@compute @workgroup_size(1) fn relax_ovf() { let r = ovf_range(); for (var k = r.x; k < r.y; k++) { solve_man(ld(P.o_order + k), false); } }
-@compute @workgroup_size(1) fn restitute_ovf() { let r = ovf_range(); for (var k = r.x; k < r.y; k++) { restitute_man(ld(P.o_order + k)); } }
+// overflow contacts (a body with more contacts than colours, e.g. a big falling piece): all in parallel,
+// with mass splitting; ovf_apply then averages the velocity changes per body
+fn ovf_item(g: u32) -> u32 { let r = ovf_range(); if (r.x + g >= r.y) { return 0xffffffffu; } return ld(P.o_order + r.x + g); }
+@compute @workgroup_size(64) fn solve_ovf(@builtin(global_invocation_id) g: vec3u) { let m = ovf_item(g.x); if (m != 0xffffffffu) { solve_man(m, true, true); } }
+@compute @workgroup_size(64) fn relax_ovf(@builtin(global_invocation_id) g: vec3u) { let m = ovf_item(g.x); if (m != 0xffffffffu) { solve_man(m, false, true); } }
+@compute @workgroup_size(1) fn restitute_ovf(@builtin(workgroup_id) wg: vec3u) {
+  if (wg.x != 0u) { return; }
+  let r = ovf_range(); for (var k = r.x; k < r.y; k++) { restitute_man(ld(P.o_order + k)); }
+}
 
 // ---------------------------------------------------------------- end of step, sleeping
 @compute @workgroup_size(64) fn finish(@builtin(global_invocation_id) g: vec3u) {
@@ -787,8 +841,7 @@ const WGSL_ARGS = WGSL.replace(/\/\/ -{10,} broad phase[\s\S]*$/, '') + /* wgsl 
   for (var c = 0u; c <= P.color_limit; c++) {
     let n = ld(P.o_ccount + c);
     st(P.o_cstart + c, run); run += n;
-    // the overflow bucket is one sequential thread: one workgroup if it holds anything
-    args[c * 3u] = select((n + 63u) / 64u, min(n, 1u), c == P.color_limit); args[c * 3u + 1u] = 1u; args[c * 3u + 2u] = 1u;
+    args[c * 3u] = (n + 63u) / 64u; args[c * 3u + 1u] = 1u; args[c * 3u + 2u] = 1u;
   }
 }
 `;
@@ -914,7 +967,7 @@ class GpuWorld {
     take('order', this.maxMan); take('mcolor', this.maxMan);
     take('t0', T); take('t1', T);
     take('pairs', 2 * this.maxPairs); take('bcount', cb1); take('bstart', cb1); take('bfill', cb1);
-    take('blist', 2 * this.maxMan); take('par', cb1); take('mint', cb1);
+    take('blist', 2 * this.maxMan); take('par', cb1); take('mint', cb1); take('ocount', cb1); take('acc', 6 * cb1);
     this.L = L; this.nInts = o;
 
     const bod = new Float32Array(cb1 * 20), sol = new Float32Array(cb1 * 24), shp = new Float32Array(cs1 * 32);
@@ -963,7 +1016,7 @@ class GpuWorld {
     const mod = await compile(WGSL, 'WGSL'), modA = await compile(WGSL_ARGS, 'WGSL args');
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep'];
+                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); })]);
@@ -995,7 +1048,8 @@ class GpuWorld {
     u[40] = L.blist; u[41] = L.par; u[42] = L.mint; u[43] = this.sleep ? 1 : 0;
     f[44] = 0.5; f[45] = 0.05; f[46] = 0.08; u[47] = this.ns1;
     u[48] = this.levels; u[49] = GROUND_MAT; f[50] = 0.01; f[51] = 0.02;
-    MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 52 + i * 4));
+    u[52] = L.ocount; u[53] = L.acc;
+    MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 56 + i * 4));
     return f;
   }
 
@@ -1006,7 +1060,7 @@ class GpuWorld {
     const L = this.L, cur = this.frame & 1;
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
     clr(0, 16); clr(L.gcount, this.G); clr(L.gfill, this.G); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
-    clr(L.bcount, this.n1); clr(L.bfill, this.n1);
+    clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (!this.n) { this.frame++; return; }
     const nb = Math.ceil(this.n / 64) || 1, nsh = Math.ceil(this.ns / 64) || 1;
     const stamp = this.ts && !this.qPending;
@@ -1033,7 +1087,9 @@ class GpuWorld {
       p.setPipeline(this.pl[k]);
       for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); }
       p.setBindGroup(1, this.bg1, [0]);
-      ind(p, k + '_ovf', C * 12);
+      if (k === 'restitute') { ind(p, 'restitute_ovf', C * 12); return; }
+      // overflow contacts: two Jacobi rounds with mass splitting
+      for (let it = 0; it < 2; it++) { ind(p, k + '_ovf', C * 12); run(p, 'ovf_apply', nb); }
     };
     for (let s = 0; s < this.substeps; s++) {
       run(p, 'integrate_warm', nb);
@@ -1241,11 +1297,14 @@ dMesh.setColorAt(0, new THREE.Color(0xffffff));   // creates the per-instance co
 scene.add(dMesh);
 const MATCOL = [0x9c9a94, 0x9a5a44, 0x6f7377, 0x7aa0b4, 0xd8d2c4, 0xcccccc, 0x777777, 0x9c9a94].map(c => new THREE.Color(c));
 const M4 = new THREE.Matrix4(), QQ = new THREE.Quaternion(), PP = new THREE.Vector3(), SS = new THREE.Vector3();
-let reading = false, debrisShapes = 0;
+let reading = false, debrisShapes = 0, pendingChunks = null, readGen = 0, blastGen = 0;
 function pullDebris() {
   if (!gpu || reading) return;
   reading = true;
+  const gen = blastGen;
   gpu.readPose(debrisFrom).then(r => {
+    // the tower mesh changes in the same frame as the debris that replaces it appears (no gap)
+    if (pendingChunks && gen === blastGen) { for (const k of pendingChunks) chunkMesh(k); pendingChunks = null; }
     const n = Math.min(MAXD, r.pose.length / 10);
     for (let k = 0; k < n; k++) {
       const o = k * 10;
@@ -1286,7 +1345,8 @@ function doBlast() {
   const t0 = performance.now();
   const nb = E.blast(p.x, p.y, p.z, radius);
   const { updates, bodies } = readLog();
-  for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) chunkMesh(k);
+  const dirty = []; for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) dirty.push(k);
+  if (gpu) { pendingChunks = (pendingChunks || []).concat(dirty); blastGen++; } else dirty.forEach(chunkMesh);
   const ms = performance.now() - t0;
   if (gpu) {
     for (const u of updates) {

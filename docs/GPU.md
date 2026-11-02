@@ -65,6 +65,17 @@ Each contact also records two values for the damage model (`readContacts`), whic
 - the total normal impulse J it applied during the step
 - the approach speed v at the start of the step
 
+## Bodies with many contacts
+
+A body can only take one contact per colour, and there are at most 31 colours. A big falling piece touching the ground, the remaining stumps and hundreds of crumbs has far more contacts than that. Those extra contacts used to be solved one at a time by a single GPU thread. That made the tower page freeze when a whole tower detached (3,306 bricks, about 2,200 extra contacts).
+
+Extra contacts are now solved in parallel by Jacobi iteration with mass splitting:
+- A body with k extra contacts acts as if it had 1/k of its mass in each of them.
+- The velocity changes are summed with fixed-point atomics and averaged per body.
+- Two rounds run per solve and per relax pass.
+
+The test (`plate`) drops a slab piece of 144 bricks, as one body, onto 144 blocks. 119 of its contacts are extra contacts, and it settles flat at 0.6249 m (expected 0.625), at rest.
+
 ## Sleeping
 
 A body counts as at rest when, over the last 0.5 s, both hold:
