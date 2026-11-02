@@ -107,6 +107,7 @@ const GATES = [
   { id: 'g20k4', name: 'GPU · pile of 20,000 bricks, 4 sub-steps', target: '< 5 ms' },
   { id: 'g20k12', name: 'GPU · pile of 20,000 bricks, 12 sub-steps', target: '< 5 ms' },
   { id: 'g50k12', name: 'GPU · pile of 50,000 bricks, 12 sub-steps', target: 'info' },
+  { id: 'gsettle', name: 'GPU · pile of 20,000 bricks after 10 s, sleeping on', target: 'info' },
 ];
 const $ = id => document.getElementById(id);
 const results = {};
@@ -276,12 +277,12 @@ function drawPose(pose, frame) {
 }
 async function runGpu() {
   const dev = await gpuDevice().catch(() => null);
-  if (!dev) { for (const id of ['gstack', 'g2k12', 'g20k4', 'g20k12', 'g50k12']) results[id] = { ok: false, text: 'WebGPU not available' }; renderRows(); return; }
+  if (!dev) { for (const id of ['gstack', 'g2k12', 'g20k4', 'g20k12', 'g50k12', 'gsettle']) results[id] = { ok: false, text: 'WebGPU not available' }; renderRows(); return; }
   // stacking gate on the GPU
   $('st').textContent = 'GPU stacking gate…';
   E.stack_setup(20, 12, 0);
   let pose = grab(); const top0 = pose[191];
-  let w = await GpuWorld.create(dev, pose, 1900, { substeps: 12 });
+  let w = await GpuWorld.create(dev, pose, 1900, { substeps: 12, sleep: false });
   for (let f = 0; f < 600; f += 10) {
     for (let k = 0; k < 10; k++) w.step(1 / 60);
     const r = await w.readPose(); drawPose(r.pose, f === 0); ov(`GPU stack · t ${((f + 10) / 60).toFixed(1)} s`); pose = r.pose;
@@ -296,7 +297,7 @@ async function runGpu() {
   for (const [id, n, sub] of [['g2k12', 2000, 12], ['g20k4', 20000, 4], ['g20k12', 20000, 12], ['g50k12', 50000, 12]]) {
     $('st').textContent = `GPU pile ${n.toLocaleString()}, ${sub} sub-steps…`;
     E.pile_setup(n, sub);
-    w = await GpuWorld.create(dev, grab(), 1900, { substeps: sub });
+    w = await GpuWorld.create(dev, grab(), 1900, { substeps: sub, sleep: false });
     const batches = [];
     let enc = 0;
     for (let f = 0; f < 180; f += 15) {
@@ -314,6 +315,27 @@ async function runGpu() {
     results[id] = { ok: id === 'g2k12' || id === 'g50k12' ? null : med < 5, text: `median ${med.toFixed(2)} ms, worst batch ${Math.max(...batches).toFixed(2)} ms · encode ${(enc / 180).toFixed(2)} ms · ${st.manifolds.toLocaleString()} contacts, ${st.colors} colours, ${st.overflow} overflow${g}` };
     w.destroy(); renderRows();
   }
+  // the realistic case: debris that has come to rest sleeps and costs (almost) nothing
+  $('st').textContent = 'GPU pile 20,000 settling with sleeping on…';
+  E.pile_setup(20000, 12);
+  w = await GpuWorld.create(dev, grab(), 1900, { substeps: 12, sleep: true });
+  for (let f = 0; f < 600; f += 30) {
+    for (let k = 0; k < 30; k++) w.step(1 / 60);
+    await dev.queue.onSubmittedWorkDone();
+    const r = await w.readPose(); drawPose(r.pose, f === 0);
+    ov(`GPU pile 20,000 settling · t ${((f + 30) / 60).toFixed(1)} s · ${w.stats.awake.toLocaleString()} awake`);
+  }
+  const tb = [];
+  for (let f = 0; f < 90; f += 15) {
+    const t0 = performance.now();
+    for (let k = 0; k < 15; k++) w.step(1 / 60);
+    await dev.queue.onSubmittedWorkDone();
+    tb.push((performance.now() - t0) / 15);
+  }
+  await new Promise(r => setTimeout(r, 50));
+  const gs = w.gpuMs ? ' · GPU ' + Object.entries(w.gpuMs).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(', ') + ' ms' : '';
+  results.gsettle = { ok: null, text: `median ${pct(tb, .5).toFixed(2)} ms · ${w.stats.awake.toLocaleString()} of 20,000 awake · ${w.stats.manifolds.toLocaleString()} contacts${gs}` };
+  w.destroy(); renderRows();
 }
 
 $('copy').addEventListener('click', () => {

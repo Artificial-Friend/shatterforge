@@ -21,12 +21,13 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ['box', 's
     dev.addEventListener('uncapturederror', e => console.log('GPU error: ' + e.error.message));
     const grab = () => { const n = E.body_count(); return new Float32Array(E.memory.buffer, E.pose(), n * 10).slice(); };
     const out = {};
-    const run = async (poses, frames, sub) => {
-      const w = await GpuWorld.create(dev, poses, 1900, { substeps: sub });
+    const run = async (poses, frames, sub, sleep = false) => {
+      const w = await GpuWorld.create(dev, poses, 1900, { substeps: sub, sleep });
       const t0 = performance.now();
       for (let f = 0; f < frames; f++) { w.step(1 / 60); if (f % 20 === 19) await dev.queue.onSubmittedWorkDone(); }
       await dev.queue.onSubmittedWorkDone();
       const ms = (performance.now() - t0) / frames;
+      await new Promise(r => setTimeout(r, 50)); w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await new Promise(r => setTimeout(r, 50));
       const r = await w.readPose(); r.stats = w.stats; r.ms = ms; r.gpu = w.gpuMs; w.destroy(); return r;
     };
     const speed = (v, i) => Math.hypot(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
@@ -50,6 +51,25 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ['box', 's
       const r = await run(f, 600, 12);
       let maxy = 0, miny = 9, mv = 0; for (let k = 0; k < n; k++) { maxy = Math.max(maxy, r.pose[k * 10 + 1]); miny = Math.min(miny, r.pose[k * 10 + 1]); mv = Math.max(mv, speed(r.vel, k)); }
       out.column = { maxy, miny, maxv: mv };
+    }
+    if (scenes.includes('sleep')) {
+      // a small pile settles and sleeps; a box dropped on it wakes what it hits, then everything sleeps again
+      E.pile_setup(300, 12);
+      const poses = grab();
+      const w = await GpuWorld.create(dev, poses, 1900, { substeps: 12, sleep: true });
+      const awakeAt = [];
+      for (let f = 1; f <= 480; f++) { w.step(1 / 60); if (f % 60 === 0) { await dev.queue.onSubmittedWorkDone(); await new Promise(r => setTimeout(r, 30)); awakeAt.push(w.stats.awake); } }
+      const settled = await w.readPose();
+      w.destroy();
+      // drop a box from 3 m onto the top of the settled pile
+      let top = 0, ti = 0; for (let i = 0; i < 300; i++) if (settled.pose[i * 10 + 1] > top) { top = settled.pose[i * 10 + 1]; ti = i; }
+      const p2 = new Float32Array(301 * 10); p2.set(settled.pose);
+      p2.set([settled.pose[ti * 10], top + 3, settled.pose[ti * 10 + 2], 0, 0, 0, 1, 0.25, 0.25, 0.25], 3000);
+      const w2 = await GpuWorld.create(dev, p2, 1900, { substeps: 12, sleep: true });
+      const awake2 = [];
+      for (let f = 1; f <= 600; f++) { w2.step(1 / 60); if (f % 30 === 0) { await dev.queue.onSubmittedWorkDone(); await new Promise(r => setTimeout(r, 30)); awake2.push(w2.stats.awake); } }
+      const fin = await w2.readPose(); w2.destroy();
+      out.sleep = { awake_per_s: awakeAt, after_drop_awake_per_half_s: awake2, dropped_box_y: fin.pose[3001], top_before: top };
     }
     if (scenes.includes('pile')) {
       E.pile_setup(2000, 4);
