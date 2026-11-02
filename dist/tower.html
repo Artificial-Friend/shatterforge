@@ -1488,7 +1488,7 @@ function addPieces(list, xf, vel, cool) {
   list.forEach((b, k) => {
     if (b.id < 0) return;
     const idx = first + k + 1, gb = gpu.bodies[idx - 1];
-    bodyInfo.set(idx, { piece: b.id, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: performance.now() + (cool || 0) });
+    bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: performance.now() + (cool || 0) });
   });
 }
 function remeshDirty() {
