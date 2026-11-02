@@ -17,6 +17,8 @@ pub struct Body {
     pub inv_i: V3,
     pub awake: bool,
     pub sleep_t: f32,
+    /// pose when the sleep timer last restarted: a body sleeps when it stays near it, not when it is momentarily slow
+    pub sleep_p: V3, pub sleep_q: Quat,
     // per-step scratch
     rot: M3, aabb_min: V3, aabb_max: V3,
 }
@@ -84,17 +86,22 @@ pub struct Params {
     pub sleep_lin: f32,
     pub sleep_ang: f32,
     pub sleep_time: f32,
+    /// how far (m) and how much (rad) a body may wander and still count as at rest
+    pub sleep_dist: f32, pub sleep_rot: f32,
     pub allow_sleep: bool,
     pub cell: f32,
     /// keep the soft-spring impulse leak of the soft-step formulation (true = Box2D v3 exactly; false =
     /// soft push-out without the leak, so loaded contacts do not sag in proportion to the load above them)
     pub leak: f32,
     pub anchor: bool,
+    /// friction anchor: fastest correction of slip (m/s) and the slip it tolerates (m)
+    pub anchor_push: f32,
+    pub anchor_slop: f32,
 }
 impl Default for Params {
     fn default() -> Self {
         Params { gravity: v3(0.0, -9.81, 0.0), substeps: 12, contact_hertz: 0.0, damping_ratio: 10.0, max_push: 3.0,
-                 friction: 0.6, speculative: 0.02, sleep_lin: 0.05, sleep_ang: 0.08, sleep_time: 0.5, allow_sleep: true, cell: 1.0, leak: 1.0, anchor: true }
+                 friction: 0.6, speculative: 0.02, sleep_lin: 0.05, sleep_ang: 0.08, sleep_time: 0.5, sleep_dist: 0.01, sleep_rot: 0.02, allow_sleep: true, cell: 1.0, leak: 1.0, anchor: true, anchor_push: 3.0, anchor_slop: 0.0 }
     }
 }
 
@@ -135,7 +142,7 @@ impl World {
             let (x2, y2, z2) = (4.0 * h.x * h.x, 4.0 * h.y * h.y, 4.0 * h.z * h.z);
             (1.0 / m, v3(12.0 / (m * (y2 + z2)), 12.0 / (m * (x2 + z2)), 12.0 / (m * (x2 + y2))))
         } else { (0.0, V3::ZERO) };
-        self.bodies.push(Body { p, q, v: V3::ZERO, w: V3::ZERO, h, inv_m, inv_i, awake: m > 0.0, sleep_t: 0.0,
+        self.bodies.push(Body { p, q, v: V3::ZERO, w: V3::ZERO, h, inv_m, inv_i, awake: m > 0.0, sleep_t: 0.0, sleep_p: p, sleep_q: q,
                                 rot: q.to_m3(), aabb_min: p, aabb_max: p });
         (self.bodies.len() - 1) as u32
     }
@@ -256,6 +263,7 @@ impl World {
 
     fn solve(&mut self, use_bias: bool, inv_h: f32, bias_rate: f32, mass_scale: f32, imp_scale: f32) {
         let max_push = self.prm.max_push;
+        let (anchor_push, anchor_slop) = (self.prm.anchor_push, self.prm.anchor_slop);
         let sb = &mut self.sb;
         for m in self.man.iter_mut() {
             let (sa, sbi) = (m.sa as usize, m.sb as usize);
@@ -289,7 +297,9 @@ impl World {
             let (b1, b2, ms, is) = if anchored {
                 let e1 = m.e0.dot(t1) + dpab.dot(t1) + thb.dot(m.cb1) - tha.dot(m.ca1);
                 let e2 = m.e0.dot(t2) + dpab.dot(t2) + thb.dot(m.cb2) - tha.dot(m.ca2);
-                ((bias_rate * e1).max(-max_push).min(max_push), (bias_rate * e2).max(-max_push).min(max_push), mass_scale, imp_scale)
+                let (ap, slop) = (anchor_push, anchor_slop);
+                let sl = |e: f32| if e > slop { e - slop } else if e < -slop { e + slop } else { 0.0 };
+                ((bias_rate * sl(e1)).max(-ap).min(ap), (bias_rate * sl(e2)).max(-ap).min(ap), mass_scale, imp_scale)
             } else { (0.0, 0.0, 1.0, 0.0) };
             let (o1, o2) = (m.jt1, m.jt2);
             let mut j1 = o1 - m.tm1 * ms * (v1 + b1) - is * o1;
@@ -325,7 +335,12 @@ impl World {
         let (l2, a2) = (self.prm.sleep_lin * self.prm.sleep_lin, self.prm.sleep_ang * self.prm.sleep_ang);
         for b in self.bodies.iter_mut() {
             if !b.awake { continue; }
-            if b.v.len2() < l2 && b.w.len2() < a2 { b.sleep_t += dt } else { b.sleep_t = 0.0 }
+            // still = slow on average: it has stayed within a small distance and angle of where it was when the
+            // timer restarted (solver chatter of a few cm/s goes nowhere and must not keep a pile awake)
+            let dq = b.q.mul(b.sleep_q.conj());
+            let ang = 2.0 * sqrt(dq.x * dq.x + dq.y * dq.y + dq.z * dq.z);
+            let near = (b.p - b.sleep_p).len2() < self.prm.sleep_dist * self.prm.sleep_dist && ang < self.prm.sleep_rot;
+            if near && b.v.len2() < 100.0 * l2 && b.w.len2() < 100.0 * a2 { b.sleep_t += dt } else { b.sleep_t = 0.0; b.sleep_p = b.p; b.sleep_q = b.q; }
         }
         if !self.prm.allow_sleep { return; }
         // island minimum sleep time, stored on the root
@@ -396,7 +411,7 @@ impl World {
     fn wake(&mut self, i: u32) {
         let b = &mut self.bodies[i as usize];
         if b.awake || b.inv_m == 0.0 { return; }
-        b.awake = true; b.sleep_t = 0.0;
+        b.awake = true; b.sleep_t = 0.0; b.sleep_p = b.p; b.sleep_q = b.q;
         // it joins the solver from the next step; this step it is treated as static
     }
 
