@@ -41,7 +41,8 @@ struct Params {
   o_blist: u32, o_par: u32, o_mint: u32, allow_sleep: u32,
   sleep_time: f32, sleep_lin: f32, sleep_ang: f32, ns1: u32,
   levels: u32, ground_mat: u32, sleep_dist: f32, sleep_rot: f32,
-  o_ocount: u32, o_acc: u32, pad2: u32, pad3: u32,
+  o_ocount: u32, o_acc: u32, o_events: u32, max_events: u32,
+  ev_speed: f32, ev_energy: f32, pad4: u32, pad5: u32,
   mat: array<vec4f, 8>,   // friction, restitution, -, -
 }
 struct ColorU { c: u32 }
@@ -66,7 +67,7 @@ const M_N = 1u; const M_FA = 2u; const M_FB = 3u; const M_E0 = 4u; const M_JT = 
 const M_RV = 15u; const M_OUT = 16u;
 // cold record (6 vec4): 4 x local anchor on a; friction anchor on a + shape a; on b + shape b
 const CS = 6u;
-const C_MAN = 0u; const C_OVF = 1u; const C_COLORS = 2u; const C_PAIRS = 3u; const C_DROP = 4u; const C_NPAIR = 5u; const C_AWAKE = 6u; const C_LEVEL = 8u;   // shapes per grid level: 8..11
+const C_MAN = 0u; const C_OVF = 1u; const C_COLORS = 2u; const C_PAIRS = 3u; const C_DROP = 4u; const C_NPAIR = 5u; const C_AWAKE = 6u; const C_EVENTS = 7u; const C_LEVEL = 8u;   // shapes per grid level: 8..11
 
 @group(0) @binding(0) var<storage, read_write> bod: array<vec4f>;
 @group(0) @binding(1) var<storage, read_write> ints: array<atomic<u32>>;
@@ -716,6 +717,25 @@ fn ovf_item(g: u32) -> u32 { let r = ovf_range(); if (r.x + g >= r.y) { return 0
 }
 
 // ---------------------------------------------------------------- end of step, sleeping
+// hard impacts this step, for the damage model: [body a, body b, shape a, shape b, point xyz, normal xyz,
+// impulse (N s), approach speed (m/s)] as raw words
+@compute @workgroup_size(64) fn events(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let m = P.cur_base + mi; let base = m * MS;
+  let out = man[base + M_OUT];
+  if (out.z < P.ev_speed || 0.5 * out.y * out.z < P.ev_energy) { return; }
+  let k = atomicAdd(&ints[C_EVENTS], 1u); if (k >= P.max_events) { return; }
+  let hd = man[base]; let a = u32(hd.x); let cnt = u32(hd.z);
+  var pt = vec3f(0.0); for (var q = 0u; q < cnt; q++) { pt += man[base + M_PT + 2u * q].xyz; }
+  pt = pt / f32(max(cnt, 1u)) + B(a, F_P).xyz;
+  let n = man[base + M_N].xyz;
+  let o = P.o_events + k * 12u;
+  st(o, a); st(o + 1u, u32(hd.y)); st(o + 2u, u32(cold[m * CS + 4u].w)); st(o + 3u, u32(cold[m * CS + 5u].w));
+  st(o + 4u, bitcast<u32>(pt.x)); st(o + 5u, bitcast<u32>(pt.y)); st(o + 6u, bitcast<u32>(pt.z));
+  st(o + 7u, bitcast<u32>(n.x)); st(o + 8u, bitcast<u32>(n.y)); st(o + 9u, bitcast<u32>(n.z));
+  st(o + 10u, bitcast<u32>(out.y)); st(o + 11u, bitcast<u32>(out.z));
+}
+
 @compute @workgroup_size(64) fn finish(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.n1) { return; }
   let v4 = S(i, S_V); if (v4.w == 0.0) { return; }
@@ -911,6 +931,7 @@ class GpuWorld {
     take('t0', T); take('t1', T);
     take('pairs', 2 * this.maxPairs); take('bcount', cb1); take('bstart', cb1); take('bfill', cb1);
     take('blist', 2 * this.maxMan); take('par', cb1); take('mint', cb1); take('ocount', cb1); take('acc', 6 * cb1);
+    this.maxEvents = 128; take('events', 12 * this.maxEvents);
     this.L = L; this.nInts = o;
 
     const bod = new Float32Array(cb1 * 20), sol = new Float32Array(cb1 * 24), shp = new Float32Array(cs1 * 32);
@@ -935,7 +956,9 @@ class GpuWorld {
     const cu = new Uint32Array(64 * 33); for (let c = 0; c < 33; c++) cu[c * 64] = c;
     this.colBuf = buf(256 * 33, U.UNIFORM | U.COPY_DST, cu);
     this.argBuf = buf(128 * 4, U.STORAGE | U.INDIRECT);
-    this.statBuf = buf(64, U.COPY_DST | U.MAP_READ);
+    this.evSpeed = opt.eventSpeed ?? 2.0; this.evEnergy = opt.eventEnergy ?? 0;   // events off unless asked for
+    this.statBuf = buf(64 + 48 * 128, U.COPY_DST | U.MAP_READ);
+    this.events = [];
     this.stats = { manifolds: 0, overflow: 0, colors: 0, pairs: 0, dropped: 0, candidates: 0, awake: n };
     this.statPending = false;
 
@@ -959,7 +982,7 @@ class GpuWorld {
     const mod = await compile(WGSL, 'WGSL'), modA = await compile(WGSL_ARGS, 'WGSL args');
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply'];
+                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); })]);
@@ -991,8 +1014,9 @@ class GpuWorld {
     u[40] = L.blist; u[41] = L.par; u[42] = L.mint; u[43] = this.sleep ? 1 : 0;
     f[44] = 0.5; f[45] = 0.05; f[46] = 0.08; u[47] = this.ns1;
     u[48] = this.levels; u[49] = GROUND_MAT; f[50] = 0.01; f[51] = 0.02;
-    u[52] = L.ocount; u[53] = L.acc;
-    MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 56 + i * 4));
+    u[52] = L.ocount; u[53] = L.acc; u[54] = L.events; u[55] = this.maxEvents;
+    f[56] = this.evSpeed; f[57] = this.evEnergy;
+    MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 60 + i * 4));
     return f;
   }
 
@@ -1042,6 +1066,7 @@ class GpuWorld {
     }
     colors('restitute');
     run(p, 'finish', nb);
+    if (this.evEnergy > 0) ind(p, 'events', 96 * 4);
     p.end();
     if (this.sleep) { p = pass('sleep'); ind(p, 'uf_union', 96 * 4); run(p, 'uf_min', nb); run(p, 'uf_sleep', nb); p.end(); }
     if (stamp) {
@@ -1050,7 +1075,11 @@ class GpuWorld {
       enc.copyBufferToBuffer(this.qBuf, 0, this.qRead, 0, 16 * k);
       this.qCopied = k;
     } else this.qCopied = 0;
-    if (!this.statPending) { enc.copyBufferToBuffer(this.intBuf, 0, this.statBuf, 0, 64); this.statCopied = true; } else this.statCopied = false;
+    if (!this.statPending) {
+      enc.copyBufferToBuffer(this.intBuf, 0, this.statBuf, 0, 64);
+      if (this.evEnergy > 0) enc.copyBufferToBuffer(this.intBuf, L.events * 4, this.statBuf, 64, 48 * this.maxEvents);
+      this.statCopied = true;
+    } else this.statCopied = false;
     this.frame++;
   }
 
@@ -1085,6 +1114,16 @@ class GpuWorld {
     this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, mat, 0, 0, ...lp, 0, 0, 0, 0, 1, ...half, 0]));
     return slot;
   }
+  // Retire a body: it stops moving and colliding (its slot is not reused).
+  killBody(body) {
+    const b = this.bodies[body - 1]; if (!b || b.dead) return;
+    b.dead = true;
+    this.shapes.forEach((s, k) => { if (s && s.body === body && !s.dead) this.killShape(k + 1); });
+    this.device.queue.writeBuffer(this.bodBuf, body * 80, new Float32Array([0, -1000, 0, 0]));
+    this.device.queue.writeBuffer(this.bodBuf, body * 80 + 48, new Float32Array([1, 0, -1000, 0]));
+  }
+  // Take the impact events collected since the last call.
+  takeEvents() { const e = this.events; this.events = []; return e; }
   killShape(slot) {
     const s = this.shapes[slot - 1]; if (!s) return;
     s.dead = true;
@@ -1117,9 +1156,17 @@ class GpuWorld {
     if (!this.statCopied || this.statPending) return;
     this.statPending = true;
     this.statBuf.mapAsync(GPUMapMode.READ).then(() => {
-      const u = new Uint32Array(this.statBuf.getMappedRange().slice(0));
+      const raw = this.statBuf.getMappedRange().slice(0);
       this.statBuf.unmap();
-      this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6] };
+      const u = new Uint32Array(raw), f = new Float32Array(raw);
+      this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7] };
+      if (this.evEnergy > 0) {
+        const n = Math.min(u[7], this.maxEvents);
+        for (let k = 0; k < n; k++) {
+          const o = 16 + k * 12;
+          this.events.push({ a: u[o], b: u[o + 1], sa: u[o + 2], sb: u[o + 3], p: [f[o + 4], f[o + 5], f[o + 6]], n: [f[o + 7], f[o + 8], f[o + 9]], impulse: f[o + 10], approach: f[o + 11] });
+        }
+      }
       this.colorLimit = Math.min(31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
       this.statPending = false;
     }, () => { this.statPending = false; });

@@ -20,6 +20,8 @@ pub mod mat {
 pub const F_ALIVE: u8 = 1;
 pub const F_INFILL: u8 = 2;
 pub const F_DYNAMIC: u8 = 4;
+/// cast monolithically with its neighbours (stair flights): its joints are not sections for bending
+pub const F_MONO: u8 = 8;
 
 /// Spatial index: each brick sits in exactly one cell, the cell holding its min corner, at the finest of four
 /// levels (1, 4, 16, 64 m) whose cell is at least as large as the brick. A query visits, per level, the cells
@@ -119,7 +121,10 @@ impl Bricks {
         let n = self.len();
         let mut mark = alloc::vec![0u8; n];   // 0 unvisited, 1 grounded, 2 assigned to a piece
         let mut stack: Vec<u32> = Vec::new();
-        for i in 0..n as u32 { if self.alive(i) && self.y[i as usize] <= 0 { mark[i as usize] = 1; stack.push(i); } }
+        for i in 0..n as u32 {
+            if !self.alive(i) || self.flags[i as usize] & F_DYNAMIC != 0 { mark[i as usize] = 1; continue; }
+            if self.y[i as usize] <= 0 { mark[i as usize] = 1; stack.push(i); }
+        }
         while let Some(i) = stack.pop() {
             let mut j = self.jhead[i as usize];
             while j != NONE { let o = self.joint_other(j, i); if mark[o as usize] == 0 { mark[o as usize] = 1; stack.push(o); } j = self.joint_next(j, i); }
@@ -182,7 +187,8 @@ impl Bricks {
                 let mut i = match self.cells.get(&ckey(l, [cx, cy, cz])) { Some(&h) => h, None => continue };
                 while i != NONE {
                     let iu = i as usize;
-                    if self.flags[iu] & F_ALIVE != 0 {
+                    // the static world only: bricks of falling pieces (dynamic) live in the physics
+                    if self.flags[iu] & (F_ALIVE | F_DYNAMIC) == F_ALIVE {
                         let mn = [self.x[iu] as i32, self.y[iu] as i32, self.z[iu] as i32];
                         let mx = [mn[0] + self.sx[iu] as i32, mn[1] + self.sy[iu] as i32, mn[2] + self.sz[iu] as i32];
                         let ok = (0..3).all(|k| if touch { mn[k] <= max[k] && mx[k] >= min[k] } else { mn[k] < max[k] && mx[k] > min[k] });
@@ -318,11 +324,16 @@ impl Bricks {
     /// Split every brick touching the sphere (centre and radius in ticks) until none inside is larger than
     /// `target` ticks on any axis. Returns the number of splits.
     pub fn refine_sphere(&mut self, c: [f32; 3], r: f32, target: i32) -> usize {
-        let target = target.max(1);
         let mut work = Vec::new();
         let min = [floor_i(c[0] - r), floor_i(c[1] - r), floor_i(c[2] - r)];
         let max = [floor_i(c[0] + r) + 1, floor_i(c[1] + r) + 1, floor_i(c[2] + r) + 1];
         self.query(min, max, false, &mut work);
+        self.refine_bricks(work, c, r, target, &mut Vec::new())
+    }
+
+    /// Refine the given bricks (and their split-off parts) inside the sphere; new bricks go to `created`.
+    pub fn refine_bricks(&mut self, mut work: Vec<u32>, c: [f32; 3], r: f32, target: i32, created: &mut Vec<u32>) -> usize {
+        let target = target.max(1);
         let mut splits = 0;
         while let Some(b) = work.pop() {
             let tb = self.tbox(b);
@@ -334,6 +345,7 @@ impl Bricks {
             let at = self.split_point(b, ax);
             let n = self.split(b, ax, at);
             splits += 1;
+            created.push(n);
             work.push(b); work.push(n);
         }
         splits

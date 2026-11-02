@@ -45,7 +45,9 @@ pub fn element(e: u16) -> Element {
     let (material, paint, infill) = match e {
         SLAB => (mat::CONCRETE, 0, false),
         COLUMN => (mat::CONCRETE, 1, false),
-        SPANDREL | HEADER | MULLION | PARAPET => (mat::CONCRETE, 2, false),
+        // precast cladding hung on the slab edges: carries its own weight only (non-structural)
+        SPANDREL | HEADER | MULLION => (mat::CONCRETE, 2, true),
+        PARAPET => (mat::CONCRETE, 2, false),
         GLASS => (mat::GLASS, 0, true),
         CORE => (mat::CONCRETE, 3, false),
         STAIR | STAIR2 | LANDING => (mat::CONCRETE, 4, false),
@@ -84,6 +86,7 @@ impl Storey {
             let ek = element(e);
             let b = out.add([x - HALF, y + self.y0, z - HALF], [x1 - x, y1 - y, z1 - z], ek.material, ek.paint, structure);
             if ek.infill { out.flags[b as usize] |= F_INFILL; }
+            if matches!(e, el::STAIR | el::STAIR2 | el::LANDING) { out.flags[b as usize] |= crate::brick::F_MONO; }
         } } }
     }
 }

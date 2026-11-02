@@ -9,6 +9,7 @@ pub mod tower;
 pub mod mesh;
 pub mod player;
 pub mod game;
+pub mod structure;
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]

@@ -80,3 +80,8 @@ fn game() -> &'static mut Game { unsafe { GAME.as_mut().unwrap() } }
 }
 #[no_mangle] pub extern "C" fn player_get(axis: u32) -> f32 { game().player.p.get(axis as usize) }
 #[no_mangle] pub extern "C" fn player_on_ground() -> u32 { game().player.on_ground as u32 }
+#[no_mangle] pub extern "C" fn structure_step(max_fail: u32) -> u32 { game().structure_step(max_fail as usize) as u32 }
+#[no_mangle] pub extern "C" fn structure_ratio() -> f32 { game().max_ratio }
+#[no_mangle] pub extern "C" fn piece_impact(piece: u32, px: f32, py: f32, pz: f32, dx: f32, dy: f32, dz: f32, impulse: f32, approach: f32, dt: f32) -> u32 {
+    game().impact(piece, v3(px, py, pz), v3(dx, dy, dz), impulse, approach, dt) as u32
+}

@@ -131,30 +131,93 @@ function pullDebris() {
       M4.compose(PP, QQ, SS); dMesh.setMatrixAt(k, M4); dMesh.setColorAt(k, MATCOL[r.mats[k]] || MATCOL[0]);
     }
     dMesh.count = n; debrisShapes = n;
+    lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
     dMesh.instanceMatrix.needsUpdate = true; if (dMesh.instanceColor) dMesh.instanceColor.needsUpdate = true;
     reading = false;
   }, () => { reading = false; });
 }
 
-// ---- blasting
+// ---- the static tower, falling pieces and their breaking
+// A piece's bricks stay in the engine in the tower's own frame; the GPU body moves them. For each body we keep
+// the map from the tower frame to the world at the body's creation (C, qs, P) and the body's pose then (p0, q0):
+//   world(x) = p(t) + R(q(t)) R(q0)^T (P + R(qs) (x - C) - p0)
+const bodyInfo = new Map();   // GPU body (1-based) -> { piece, C, qs, P, p0, q0, cool }
+let lastBodies = null, lastVel = null, lastAng = null;
+const mm = (A, B) => A.map((r, i) => [0, 1, 2].map(j => r[0] * B[0][j] + r[1] * B[1][j] + r[2] * B[2][j]));
+const mt = (A) => [0, 1, 2].map(i => [A[0][i], A[1][i], A[2][i]]);
+function bodyPose(idx) {
+  const b = gpu.bodies[idx - 1];
+  if (lastBodies && (idx - 1) * 7 + 7 <= lastBodies.length) { const o = (idx - 1) * 7; return { p: [lastBodies[o], lastBodies[o + 1], lastBodies[o + 2]], q: [lastBodies[o + 3], lastBodies[o + 4], lastBodies[o + 5], lastBodies[o + 6]] }; }
+  return { p: b.p, q: b.q };
+}
+function frameOf(idx) {
+  const inf = bodyInfo.get(idx), { p, q } = bodyPose(idx);
+  const Rt = mm(q2m(q), mt(q2m(inf.q0)));
+  const R = mm(Rt, q2m(inf.qs));
+  const d = [inf.P[0] - inf.p0[0], inf.P[1] - inf.p0[1], inf.P[2] - inf.p0[2]];
+  const rd = mv(Rt, d);
+  return { R, T: [p[0] + rd[0], p[1] + rd[1], p[2] + rd[2]], C: inf.C, p, q };
+}
+function readBodies(f, o) {
+  const nb = f[o++], bodies = [];
+  for (let k = 0; k < nb; k++) {
+    const id = f[o++], n = f[o++], boxes = [];
+    for (let q = 0; q < n; q++, o += 7) boxes.push(f.subarray(o, o + 7));
+    bodies.push({ id, boxes });
+  }
+  return { bodies, o };
+}
 function readLog() {
   const f = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
   let o = 0;
   const nu = f[o++], updates = [];
   for (let k = 0; k < nu; k++, o += 9) updates.push(f.subarray(o, o + 9));
-  const nb = f[o++], bodies = [];
-  for (let k = 0; k < nb; k++) {
-    const n = f[o++], shapes = [];
-    for (let q = 0; q < n; q++, o += 7) shapes.push(boxShape(f, o));
-    bodies.push({ shapes });
-  }
-  return { updates, bodies };
+  return { updates, bodies: readBodies(f, o).bodies };
 }
 function boxShape(f, o) {
   const [x, y, z, sx, sy, sz, mat] = [f[o], f[o + 1], f[o + 2], f[o + 3], f[o + 4], f[o + 5], f[o + 6]];
   return { p: [(x + sx / 2) * TICK, (y + sy / 2) * TICK, (z + sz / 2) * TICK], q: [0, 0, 0, 1], h: [sx * TICK / 2, sy * TICK / 2, sz * TICK / 2], mat };
 }
-let lastBlast = '';
+function applyStatic(updates) {
+  for (const u of updates) {
+    const [idx, alive] = [u[0], u[1]];
+    const s = boxShape(u, 2);
+    if (alive) slots.set(idx, gpu.setStaticShape(slots.get(idx) ?? null, 1, s.p, s.h, s.mat));
+    else if (slots.has(idx)) { gpu.killShape(slots.get(idx)); slots.delete(idx); }
+  }
+}
+// Add bodies whose boxes are in the tower frame. xf: tower frame -> world { R, T, C } (identity when absent);
+// vel(c): the velocity a body starts with at world point c, and its spin.
+function addPieces(list, xf, vel, cool) {
+  if (!gpu || !list.length) return;
+  const room = gpu.capB - gpu.n;
+  list = list.slice(0, room);
+  const R = xf ? xf.R : [[1, 0, 0], [0, 1, 0], [0, 0, 1]], qs = xf ? m2q(R) : [0, 0, 0, 1], C = xf ? xf.C : [0, 0, 0], T = xf ? xf.T : [0, 0, 0];
+  const bodies = list.map(b => {
+    let m = 0, c = [0, 0, 0];
+    const shapes = b.boxes.map(bx => {
+      const s = boxShape(bx, 0);
+      const w = mv(R, [s.p[0] - C[0], s.p[1] - C[1], s.p[2] - C[2]]);
+      s.p = [T[0] + w[0], T[1] + w[1], T[2] + w[2]]; s.q = qs;
+      const vol = s.h[0] * s.h[1] * s.h[2]; m += vol; for (let k = 0; k < 3; k++) c[k] += vol * s.p[k];
+      return s;
+    });
+    c = c.map(x => x / m);
+    const v = vel ? vel(c, b) : { v: [0, 0, 0], w: [0, 0, 0] };
+    return { shapes, v: v.v, w: v.w };
+  });
+  const first = gpu.addBodies(bodies);
+  list.forEach((b, k) => {
+    if (b.id < 0) return;
+    const idx = first + k + 1, gb = gpu.bodies[idx - 1];
+    bodyInfo.set(idx, { piece: b.id, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: performance.now() + (cool || 0) });
+  });
+}
+function remeshDirty() {
+  const dirty = []; for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) dirty.push(k);
+  if (gpu) { pendingChunks = (pendingChunks || []).concat(dirty); blastGen++; } else dirty.forEach(chunkMesh);
+}
+let lastBlast = '', structPending = false, structRounds = 0, failedJoints = 0, breaks = 0;
 function doBlast() {
   const d = new THREE.Vector3(); cam.getWorldDirection(d);
   const o = cam.position;
@@ -162,32 +225,72 @@ function doBlast() {
   if (t < 0) return;
   const p = o.clone().addScaledVector(d, t + 0.05);
   const t0 = performance.now();
-  const nb = E.blast(p.x, p.y, p.z, radius);
+  E.blast(p.x, p.y, p.z, radius);
   const { updates, bodies } = readLog();
-  const dirty = []; for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) dirty.push(k);
-  if (gpu) { pendingChunks = (pendingChunks || []).concat(dirty); blastGen++; } else dirty.forEach(chunkMesh);
+  remeshDirty();
   const ms = performance.now() - t0;
   if (gpu) {
-    for (const u of updates) {
-      const [idx, alive] = [u[0], u[1]];
-      const s = boxShape(u, 2);
-      if (alive) slots.set(idx, gpu.setStaticShape(slots.get(idx) ?? null, 1, s.p, s.h, s.mat));
-      else if (slots.has(idx)) { gpu.killShape(slots.get(idx)); slots.delete(idx); }
-    }
+    applyStatic(updates);
     // the hit knocks the crumbled material out along the shot (2-4 m/s, a little spread); pieces that only
     // lost their support start at rest
-    for (const b of bodies) if (b.shapes.length === 1) {
+    addPieces(bodies, null, (c, b) => {
+      if (b.id >= 0) return { v: [0, 0, 0], w: [0, 0, 0] };
       const s = 2 + 2 * Math.random();
-      b.v = [d.x * s + (Math.random() - 0.5), d.y * s + (Math.random() - 0.5), d.z * s + (Math.random() - 0.5)];
-      b.w = [(Math.random() - 0.5) * 6, (Math.random() - 0.5) * 6, (Math.random() - 0.5) * 6];
-    }
-    let room = gpu.capB - gpu.n;
-    const fit = bodies.slice(0, room);
-    if (fit.length) gpu.addBodies(fit);
+      return { v: [d.x * s + (Math.random() - 0.5), d.y * s + (Math.random() - 0.5), d.z * s + (Math.random() - 0.5)], w: [0, 1, 2].map(() => (Math.random() - 0.5) * 6) };
+    });
   }
-  const pieces = bodies.filter(b => b.shapes.length > 1).length;
+  const pieces = bodies.filter(b => b.id >= 0).length;
   lastActive = performance.now();
+  structPending = true;
   lastBlast = `${bodies.length - pieces} crumbs, ${pieces} pieces · ${ms.toFixed(1)} ms`;
+}
+// the standing structure under its own weight: overloaded joints fail and cracks open, one round per frame
+function structureRound() {
+  const t0 = performance.now();
+  const n = E.structure_step(48);
+  structRounds++;
+  if (n === 0) { structPending = false; return; }
+  failedJoints += n;
+  const { updates, bodies } = readLog();
+  remeshDirty();
+  if (gpu) { applyStatic(updates); addPieces(bodies, null, null, 150); }
+  lastActive = performance.now();
+  lastBlast = `structure: ${n} failures this round (${(performance.now() - t0).toFixed(0)} ms)`;
+}
+// hard impacts break falling pieces: crushing at the contact, cracking where the impact loads exceed strength
+function impacts() {
+  const evs = gpu.takeEvents();
+  if (!evs.length) return;
+  const now = performance.now(), best = new Map();
+  for (const e of evs) for (const [idx, sgn] of [[e.a, -1], [e.b, 1]]) {
+    const inf = bodyInfo.get(idx);
+    if (!inf || inf.cool > now) continue;
+    const score = e.impulse * e.approach;
+    if (!best.has(idx) || best.get(idx).score < score) best.set(idx, { e, sgn, score });
+  }
+  let done = 0;
+  for (const [idx, { e, sgn }] of best) {
+    if (done++ >= 4) break;
+    const inf = bodyInfo.get(idx), xf = frameOf(idx);
+    // world -> tower frame
+    const Rt = mt(xf.R);
+    const w = [e.p[0] - xf.T[0], e.p[1] - xf.T[1], e.p[2] - xf.T[2]];
+    const sp = mv(Rt, w).map((v, k) => v + xf.C[k]);
+    const sd = mv(Rt, [sgn * e.n[0], sgn * e.n[1], sgn * e.n[2]]);
+    const nb = E.piece_impact(inf.piece, sp[0], sp[1], sp[2], sd[0], sd[1], sd[2], e.impulse, e.approach, 1 / 60);
+    if (!nb) continue;
+    const f = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
+    const { bodies } = readBodies(f, 0);
+    // the pieces carry on with the velocity the body had at their place
+    const o = (idx - 1) * 3;
+    const v0 = lastVel ? [lastVel[o], lastVel[o + 1], lastVel[o + 2]] : [0, 0, 0], w0 = lastAng ? [lastAng[o], lastAng[o + 1], lastAng[o + 2]] : [0, 0, 0];
+    gpu.killBody(idx); bodyInfo.delete(idx);
+    addPieces(bodies, xf, (c) => {
+      const r = [c[0] - xf.p[0], c[1] - xf.p[1], c[2] - xf.p[2]];
+      return { v: [v0[0] + w0[1] * r[2] - w0[2] * r[1], v0[1] + w0[2] * r[0] - w0[0] * r[2], v0[2] + w0[0] * r[1] - w0[1] * r[0]], w: w0.slice() };
+    }, 120);
+    breaks++;
+  }
 }
 
 // ---- input
@@ -231,12 +334,14 @@ function frame(now) {
     E.player_step(dt, w.x, w.y, w.z, keys.has('Space') ? 1 : 0, fly ? 1 : 0);
     cam.position.set(E.player_get(0), E.player_get(1) + 1.65, E.player_get(2));
     cam.rotation.set(pitch, yaw, 0);
+    if (structPending && !physicsPaused) structureRound();
     // physics runs while anything is awake (and briefly after a blast, before the first stats arrive)
     if (gpu && !physicsPaused && (gpu.stats.awake > 0 || now - lastActive < 2000)) {
       acc += dt;
       let n = 0; while (acc >= 1 / 60 && n < 2) { gpu.step(1 / 60); acc -= 1 / 60; n++; }
       if (acc > 0.1) acc = 0;
       pullDebris();
+      impacts();
     }
   }
   renderer.render(scene, cam);
@@ -251,7 +356,8 @@ function hud() {
     `<span class="k">bricks</span> ${E.bricks_alive().toLocaleString()} · <span class="k">joints</span> ${E.joints_live().toLocaleString()} · ${E.bytes_per_brick().toFixed(0)} B/brick`,
     gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake` : `<span class="k">debris physics</span> off (no WebGPU)`,
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'}` : '',
-    lastBlast ? `<span class="k">last blast</span> ${lastBlast}` : `<span class="k">click to blast · radius ${radius} m</span>`,
+    `<span class="k">structure</span> ${(E.structure_ratio() * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact`,
+    lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to blast · radius ${radius} m</span>`,
   ].filter(Boolean).join('<br>');
 }
 
@@ -273,7 +379,7 @@ function hud() {
         const f = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
         const n = f[0], shapes = [], idx = [];
         for (let k = 0; k < n; k++) { const o = 1 + k * 8; idx.push(f[o]); shapes.push(boxShape(f, o + 1)); }
-        gpu = await GpuWorld.create(dev, [{ fixed: true, shapes }], { substeps: 12, sleep: true, maxBodies: 8000, maxShapes: n + 40000, maxContacts: 120000, maxPairs: 240000 });
+        gpu = await GpuWorld.create(dev, [{ fixed: true, shapes }], { substeps: 12, sleep: true, maxBodies: 8000, maxShapes: n + 40000, maxContacts: 120000, maxPairs: 240000, eventSpeed: 2.0, eventEnergy: 20000 });
         idx.forEach((b, k) => slots.set(b, k + 1));
       }
     }
