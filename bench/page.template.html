@@ -52,8 +52,8 @@ textarea { width: 100%; min-height: 150px; font: 12px/1.45 var(--mono); backgrou
 <div class="wrap">
   <header>
     <div class="eyebrow">Shatterforge engine · phase 0</div>
-    <h1>Phase-0 gates on your machine</h1>
-    <p class="lede">The new engine's brick store and box rigid-body solver, compiled to WebAssembly and run in this tab on one CPU thread. Press Run, wait about a minute, then copy the results back into the chat. The throughput rows are the CPU baseline that the phase-2 WebGPU solver has to beat.</p>
+    <h1>Engine gates on your machine</h1>
+    <p class="lede">The new engine's brick store and box rigid-body solver, run in this tab twice: as WebAssembly on one CPU thread, and as the same model on WebGPU compute. Press Run, wait two or three minutes, then copy the results back into the chat. The GPU rows are the ones that have to meet the 5 ms budget.</p>
   </header>
 
   <div class="grid">
@@ -89,6 +89,9 @@ textarea { width: 100%; min-height: 150px; font: 12px/1.45 var(--mono); backgrou
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
+__GPU_WORLD_JS__
+</script>
+<script>
 const WASM_B64 = "__WASM_B64__";
 const GATES = [
   { id: 'split', name: 'Split: 7.5 × 3.75 × 0.25 m panel refined to 0.125 m within 0.5 m of a hit', target: 'p99 < 1 ms' },
@@ -98,6 +101,11 @@ const GATES = [
   { id: 'p2k12', name: 'Pile of 2,000 bricks, 12 sub-steps (default)', target: 'info' },
   { id: 'p20k4', name: 'Pile of 20,000 bricks, 4 sub-steps', target: '< 5 ms (GPU target)' },
   { id: 'p20k12', name: 'Pile of 20,000 bricks, 12 sub-steps (default)', target: '< 5 ms (GPU target)' },
+  { id: 'gstack', name: 'GPU · stack of 20 × 0.5 m cubes, 10 s', target: '< 10 mm drift, < 10 mm/s' },
+  { id: 'g2k12', name: 'GPU · pile of 2,000 bricks, 12 sub-steps', target: 'info' },
+  { id: 'g20k4', name: 'GPU · pile of 20,000 bricks, 4 sub-steps', target: '< 5 ms' },
+  { id: 'g20k12', name: 'GPU · pile of 20,000 bricks, 12 sub-steps', target: '< 5 ms' },
+  { id: 'g50k12', name: 'GPU · pile of 50,000 bricks, 12 sub-steps', target: 'info' },
 ];
 const $ = id => document.getElementById(id);
 const results = {};
@@ -222,11 +230,88 @@ async function runAll() {
     results[id] = { ok: n > 5000 ? (med < 5 ? true : null) : null, text: `median ${med.toFixed(2)} ms, p95 ${pct(t, .95).toFixed(2)} ms · ${E.manifolds().toLocaleString()} contacts` };
     renderRows();
   }
+  await runGpu();
   ov('done');
   $('st').textContent = 'Done. Copy the results into the chat.';
-  const lines = ['Shatterforge phase-0 bench', ...Object.entries(sys).map(([k, v]) => `${k}: ${v}`), ...GATES.map(g => `${g.id}: ${results[g.id] ? results[g.id].text : '—'} [target ${g.target}]`)];
+  const lines = ['Shatterforge bench (phase 0 + GPU solver)', ...Object.entries(sys).map(([k, v]) => `${k}: ${v}`), ...GATES.map(g => `${g.id}: ${results[g.id] ? results[g.id].text : '—'} [target ${g.target}]`)];
   $('out').value = lines.join('\n'); $('outcard').hidden = false;
   $('run').disabled = false; $('copy').disabled = false;
+}
+
+// ---- GPU solver (gpu/gpu_world.js, inlined at build)
+let DEV = null;
+async function gpuDevice() {
+  if (DEV) return DEV;
+  if (!navigator.gpu) return null;
+  const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!a) return null;
+  DEV = await a.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: a.limits.maxStorageBufferBindingSize, maxBufferSize: a.limits.maxBufferSize } });
+  DEV.addEventListener('uncapturederror', e => console.error('GPU error:', e.error.message));
+  return DEV;
+}
+const grab = () => new Float32Array(E.memory.buffer, E.pose(), E.body_count() * 10).slice();
+// draw a GPU read-back in the same instanced view (read-back is outside the timed steps)
+function drawPose(pose, frame) {
+  const n = pose.length / 10;
+  if (!inst || inst.count !== n) {
+    if (inst) { scene.remove(inst); inst.geometry.dispose(); inst.material.dispose(); }
+    inst = new THREE.InstancedMesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshLambertMaterial({ color: cssVar('--brick') }), n);
+    inst.instanceMatrix.setUsage(THREE.DynamicDrawUsage); scene.add(inst); frame = true;
+  }
+  let lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  for (let i = 0; i < n; i++) {
+    const o = i * 10;
+    P.set(pose[o], pose[o + 1], pose[o + 2]); Q.set(pose[o + 3], pose[o + 4], pose[o + 5], pose[o + 6]); S.set(pose[o + 7], pose[o + 8], pose[o + 9]);
+    M.compose(P, Q, S); inst.setMatrixAt(i, M);
+    for (let k = 0; k < 3; k++) { lo[k] = Math.min(lo[k], pose[o + k]); hi[k] = Math.max(hi[k], pose[o + k]); }
+  }
+  inst.instanceMatrix.needsUpdate = true;
+  if (frame) {
+    const c = new THREE.Vector3((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2);
+    const r = Math.max(2, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 0.62);
+    cam.position.set(c.x + r * 1.25, c.y + r * 0.7, c.z + r * 1.6); cam.lookAt(c);
+  }
+  renderer.render(scene, cam);
+}
+async function runGpu() {
+  const dev = await gpuDevice().catch(() => null);
+  if (!dev) { for (const id of ['gstack', 'g2k12', 'g20k4', 'g20k12', 'g50k12']) results[id] = { ok: false, text: 'WebGPU not available' }; renderRows(); return; }
+  // stacking gate on the GPU
+  $('st').textContent = 'GPU stacking gate…';
+  E.stack_setup(20, 12, 0);
+  let pose = grab(); const top0 = pose[191];
+  let w = await GpuWorld.create(dev, pose, 1900, { substeps: 12 });
+  for (let f = 0; f < 600; f += 10) {
+    for (let k = 0; k < 10; k++) w.step(1 / 60);
+    const r = await w.readPose(); drawPose(r.pose, f === 0); ov(`GPU stack · t ${((f + 10) / 60).toFixed(1)} s`); pose = r.pose;
+    if (f === 590) {
+      let mv = 0; for (let i = 0; i < 20; i++) mv = Math.max(mv, Math.hypot(r.vel[i * 3], r.vel[i * 3 + 1], r.vel[i * 3 + 2]));
+      const drift = Math.hypot(pose[190], pose[191] - top0, pose[192]) * 1e3;
+      results.gstack = { ok: drift < 10 && mv * 1e3 < 10, text: `drift ${drift.toFixed(2)} mm, max ${(mv * 1e3).toFixed(2)} mm/s` };
+    }
+  }
+  w.destroy(); renderRows();
+  // throughput: steps are queued back to back and timed to completion, as a game frame would run them
+  for (const [id, n, sub] of [['g2k12', 2000, 12], ['g20k4', 20000, 4], ['g20k12', 20000, 12], ['g50k12', 50000, 12]]) {
+    $('st').textContent = `GPU pile ${n.toLocaleString()}, ${sub} sub-steps…`;
+    E.pile_setup(n, sub);
+    w = await GpuWorld.create(dev, grab(), 1900, { substeps: sub });
+    const batches = [];
+    let enc = 0;
+    for (let f = 0; f < 180; f += 15) {
+      const t0 = performance.now();
+      for (let k = 0; k < 15; k++) { const a = performance.now(); w.step(1 / 60); enc += performance.now() - a; }
+      await dev.queue.onSubmittedWorkDone();
+      const ms = (performance.now() - t0) / 15;
+      if (f >= 45) batches.push(ms);
+      const r = await w.readPose(); drawPose(r.pose, f === 0);
+      ov(`GPU pile ${n.toLocaleString()} · ${sub} sub-steps · frame ${f + 15}/180 · ${ms.toFixed(2)} ms/step`);
+    }
+    const med = pct(batches, .5);
+    const st = w.stats;
+    results[id] = { ok: id === 'g2k12' || id === 'g50k12' ? null : med < 5, text: `median ${med.toFixed(2)} ms, worst batch ${Math.max(...batches).toFixed(2)} ms · encode ${(enc / 180).toFixed(2)} ms · ${st.manifolds.toLocaleString()} contacts, ${st.colors} colours, ${st.overflow} overflow` };
+    w.destroy(); renderRows();
+  }
 }
 
 $('copy').addEventListener('click', () => {
