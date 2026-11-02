@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -86,6 +86,14 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       }
       const okB = Math.abs(res['test-bouncy'].peak_m - 0.5) < 0.08 && Math.abs(res.timber.peak_m - 0.18) < 0.05 && res.masonry.peak_m < 0.03;
       check('bounce', okB, res);
+    }
+    if (scenes.includes('events')) {
+      // a 1 m concrete cube dropped 2 m: one hard impact (v = 6.3 m/s, 1/2 J v ~ 50 kJ) reported once
+      const evs = [];
+      const r = await run([box([0, 2.5, 0], [0.5, 0.5, 0.5], MAT.concrete)], 60, { eventEnergy: 1000, eventSpeed: 1 }, 1, (s, f, w) => { for (const e of w.takeEvents()) evs.push({ f, ...e }); });
+      done(r);
+      const e = evs[0] || {};
+      check('events', evs.length >= 1 && e.approach > 5 && e.approach < 7 && e.impulse > 5000, { count: evs.length, first: evs.length ? { f: e.f, approach: e.approach, impulse: e.impulse, n: e.n, p: e.p, a: e.a, b: e.b } : null });
     }
     if (scenes.includes('incline')) {
       // a box on a fixed slab tilted by theta; friction 0.6 holds below atan(0.6) = 31 deg
