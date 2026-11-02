@@ -21,8 +21,11 @@ pub const F_ALIVE: u8 = 1;
 pub const F_INFILL: u8 = 2;
 pub const F_DYNAMIC: u8 = 4;
 
-/// Grid cell for the spatial index, in ticks (8 ticks = 1 m).
-const CELL: i32 = 8;
+/// Spatial index: each brick sits in exactly one cell, the cell holding its min corner, at the finest of four
+/// levels (1, 4, 16, 64 m) whose cell is at least as large as the brick. A query visits, per level, the cells
+/// that can hold the min corner of an overlapping brick.
+const LEVELS: usize = 4;
+const fn lcell(l: usize) -> i32 { 8 << (2 * l) }
 
 /// A box in ticks, [min, max).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,10 +58,16 @@ pub struct Bricks {
     pub jarea: Vec<u16>, pub jaxis: Vec<u8>, pub jdmg: Vec<u8>,
     jfree: Vec<u32>,
     pub live_joints: usize,
-    // spatial index (an accelerator, not part of the brick format): 1 m cells -> bricks touching them.
-    // Entries can go stale after splits; queries test real overlap.
-    grid: HashMap<(i32, i32, i32), Vec<u32>>,
-    stamp: Vec<u32>, stamp_id: u32,
+    // spatial index (an accelerator, not part of the brick format): cells -> bricks touching them, at two
+    // levels so a 30 m slab is a few entries, not hundreds. Entries can go stale after splits and removals;
+    // queries test real overlap.
+    cells: HashMap<u64, u32>,   // cell key -> first brick in it
+    cnext: Vec<u32>,            // next brick in the same cell
+    /// bricks added, resized or removed since the log was last drained (for meshes and physics shapes)
+    pub log: Vec<u32>,
+}
+#[inline] fn ckey(l: usize, c: [i32; 3]) -> u64 {
+    ((l as u64) << 60) | (((c[0] + (1 << 19)) as u64 & 0xfffff) << 40) | (((c[1] + (1 << 19)) as u64 & 0xfffff) << 20) | ((c[2] + (1 << 19)) as u64 & 0xfffff)
 }
 
 impl Bricks {
@@ -79,38 +88,110 @@ impl Bricks {
         self.sx.push(size[0] as u8); self.sy.push(size[1] as u8); self.sz.push(size[2] as u8);
         self.mat.push(material); self.paint.push(paint); self.flags.push(F_ALIVE);
         self.structure.push(structure); self.body.push(NONE); self.jhead.push(NONE); self.damage.push(0);
-        self.stamp.push(0);
+        self.cnext.push(NONE);
         self.index(i);
+        self.log.push(i);
         i
     }
 
     fn index(&mut self, i: u32) {
         let b = self.tbox(i);
-        let c0 = [b.min[0].div_euclid(CELL), b.min[1].div_euclid(CELL), b.min[2].div_euclid(CELL)];
-        let c1 = [(b.max[0] - 1).div_euclid(CELL), (b.max[1] - 1).div_euclid(CELL), (b.max[2] - 1).div_euclid(CELL)];
-        for cx in c0[0]..=c1[0] { for cy in c0[1]..=c1[1] { for cz in c0[2]..=c1[2] {
-            self.grid.entry((cx, cy, cz)).or_default().push(i);
-        } } }
+        let m = (0..3).map(|k| b.max[k] - b.min[k]).max().unwrap();
+        let l = (0..LEVELS).find(|&l| lcell(l) >= m).unwrap_or(LEVELS - 1);
+        let c = lcell(l);
+        let key = ckey(l, [b.min[0].div_euclid(c), b.min[1].div_euclid(c), b.min[2].div_euclid(c)]);
+        let head = self.cells.entry(key).or_insert(NONE);
+        self.cnext[i as usize] = *head;
+        *head = i;
+    }
+
+    /// Remove a brick: its joints go, the record stays (dead) so indices remain stable.
+    pub fn remove(&mut self, i: u32) {
+        while self.jhead[i as usize] != NONE { let j = self.jhead[i as usize]; self.remove_joint(j); }
+        self.flags[i as usize] &= !F_ALIVE;
+        self.log.push(i);
+    }
+    #[inline] pub fn alive(&self, i: u32) -> bool { self.flags[i as usize] & F_ALIVE != 0 }
+
+    /// Bricks not connected to the ground through joints, grouped into connected pieces. Grounded bricks are
+    /// those resting on y = 0.
+    pub fn detached(&self) -> Vec<Vec<u32>> {
+        let n = self.len();
+        let mut mark = alloc::vec![0u8; n];   // 0 unvisited, 1 grounded, 2 assigned to a piece
+        let mut stack: Vec<u32> = Vec::new();
+        for i in 0..n as u32 { if self.alive(i) && self.y[i as usize] <= 0 { mark[i as usize] = 1; stack.push(i); } }
+        while let Some(i) = stack.pop() {
+            let mut j = self.jhead[i as usize];
+            while j != NONE { let o = self.joint_other(j, i); if mark[o as usize] == 0 { mark[o as usize] = 1; stack.push(o); } j = self.joint_next(j, i); }
+        }
+        let mut pieces = Vec::new();
+        for s in 0..n as u32 {
+            if !self.alive(s) || mark[s as usize] != 0 { continue; }
+            let mut piece = Vec::new();
+            mark[s as usize] = 2; stack.push(s);
+            while let Some(i) = stack.pop() {
+                piece.push(i);
+                let mut j = self.jhead[i as usize];
+                while j != NONE { let o = self.joint_other(j, i); if mark[o as usize] == 0 { mark[o as usize] = 2; stack.push(o); } j = self.joint_next(j, i); }
+            }
+            pieces.push(piece);
+        }
+        pieces
+    }
+
+    /// Nearest brick hit by a ray (origin and direction in ticks), within `max_t` ticks: (brick, t, face axis).
+    pub fn raycast(&mut self, o: [f32; 3], d: [f32; 3], max_t: f32) -> Option<(u32, f32, usize)> {
+        let mut best: Option<(u32, f32, usize)> = None;
+        let mut cand = Vec::new();
+        let step = 8.0f32;
+        let mut t = 0.0f32;
+        while t < max_t {
+            let p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
+            let r = step;
+            cand.clear();
+            self.query([floor_i(p[0] - r), floor_i(p[1] - r), floor_i(p[2] - r)], [floor_i(p[0] + r) + 1, floor_i(p[1] + r) + 1, floor_i(p[2] + r) + 1], false, &mut cand);
+            for &i in &cand {
+                let b = self.tbox(i);
+                let (mut t0, mut t1, mut ax) = (0.0f32, max_t, 0usize);
+                let mut ok = true;
+                for k in 0..3 {
+                    if crate::math::fabs(d[k]) < 1e-9 { if o[k] < b.min[k] as f32 || o[k] > b.max[k] as f32 { ok = false; break; } continue; }
+                    let (mut a, mut c) = ((b.min[k] as f32 - o[k]) / d[k], (b.max[k] as f32 - o[k]) / d[k]);
+                    if a > c { core::mem::swap(&mut a, &mut c); }
+                    if a > t0 { t0 = a; ax = k; }
+                    if c < t1 { t1 = c; }
+                    if t0 > t1 { ok = false; break; }
+                }
+                if ok && best.map_or(true, |(_, bt, _)| t0 < bt) { best = Some((i, t0, ax)); }
+            }
+            if let Some((_, bt, _)) = best { if bt < t + step { return best; } }
+            t += step;
+        }
+        best
     }
 
     /// Bricks whose box overlaps [min, max) in ticks (inclusive of touching when `touch`), each once.
-    pub fn query(&mut self, min: [i32; 3], max: [i32; 3], touch: bool, out: &mut Vec<u32>) {
-        self.stamp_id = self.stamp_id.wrapping_add(1);
-        if self.stamp_id == 0 { for s in self.stamp.iter_mut() { *s = 0; } self.stamp_id = 1; }
+    pub fn query(&self, min: [i32; 3], max: [i32; 3], touch: bool, out: &mut Vec<u32>) {
         let t = if touch { 1 } else { 0 };
-        let c0 = [(min[0] - t).div_euclid(CELL), (min[1] - t).div_euclid(CELL), (min[2] - t).div_euclid(CELL)];
-        let c1 = [(max[0] - 1 + t).div_euclid(CELL), (max[1] - 1 + t).div_euclid(CELL), (max[2] - 1 + t).div_euclid(CELL)];
-        for cx in c0[0]..=c1[0] { for cy in c0[1]..=c1[1] { for cz in c0[2]..=c1[2] {
-            if let Some(v) = self.grid.get(&(cx, cy, cz)) {
-                for &i in v {
-                    if self.stamp[i as usize] == self.stamp_id || self.flags[i as usize] & F_ALIVE == 0 { continue; }
-                    self.stamp[i as usize] = self.stamp_id;
-                    let b = self.tbox(i);
-                    let ok = (0..3).all(|k| if touch { b.min[k] <= max[k] && b.max[k] >= min[k] } else { b.min[k] < max[k] && b.max[k] > min[k] });
-                    if ok { out.push(i); }
+        for l in 0..LEVELS {
+            let c = lcell(l);
+            // an overlapping brick's min corner lies in [min - c - t, max + t)
+            let c0 = [(min[0] - c - t).div_euclid(c), (min[1] - c - t).div_euclid(c), (min[2] - c - t).div_euclid(c)];
+            let c1 = [(max[0] - 1 + t).div_euclid(c), (max[1] - 1 + t).div_euclid(c), (max[2] - 1 + t).div_euclid(c)];
+            for cx in c0[0]..=c1[0] { for cy in c0[1]..=c1[1] { for cz in c0[2]..=c1[2] {
+                let mut i = match self.cells.get(&ckey(l, [cx, cy, cz])) { Some(&h) => h, None => continue };
+                while i != NONE {
+                    let iu = i as usize;
+                    if self.flags[iu] & F_ALIVE != 0 {
+                        let mn = [self.x[iu] as i32, self.y[iu] as i32, self.z[iu] as i32];
+                        let mx = [mn[0] + self.sx[iu] as i32, mn[1] + self.sy[iu] as i32, mn[2] + self.sz[iu] as i32];
+                        let ok = (0..3).all(|k| if touch { mn[k] <= max[k] && mx[k] >= min[k] } else { mn[k] < max[k] && mx[k] > min[k] });
+                        if ok { out.push(i); }
+                    }
+                    i = self.cnext[iu];
                 }
-            }
-        } } }
+            } } }
+        }
     }
 
     // ---- joints ----
@@ -207,6 +288,7 @@ impl Bricks {
         size = [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]];
         size[axis] = at - b.min[axis];
         self.sx[iu] = size[0] as u8; self.sy[iu] = size[1] as u8; self.sz[iu] = size[2] as u8;
+        self.log.push(i);
         // redistribute
         for k in 0..cnt {
             let (o, d) = if k < 64 { nb[k] } else { big[k - 64] };
@@ -264,7 +346,12 @@ impl Bricks {
         (n * 24 + self.live_joints * 20) as f32 / n as f32
     }
     /// Approximate bytes held by the spatial index.
-    pub fn index_bytes(&self) -> usize { self.grid.values().map(|v| v.capacity() * 4 + 40).sum() }
+    pub fn index_bytes(&self) -> usize {
+        // per brick a 4 B list link; per cell a hash entry (8 B key + 4 B head + 1 control byte, ~7/8 load)
+        self.cnext.len() * 4 + self.cells.len() * 15
+    }
+    /// Everything per live brick: records, joints and the spatial index.
+    pub fn total_bytes_per_brick(&self) -> f32 { self.bytes_per_brick() + self.index_bytes() as f32 / self.alive_count().max(1) as f32 }
 
     /// Sorted list of (a, b, axis, area) for every live joint, for tests.
     pub fn joint_set(&self) -> Vec<(u32, u32, u8, u16)> {

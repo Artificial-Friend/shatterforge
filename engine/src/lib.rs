@@ -5,6 +5,10 @@ extern crate alloc;
 pub mod math;
 pub mod brick;
 pub mod phys;
+pub mod tower;
+pub mod mesh;
+pub mod player;
+pub mod game;
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]

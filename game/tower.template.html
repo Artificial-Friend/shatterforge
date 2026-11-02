@@ -1,0 +1,286 @@
+<title>Shatterforge Tower</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;600&display=swap">
+<style>
+/* A game view: one deliberate dark look, set explicitly */
+:root { color-scheme: dark; --bg: #0e0f10; --ink: #ece8e1; --mute: #a39d93; --accent: #f08a4b; --panel: rgba(14, 15, 16, 0.78); --rule: rgba(236, 232, 225, 0.16);
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); overflow: hidden; }
+#cv { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+.hud { position: fixed; top: calc(10px + env(safe-area-inset-top, 0px)); left: max(12px, env(safe-area-inset-left, 0px)); background: var(--panel); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 8px 10px; font: 12px/1.5 var(--mono); color: var(--ink); pointer-events: none; min-width: 230px; }
+.hud b { color: var(--accent); font-weight: 600; }
+.hud .k { color: var(--mute); }
+.cross { position: fixed; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; pointer-events: none; }
+.cross::before, .cross::after { content: ""; position: absolute; background: rgba(255, 255, 255, 0.85); }
+.cross::before { left: 8px; top: 0; width: 2px; height: 18px; } .cross::after { top: 8px; left: 0; height: 2px; width: 18px; }
+.tool { position: fixed; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); display: flex; gap: 6px; pointer-events: none; }
+.tool span { background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 5px 9px; font: 12px var(--mono); color: var(--mute); }
+.tool span.on { color: var(--ink); border-color: var(--accent); }
+.start { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(8, 9, 10, 0.72); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.card { max-width: 560px; background: #15171a; border: 1px solid var(--rule); border-radius: 8px; padding: 22px 24px; display: flex; flex-direction: column; gap: 12px; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+h1 { font: 600 24px/1.2 var(--sans); margin: 0; text-wrap: balance; }
+.card p { margin: 0; color: var(--mute); }
+.keys { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font: 13px/1.5 var(--mono); }
+.keys dt { color: var(--ink); } .keys dd { margin: 0; color: var(--mute); }
+button { font: 600 15px var(--sans); padding: 11px 18px; border-radius: 5px; border: 0; background: var(--accent); color: #1a120c; cursor: pointer; align-self: flex-start; }
+button:disabled { opacity: .5; cursor: default; }
+.warn { color: #f1786c; font: 12px var(--mono); }
+</style>
+
+<canvas id="cv"></canvas>
+<div class="cross"></div>
+<div class="hud" id="hud">loading…</div>
+<div class="tool" id="tool"><span data-r="0.4">1 · 0.4 m</span><span data-r="0.7">2 · 0.7 m</span><span data-r="1.2">3 · 1.2 m</span></div>
+<div class="start" id="start">
+  <div class="card">
+    <div class="eyebrow">Shatterforge · phase 1</div>
+    <h1>A 12-storey office tower at real scale</h1>
+    <p>Every wall, slab, column and stair is a real-size brick: storeys are 3.75 m, doors 0.875 × 2.125 m, corridors 1.75 m, steps 0.25 m. Walk in through the lobby, take the stair in the core, and knock holes in it. What falls off is simulated on the GPU as rigid pieces.</p>
+    <dl class="keys">
+      <dt>Mouse</dt><dd>look (click the view first)</dd>
+      <dt>W A S D</dt><dd>walk · Shift to run · Space to jump</dd>
+      <dt>F</dt><dd>fly mode on/off · Q / E down / up while flying</dd>
+      <dt>Click</dt><dd>blast at the crosshair</dd>
+      <dt>1 2 3</dt><dd>blast radius 0.4 / 0.7 / 1.2 m</dd>
+    </dl>
+    <div class="warn" id="warn"></div>
+    <button id="go" disabled>Loading…</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+__GPU_WORLD_JS__
+</script>
+<script>
+const WASM_B64 = "__WASM_B64__";
+const $ = (id) => document.getElementById(id);
+const TICK = 0.125, STOREYS = 12;
+let E = null, gpu = null, dev = null, slots = new Map(), debrisFrom = 2;
+let radius = 0.7, fly = false, locked = false, yaw = Math.PI, pitch = 0, physicsPaused = true, lastActive = -1e9;
+const keys = new Set();
+
+// ---- renderer
+const cv = $('cv');
+const renderer = new THREE.WebGLRenderer({ canvas: cv, antialias: true });
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputEncoding = THREE.sRGBEncoding;
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xa9bccb);
+scene.fog = new THREE.Fog(0xa9bccb, 80, 420);
+const cam = new THREE.PerspectiveCamera(70, 1, 0.05, 1000);
+cam.rotation.order = 'YXZ';
+scene.add(new THREE.HemisphereLight(0xdfe8f0, 0x5a554c, 0.75));
+const sun = new THREE.DirectionalLight(0xfff3e0, 0.95);
+sun.position.set(-30, 60, -22); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -32, right: 32, top: 32, bottom: -32, near: 1, far: 160 });
+sun.shadow.bias = -0.0004;
+scene.add(sun); scene.add(sun.target);
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(800, 800), new THREE.MeshLambertMaterial({ color: 0x6d6a64 }));
+ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+const plaza = new THREE.Mesh(new THREE.PlaneGeometry(44, 44), new THREE.MeshLambertMaterial({ color: 0x8a867d }));
+plaza.rotation.x = -Math.PI / 2; plaza.position.y = 0.002; plaza.receiveShadow = true; scene.add(plaza);
+function resize() { const w = innerWidth, h = innerHeight; renderer.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix(); }
+addEventListener('resize', resize); resize();
+
+// ---- tower meshes, one per storey band
+const towerMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+const chunks = [];
+function chunkMesh(k) {
+  const vl = E.chunk_vlen(k), il = E.chunk_ilen(k);
+  const v = new Float32Array(E.memory.buffer, E.chunk_vptr(k), vl).slice();
+  const ix = new Uint32Array(E.memory.buffer, E.chunk_iptr(k), il).slice();
+  const g = new THREE.BufferGeometry();
+  const ib = new THREE.InterleavedBuffer(v, 9);
+  g.setAttribute('position', new THREE.InterleavedBufferAttribute(ib, 3, 0));
+  g.setAttribute('normal', new THREE.InterleavedBufferAttribute(ib, 3, 3));
+  g.setAttribute('color', new THREE.InterleavedBufferAttribute(ib, 3, 6));
+  g.setIndex(new THREE.BufferAttribute(ix, 1));
+  if (chunks[k]) { scene.remove(chunks[k]); chunks[k].geometry.dispose(); }
+  const m = new THREE.Mesh(g, towerMat); m.castShadow = true; m.receiveShadow = true;
+  chunks[k] = m; scene.add(m);
+}
+
+// ---- debris (GPU bodies), drawn as instanced boxes
+const MAXD = 40000;
+const dMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshLambertMaterial(), MAXD);
+dMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); dMesh.count = 0; dMesh.castShadow = true; dMesh.receiveShadow = true;
+dMesh.setColorAt(0, new THREE.Color(0xffffff));   // creates the per-instance colour buffer before the first draw
+scene.add(dMesh);
+const MATCOL = [0x9c9a94, 0x9a5a44, 0x6f7377, 0x7aa0b4, 0xd8d2c4, 0xcccccc, 0x777777, 0x9c9a94].map(c => new THREE.Color(c));
+const M4 = new THREE.Matrix4(), QQ = new THREE.Quaternion(), PP = new THREE.Vector3(), SS = new THREE.Vector3();
+let reading = false, debrisShapes = 0;
+function pullDebris() {
+  if (!gpu || reading) return;
+  reading = true;
+  gpu.readPose(debrisFrom).then(r => {
+    const n = Math.min(MAXD, r.pose.length / 10);
+    for (let k = 0; k < n; k++) {
+      const o = k * 10;
+      PP.set(r.pose[o], r.pose[o + 1], r.pose[o + 2]); QQ.set(r.pose[o + 3], r.pose[o + 4], r.pose[o + 5], r.pose[o + 6]); SS.set(r.pose[o + 7], r.pose[o + 8], r.pose[o + 9]);
+      M4.compose(PP, QQ, SS); dMesh.setMatrixAt(k, M4); dMesh.setColorAt(k, MATCOL[r.mats[k]] || MATCOL[0]);
+    }
+    dMesh.count = n; debrisShapes = n;
+    dMesh.instanceMatrix.needsUpdate = true; if (dMesh.instanceColor) dMesh.instanceColor.needsUpdate = true;
+    reading = false;
+  }, () => { reading = false; });
+}
+
+// ---- blasting
+function readLog() {
+  const f = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
+  let o = 0;
+  const nu = f[o++], updates = [];
+  for (let k = 0; k < nu; k++, o += 9) updates.push(f.subarray(o, o + 9));
+  const nb = f[o++], bodies = [];
+  for (let k = 0; k < nb; k++) {
+    const n = f[o++], shapes = [];
+    for (let q = 0; q < n; q++, o += 7) shapes.push(boxShape(f, o));
+    bodies.push({ shapes });
+  }
+  return { updates, bodies };
+}
+function boxShape(f, o) {
+  const [x, y, z, sx, sy, sz, mat] = [f[o], f[o + 1], f[o + 2], f[o + 3], f[o + 4], f[o + 5], f[o + 6]];
+  return { p: [(x + sx / 2) * TICK, (y + sy / 2) * TICK, (z + sz / 2) * TICK], q: [0, 0, 0, 1], h: [sx * TICK / 2, sy * TICK / 2, sz * TICK / 2], mat };
+}
+let lastBlast = '';
+function doBlast() {
+  const d = new THREE.Vector3(); cam.getWorldDirection(d);
+  const o = cam.position;
+  const t = E.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 200);
+  if (t < 0) return;
+  const p = o.clone().addScaledVector(d, t + 0.05);
+  const t0 = performance.now();
+  const nb = E.blast(p.x, p.y, p.z, radius);
+  const { updates, bodies } = readLog();
+  for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) chunkMesh(k);
+  const ms = performance.now() - t0;
+  if (gpu) {
+    for (const u of updates) {
+      const [idx, alive] = [u[0], u[1]];
+      const s = boxShape(u, 2);
+      if (alive) slots.set(idx, gpu.setStaticShape(slots.get(idx) ?? null, 1, s.p, s.h, s.mat));
+      else if (slots.has(idx)) { gpu.killShape(slots.get(idx)); slots.delete(idx); }
+    }
+    // the hit knocks the crumbled material out along the shot (2-4 m/s, a little spread); pieces that only
+    // lost their support start at rest
+    for (const b of bodies) if (b.shapes.length === 1) {
+      const s = 2 + 2 * Math.random();
+      b.v = [d.x * s + (Math.random() - 0.5), d.y * s + (Math.random() - 0.5), d.z * s + (Math.random() - 0.5)];
+      b.w = [(Math.random() - 0.5) * 6, (Math.random() - 0.5) * 6, (Math.random() - 0.5) * 6];
+    }
+    let room = gpu.capB - gpu.n;
+    const fit = bodies.slice(0, room);
+    if (fit.length) gpu.addBodies(fit);
+  }
+  const pieces = bodies.filter(b => b.shapes.length > 1).length;
+  lastActive = performance.now();
+  lastBlast = `${bodies.length - pieces} crumbs, ${pieces} pieces · ${ms.toFixed(1)} ms`;
+}
+
+// ---- input
+cv.addEventListener('click', () => {
+  if (!locked) { const r = cv.requestPointerLock && cv.requestPointerLock(); if (r && r.catch) r.catch(() => {}); return; }
+  doBlast();
+});
+document.addEventListener('pointerlockchange', () => { locked = document.pointerLockElement === cv; });
+let drag = null;
+cv.addEventListener('mousedown', (e) => { if (!locked) drag = [e.clientX, e.clientY]; });
+addEventListener('mouseup', () => { drag = null; });
+addEventListener('mousemove', (e) => {
+  let dx = 0, dy = 0;
+  if (locked) { dx = e.movementX; dy = e.movementY; }
+  else if (drag) { dx = e.clientX - drag[0]; dy = e.clientY - drag[1]; drag = [e.clientX, e.clientY]; }
+  yaw -= dx * 0.0022; pitch = Math.max(-1.5, Math.min(1.5, pitch - dy * 0.0022));
+});
+addEventListener('keydown', (e) => {
+  keys.add(e.code);
+  if (e.code === 'KeyF') fly = !fly;
+  if (e.code === 'Digit1') setRadius(0.4); if (e.code === 'Digit2') setRadius(0.7); if (e.code === 'Digit3') setRadius(1.2);
+  if (e.code === 'KeyB' && !locked) doBlast();
+});
+addEventListener('keyup', (e) => keys.delete(e.code));
+function setRadius(r) { radius = r; document.querySelectorAll('#tool span').forEach(s => s.classList.toggle('on', +s.dataset.r === r)); }
+setRadius(0.7);
+
+// ---- loop
+let last = performance.now(), acc = 0, fps = 60, frames = 0, fpsT = last;
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (E) {
+    const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)), r = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+    const run = keys.has('ShiftLeft') || keys.has('ShiftRight');
+    const sp = fly ? (run ? 24 : 8) : (run ? 4.5 : 1.6);
+    const w = new THREE.Vector3();
+    if (keys.has('KeyW')) w.add(f); if (keys.has('KeyS')) w.sub(f); if (keys.has('KeyD')) w.add(r); if (keys.has('KeyA')) w.sub(r);
+    if (w.lengthSq() > 0) w.normalize().multiplyScalar(sp);
+    if (fly) { if (keys.has('KeyE')) w.y += sp; if (keys.has('KeyQ')) w.y -= sp; }
+    E.player_step(dt, w.x, w.y, w.z, keys.has('Space') ? 1 : 0, fly ? 1 : 0);
+    cam.position.set(E.player_get(0), E.player_get(1) + 1.65, E.player_get(2));
+    cam.rotation.set(pitch, yaw, 0);
+    // physics runs while anything is awake (and briefly after a blast, before the first stats arrive)
+    if (gpu && !physicsPaused && (gpu.stats.awake > 0 || now - lastActive < 2000)) {
+      acc += dt;
+      let n = 0; while (acc >= 1 / 60 && n < 2) { gpu.step(1 / 60); acc -= 1 / 60; n++; }
+      if (acc > 0.1) acc = 0;
+      pullDebris();
+    }
+  }
+  renderer.render(scene, cam);
+  frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; hud(); }
+}
+function hud() {
+  if (!E) return;
+  const y = E.player_get(1), storey = Math.max(0, Math.floor((y + 0.01) / 3.75));
+  const g = gpu && gpu.gpuMs ? Object.values(gpu.gpuMs).reduce((a, b) => a + b, 0) : null;
+  $('hud').innerHTML = [
+    `<b>${fps.toFixed(0)} fps</b> · ${fly ? 'flying' : 'walking'} · storey <b>${storey === 0 ? 'G' : storey}</b>`,
+    `<span class="k">bricks</span> ${E.bricks_alive().toLocaleString()} · <span class="k">joints</span> ${E.joints_live().toLocaleString()} · ${E.bytes_per_brick().toFixed(0)} B/brick`,
+    gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake` : `<span class="k">debris physics</span> off (no WebGPU)`,
+    gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'}` : '',
+    lastBlast ? `<span class="k">last blast</span> ${lastBlast}` : `<span class="k">click to blast · radius ${radius} m</span>`,
+  ].filter(Boolean).join('<br>');
+}
+
+// ---- start
+(async () => {
+  try {
+    const bytes = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
+    E = (await WebAssembly.instantiate(bytes, {})).instance.exports;
+    E.game_new(STOREYS);
+    for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
+    E.player_set(0, 0.0, -16);
+  } catch (e) { $('warn').textContent = 'Could not start the engine: ' + e.message; return; }
+  try {
+    if (navigator.gpu) {
+      const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+      if (a) {
+        dev = await a.requestDevice({ requiredFeatures: a.features.has('timestamp-query') ? ['timestamp-query'] : [], requiredLimits: { maxStorageBufferBindingSize: a.limits.maxStorageBufferBindingSize, maxBufferSize: a.limits.maxBufferSize } });
+        E.bricks_dump();
+        const f = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
+        const n = f[0], shapes = [], idx = [];
+        for (let k = 0; k < n; k++) { const o = 1 + k * 8; idx.push(f[o]); shapes.push(boxShape(f, o + 1)); }
+        gpu = await GpuWorld.create(dev, [{ fixed: true, shapes }], { substeps: 12, sleep: true, maxBodies: 8000, maxShapes: n + 40000, maxContacts: 120000, maxPairs: 240000 });
+        idx.forEach((b, k) => slots.set(b, k + 1));
+      }
+    }
+    if (!gpu) $('warn').textContent = 'WebGPU is not available in this browser: holes still work, but loose pieces are not simulated.';
+  } catch (e) { gpu = null; $('warn').textContent = 'GPU physics unavailable: ' + e.message; }
+  $('go').disabled = false; $('go').textContent = 'Enter';
+  hud();
+})();
+$('go').addEventListener('click', () => {
+  $('start').hidden = true; physicsPaused = false;
+  const r = cv.requestPointerLock && cv.requestPointerLock(); if (r && r.catch) r.catch(() => {});
+});
+requestAnimationFrame(frame);
+</script>

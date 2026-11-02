@@ -1,0 +1,264 @@
+//! Real-scale office tower (docs/SPEC.md scale standard), built as adaptive bricks.
+//!
+//! Each storey is painted into a tick-resolution grid of element ids (slab, columns, walls, glass, stairs,
+//! partitions; later paint wins, so openings are carved by painting empty). The grid is then merged greedily
+//! into the largest boxes of one element: a 22.5 m slab is one brick, a wall between two openings is one
+//! brick. Bricks split on demand when damaged.
+//!
+//! Layout (ticks of 0.125 m; x east, z north, y up; footprint centred on the origin):
+//! - 3 x 3 bays of 7.5 m (180 ticks); storey 3.75 m (30): slab 0.25 m (2) + 3.5 m clear (28)
+//! - columns 0.625 m square on the 7.5 m grid; exterior wall 0.25 m: spandrel, glass band, header, mullions
+//! - core in the centre bay: concrete walls, a switch-back stair 1.25 m wide (0.25 m rise and going, landing at
+//!   half height), stair opening in each slab above, door to the corridor
+//! - 1.75 m corridor ring around the core; offices 5.5 m deep behind 0.125 m partitions with 0.875 x 2.125 m doors
+//! - ground floor: open lobby, 1.75 m double entrance; roof: parapet and a stair penthouse with a roof door
+use crate::brick::{mat, Bricks, F_INFILL};
+use alloc::vec;
+use alloc::vec::Vec;
+
+pub const HALF: i32 = 90;        // footprint half width (11.25 m)
+pub const STOREY: i32 = 30;      // 3.75 m
+pub const SLAB_T: i32 = 2;       // 0.25 m
+const W: i32 = 2 * HALF;
+
+#[derive(Clone, Copy)]
+pub struct Element { pub material: u8, pub paint: u8, pub infill: bool }
+
+/// Element ids are per kind (a storey's slab, columns, ...); 0 is empty.
+pub mod el {
+    pub const SLAB: u16 = 1;
+    pub const COLUMN: u16 = 2;
+    pub const SPANDREL: u16 = 3;
+    pub const GLASS: u16 = 4;
+    pub const HEADER: u16 = 5;
+    pub const MULLION: u16 = 6;
+    pub const CORE: u16 = 7;
+    pub const STAIR: u16 = 8;
+    pub const LANDING: u16 = 9;
+    pub const PARTITION: u16 = 10;
+    pub const PARAPET: u16 = 11;
+    pub const STAIR2: u16 = 12;   // alternate steps, so neighbouring steps stay separate bricks
+    pub const COUNT: usize = 13;
+}
+pub fn element(e: u16) -> Element {
+    use el::*;
+    let (material, paint, infill) = match e {
+        SLAB => (mat::CONCRETE, 0, false),
+        COLUMN => (mat::CONCRETE, 1, false),
+        SPANDREL | HEADER | MULLION | PARAPET => (mat::CONCRETE, 2, false),
+        GLASS => (mat::GLASS, 0, true),
+        CORE => (mat::CONCRETE, 3, false),
+        STAIR | STAIR2 | LANDING => (mat::CONCRETE, 4, false),
+        _ => (mat::TIMBER, 5, true),   // partitions: stud walls
+    };
+    Element { material, paint, infill }
+}
+
+/// One storey's paint grid: W x STOREY x W element ids.
+struct Storey { g: Vec<u16>, y0: i32 }
+impl Storey {
+    fn new(y0: i32) -> Self { Storey { g: vec![0; (W * STOREY * W) as usize], y0 } }
+    /// Paint the box [x0,x1) x [y0,y1) x [z0,z1) in world ticks (clipped to this storey).
+    fn fill(&mut self, x: (i32, i32), y: (i32, i32), z: (i32, i32), e: u16) {
+        let (xa, xb) = ((x.0 + HALF).max(0), (x.1 + HALF).min(W));
+        let (ya, yb) = ((y.0 - self.y0).max(0), (y.1 - self.y0).min(STOREY));
+        let (za, zb) = ((z.0 + HALF).max(0), (z.1 + HALF).min(W));
+        for yy in ya..yb { for zz in za..zb { for xx in xa..xb { self.g[((yy * W + zz) * W + xx) as usize] = e; } } }
+    }
+    fn at(&self, x: i32, y: i32, z: i32) -> u16 { self.g[((y * W + z) * W + x) as usize] }
+    /// Greedy merge into boxes of one element (x first, then z, then y), at most 255 ticks per side.
+    fn emit(&self, out: &mut Bricks, structure: u16) {
+        let mut done = vec![false; self.g.len()];
+        let idx = |x: i32, y: i32, z: i32| ((y * W + z) * W + x) as usize;
+        for y in 0..STOREY { for z in 0..W { for x in 0..W {
+            let e = self.at(x, y, z);
+            if e == 0 || done[idx(x, y, z)] { continue; }
+            let free = |x: i32, y: i32, z: i32| self.at(x, y, z) == e && !done[idx(x, y, z)];
+            let mut x1 = x + 1;
+            while x1 < W && x1 - x < 255 && free(x1, y, z) { x1 += 1; }
+            let mut z1 = z + 1;
+            'zl: while z1 < W && z1 - z < 255 { for xx in x..x1 { if !free(xx, y, z1) { break 'zl; } } z1 += 1; }
+            let mut y1 = y + 1;
+            'yl: while y1 < STOREY { for zz in z..z1 { for xx in x..x1 { if !free(xx, y1, zz) { break 'yl; } } } y1 += 1; }
+            for yy in y..y1 { for zz in z..z1 { for xx in x..x1 { done[idx(xx, yy, zz)] = true; } } }
+            let ek = element(e);
+            let b = out.add([x - HALF, y + self.y0, z - HALF], [x1 - x, y1 - y, z1 - z], ek.material, ek.paint, structure);
+            if ek.infill { out.flags[b as usize] |= F_INFILL; }
+        } } }
+    }
+}
+
+/// Grid lines of the 7.5 m column grid.
+const GRID: [i32; 4] = [-90, -30, 30, 90];
+/// Core: the centre bay, walls 2 ticks inside the grid lines; corridor ring 14 ticks wide outside it.
+const CORE_H: i32 = 30;
+const CORRIDOR: i32 = CORE_H + 14;
+/// Stair: two flights of 10 ticks (1.25 m) in the east half of the core.
+const STAIR_X: (i32, i32) = (8, 18);
+const STAIR_X2: (i32, i32) = (18, 28);
+/// Stair opening in the slab above.
+const HOLE: ((i32, i32), (i32, i32)) = ((8, 28), (-20, 2));
+
+fn paint_storey(s: &mut Storey, k: i32, storeys: i32) {
+    use el::*;
+    let y0 = s.y0;
+    let floor = y0 + SLAB_T;           // top of this storey's slab
+    let top = y0 + STOREY;           // underside of the next slab
+    let roof = k == storeys;         // penthouse storey on the roof
+    // slab (with the stair opening above the flight from the storey below)
+    s.fill((-HALF, HALF), (y0, floor), (-HALF, HALF), SLAB);
+    if k > 0 { s.fill(HOLE.0, (y0, floor), HOLE.1, 0); }
+    if roof {
+        // parapet around the roof edge, 1 m high
+        for (x, z) in [((-HALF, HALF), (-HALF, -HALF + 2)), ((-HALF, HALF), (HALF - 2, HALF)), ((-HALF, -HALF + 2), (-HALF, HALF)), ((HALF - 2, HALF), (-HALF, HALF))] {
+            s.fill(x, (floor, floor + 8), z, PARAPET);
+        }
+        // penthouse: the core walls one storey up, roofed, with a door out to the roof
+        core_walls(s, floor, top, true);
+        return;
+    }
+    // exterior wall: spandrel 0.875 m, glass band to 3.0 m, header to the slab above; mullions every 1.875 m
+    let ring = [((-HALF, HALF), (-HALF, -HALF + 2)), ((-HALF, HALF), (HALF - 2, HALF)), ((-HALF, -HALF + 2), (-HALF + 2, HALF - 2)), ((HALF - 2, HALF), (-HALF + 2, HALF - 2))];
+    for (x, z) in ring {
+        s.fill(x, (floor, floor + 7), z, SPANDREL);
+        s.fill(x, (floor + 7, floor + 24), z, GLASS);
+        s.fill(x, (floor + 24, top), z, HEADER);
+    }
+    for m in (-HALF..=HALF).step_by(15) {
+        let (a, b) = (m - 1, m + 1);
+        s.fill((a, b), (floor + 7, floor + 24), (-HALF, -HALF + 2), MULLION);
+        s.fill((a, b), (floor + 7, floor + 24), (HALF - 2, HALF), MULLION);
+        s.fill((-HALF, -HALF + 2), (floor + 7, floor + 24), (a, b), MULLION);
+        s.fill((HALF - 2, HALF), (floor + 7, floor + 24), (a, b), MULLION);
+    }
+    // glass is one tick thick, on the outer face of the wall line
+    s.fill((-HALF + 1, HALF - 1), (floor + 7, floor + 24), (-HALF + 1, -HALF + 2), 0);
+    s.fill((-HALF + 1, HALF - 1), (floor + 7, floor + 24), (HALF - 2, HALF - 1), 0);
+    s.fill((-HALF + 1, -HALF + 2), (floor + 7, floor + 24), (-HALF + 1, HALF - 1), 0);
+    s.fill((HALF - 2, HALF - 1), (floor + 7, floor + 24), (-HALF + 1, HALF - 1), 0);
+    if k == 0 {
+        // lobby entrance: a 1.75 m x 2.5 m opening in the south facade
+        s.fill((-7, 7), (floor, floor + 20), (-HALF, -HALF + 2), 0);
+    }
+    // core walls with the stair door
+    core_walls(s, floor, top, false);
+    // offices: a corridor ring around the core; the north and south bands run the full width (they own the
+    // corners), the east and west bands sit between them. Every office has a door onto the corridor.
+    if k > 0 {
+        let c = CORRIDOR;
+        // corridor walls; the north and south ones run to the facade and close off the east/west bands
+        s.fill((-HALF + 2, HALF - 2), (floor, top), (c, c + 1), PARTITION);
+        s.fill((-HALF + 2, HALF - 2), (floor, top), (-c - 1, -c), PARTITION);
+        s.fill((c, c + 1), (floor, top), (-c, c), PARTITION);
+        s.fill((-c - 1, -c), (floor, top), (-c, c), PARTITION);
+        // partitions between offices
+        for &p in &[-30, 0, 30] {
+            s.fill((p, p + 1), (floor, top), (c + 1, HALF - 2), PARTITION);
+            s.fill((p, p + 1), (floor, top), (-HALF + 2, -c - 1), PARTITION);
+        }
+        s.fill((c + 1, HALF - 2), (floor, top), (0, 1), PARTITION);
+        s.fill((-HALF + 2, -c - 1), (floor, top), (0, 1), PARTITION);
+        // doors, 0.875 x 2.125 m
+        for &d in &[-40, -20, 10, 34] {
+            s.fill((d, d + 7), (floor, floor + 17), (c, c + 1), 0);
+            s.fill((d, d + 7), (floor, floor + 17), (-c - 1, -c), 0);
+        }
+        for &d in &[-25, 15] {
+            s.fill((c, c + 1), (floor, floor + 17), (d, d + 7), 0);
+            s.fill((-c - 1, -c), (floor, floor + 17), (d, d + 7), 0);
+        }
+    }
+    // columns on the grid (inside the exterior wall at the perimeter); painted last so they win
+    for &gx in &GRID { for &gz in &GRID {
+        let cx = if gx == -HALF { -HALF + 2 } else if gx == HALF { HALF - 7 } else { gx - 2 };
+        let cz = if gz == -HALF { -HALF + 2 } else if gz == HALF { HALF - 7 } else { gz - 2 };
+        if gx.abs() == CORE_H && gz.abs() == CORE_H { continue; }   // the core corners are core wall
+        s.fill((cx, cx + 5), (floor, top), (cz, cz + 5), COLUMN);
+    } }
+    // the stair: flight A north along x in STAIR_X (8 steps), landing, flight B south in STAIR_X2 (7 steps)
+    stair(s, floor);
+}
+
+fn core_walls(s: &mut Storey, floor: i32, top: i32, penthouse: bool) {
+    use el::*;
+    let c = CORE_H;
+    s.fill((-c, c), (floor, top), (-c, -c + 2), CORE);
+    s.fill((-c, c), (floor, top), (c - 2, c), CORE);
+    s.fill((-c, -c + 2), (floor, top), (-c, c), CORE);
+    s.fill((c - 2, c), (floor, top), (-c, c), CORE);
+    // door from the corridor (south wall), next to the foot of flight A
+    s.fill((STAIR_X.0, STAIR_X.0 + 7), (floor, floor + 17), (-c, -c + 2), 0);
+    // west door into the open core lobby
+    s.fill((-c, -c + 2), (floor, floor + 17), (-4, 3), 0);
+    if penthouse { s.fill((-c, c), (top - SLAB_T, top), (-c, c), SLAB); }
+}
+
+fn stair(s: &mut Storey, floor: i32) {
+    use el::*;
+    // each step is a 0.5 m deep block (its top 0.25 m above the previous): a cast stair with a waist,
+    // so there is headroom under the flight above
+    for k in 1..=8 {
+        let t = floor + 2 * k;
+        let z = -24 + 2 * (k - 1);
+        s.fill(STAIR_X, ((t - 4).max(floor), t), (z, z + 2), if k % 2 == 0 { STAIR } else { STAIR2 });
+    }
+    let land = floor + 16;
+    s.fill((STAIR_X.0, STAIR_X2.1), (land - 4, land), (-8, 2), LANDING);
+    for j in 1..=7 {
+        let t = land + 2 * j;
+        let z = -8 - 2 * j;
+        s.fill(STAIR_X2, (t - 4, t), (z, z + 2), if j % 2 == 0 { STAIR } else { STAIR2 });
+    }
+}
+
+/// Build the tower: `storeys` storeys plus the roof with its penthouse. Returns the brick store with joints.
+pub fn build(storeys: i32, structure: u16) -> Bricks {
+    let mut b = Bricks::new();
+    for k in 0..=storeys {
+        let mut s = Storey::new(k * STOREY);
+        paint_storey(&mut s, k, storeys);
+        // flight B of the storey below reaches 2 ticks into this storey's slab level: nothing to add, the slab
+        // is solid there (outside the opening)
+        s.emit(&mut b, structure);
+    }
+    b.build_joints();
+    b.log.clear();
+    b
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    extern crate std;
+    use std::time::Instant;
+
+    #[test] fn tower_gate() {
+        let t = Instant::now();
+        let mut b = build(12, 1);
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        let n = b.alive_count();
+        std::println!("tower 12 storeys: {n} bricks, {} joints, {:.1} B/brick records+joints, {:.1} B/brick with index, built in {ms:.0} ms",
+            b.live_joints, b.bytes_per_brick(), b.total_bytes_per_brick());
+        assert!(b.total_bytes_per_brick() < 100.0, "phase 1 gate: under 100 B a brick");
+        // nothing floats: every brick is connected to the ground
+        assert!(b.detached().is_empty(), "detached pieces in a fresh tower");
+        // incremental joints equal a rebuild
+        let mut r = b.clone(); r.build_joints(); assert_eq!(b.joint_set(), r.joint_set());
+        // a hit in a slab refines and keeps the joint graph exact
+        b.refine_sphere([0.0, (3 * STOREY + 1) as f32, 60.0], 6.0, 1);
+        let mut r = b.clone(); r.build_joints(); assert_eq!(b.joint_set(), r.joint_set());
+    }
+
+    #[test] fn dimensions_follow_the_scale_standard() {
+        let b = build(2, 1);
+        // storey height, slab, door and stair rise straight from the bricks
+        // walking surfaces up the stair: step tops and the floor (slab top) of each storey
+        let mut steps: std::vec::Vec<i32> = (0..b.len() as u32).filter(|&i| b.paint[i as usize] == 4 && b.size(i)[2] == 2).map(|i| b.tbox(i).max[1]).collect();
+        for k in 0..=2 { steps.push(k * STOREY + SLAB_T); }
+        steps.sort(); steps.dedup();
+        let rises: std::vec::Vec<i32> = steps.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(rises.iter().all(|&r| r == 2), "stair rises are 0.25 m: {rises:?}");
+        let slab = (0..b.len() as u32).find(|&i| b.paint[i as usize] == 0 && b.mat[i as usize] == mat::CONCRETE).unwrap();
+        assert_eq!(b.size(slab)[1], SLAB_T);
+    }
+}

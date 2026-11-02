@@ -51,3 +51,32 @@ fn world() -> &'static mut World { unsafe { WORLD.get_or_insert_with(World::new)
     for b in &w.bodies { p.extend_from_slice(&[b.p.x, b.p.y, b.p.z, b.q.x, b.q.y, b.q.z, b.q.w, b.h.x, b.h.y, b.h.z]); }
     p.as_ptr()
 }
+
+// ---------------------------------------------------------------- phase-1 playground (game.rs)
+use crate::game::Game;
+static mut GAME: Option<Game> = None;
+#[allow(static_mut_refs)]
+fn game() -> &'static mut Game { unsafe { GAME.as_mut().unwrap() } }
+
+#[no_mangle] pub extern "C" fn game_new(storeys: u32) { unsafe { GAME = Some(Game::new(storeys as i32)); } }
+#[no_mangle] pub extern "C" fn chunk_count() -> u32 { game().chunks.len() as u32 }
+#[no_mangle] pub extern "C" fn chunk_vptr(k: u32) -> *const f32 { game().chunks[k as usize].v.as_ptr() }
+#[no_mangle] pub extern "C" fn chunk_vlen(k: u32) -> u32 { game().chunks[k as usize].v.len() as u32 }
+#[no_mangle] pub extern "C" fn chunk_iptr(k: u32) -> *const u32 { game().chunks[k as usize].i.as_ptr() }
+#[no_mangle] pub extern "C" fn chunk_ilen(k: u32) -> u32 { game().chunks[k as usize].i.len() as u32 }
+#[no_mangle] pub extern "C" fn dirty_lo() -> i32 { game().dirty.0 }
+#[no_mangle] pub extern "C" fn dirty_hi() -> i32 { game().dirty.1 }
+#[no_mangle] pub extern "C" fn out_ptr() -> *const f32 { game().out.as_ptr() }
+#[no_mangle] pub extern "C" fn out_len() -> u32 { game().out.len() as u32 }
+#[no_mangle] pub extern "C" fn bricks_dump() { game().dump(); }
+#[no_mangle] pub extern "C" fn blast(x: f32, y: f32, z: f32, r: f32) -> u32 { game().blast(v3(x, y, z), r) as u32 }
+#[no_mangle] pub extern "C" fn raycast(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32, max: f32) -> f32 { game().raycast(v3(ox, oy, oz), v3(dx, dy, dz), max) }
+#[no_mangle] pub extern "C" fn bricks_alive() -> u32 { game().b.alive_count() as u32 }
+#[no_mangle] pub extern "C" fn joints_live() -> u32 { game().b.live_joints as u32 }
+#[no_mangle] pub extern "C" fn bytes_per_brick() -> f32 { game().b.total_bytes_per_brick() }
+#[no_mangle] pub extern "C" fn player_set(x: f32, y: f32, z: f32) { let g = game(); g.player.p = v3(x, y, z); g.player.v = V3::ZERO; }
+#[no_mangle] pub extern "C" fn player_step(dt: f32, wx: f32, wy: f32, wz: f32, jump: u32, fly: u32) {
+    let g = game(); g.player.step(&g.b, dt, v3(wx, wy, wz), jump != 0, fly != 0);
+}
+#[no_mangle] pub extern "C" fn player_get(axis: u32) -> f32 { game().player.p.get(axis as usize) }
+#[no_mangle] pub extern "C" fn player_on_ground() -> u32 { game().player.on_ground as u32 }

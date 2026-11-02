@@ -133,8 +133,9 @@ fn tangents(n: vec3f) -> mat2x3f {
   st(P.o_par + i, i);
   st(P.o_mint + i, 0x7f7fffffu);
 }
+fn dead(s: u32) -> bool { return Hs(s, H_ID).z > 0.5; }
 @compute @workgroup_size(64) fn prep_shapes(@builtin(global_invocation_id) g: vec3u) {
-  let s = g.x + 1u; if (s >= P.ns1) { return; }
+  let s = g.x + 1u; if (s >= P.ns1 || dead(s)) { return; }
   let b = sbody(s);
   let bq = B(b, F_Q);
   let lp = Hs(s, H_LP).xyz; let h = Hs(s, H_H).xyz;
@@ -174,7 +175,7 @@ fn wg_scan(t: u32, s: u32) -> u32 {
   for (var k = 0u; k < per; k++) { st(P.o_gstart + base + k, run); run += ld(P.o_gcount + base + k); }
 }
 @compute @workgroup_size(64) fn scatter(@builtin(global_invocation_id) g: vec3u) {
-  let s = g.x + 1u; if (s >= P.ns1) { return; }
+  let s = g.x + 1u; if (s >= P.ns1 || dead(s)) { return; }
   let hc = ld(P.o_cell + s);
   st(P.o_sorted + ld(P.o_gstart + hc) + atomicAdd(&ints[P.o_gfill + hc], 1u), s);
 }
@@ -183,31 +184,33 @@ fn push_pair(a: u32, b: u32) {
   let k = atomicAdd(&ints[C_NPAIR], 1u);
   if (k < P.max_pairs) { st(P.o_pairs + 2u * k, a); st(P.o_pairs + 2u * k + 1u, b); }
 }
+// Only shapes of awake bodies search (static and sleeping shapes are found by them). A shape searches every
+// non-empty level: its own and coarser levels in the 27 cells around its centre, finer levels over its AABB.
+// Each shape sits in the cell of its centre, so checking that cell visits it once. Two awake shapes report
+// their pair from the lower index.
 @compute @workgroup_size(64) fn pairs(@builtin(global_invocation_id) g: vec3u) {
-  let i = g.x + 1u; if (i >= P.ns1) { return; }
+  let i = g.x + 1u; if (i >= P.ns1 || dead(i)) { return; }
   let bi = sbody(i);
+  if (!dyn_awake(bi)) { return; }
   let lo = Hs(i, H_LO).xyz; let hi = Hs(i, H_HI).xyz;
   let wp = Hs(i, H_WP); let Li = u32(wp.w);
-  let ia = dyn_awake(bi);
-  if (ia && lo.y < 0.0) { push_pair(i, 0u); }
-  // own level (j > i) and every coarser level (whatever j): each pair is found once, from its finer shape
-  for (var L = Li; L < P.levels; L++) {
-    if (ld(C_LEVEL + L) == 0u) { continue; }   // empty level: nothing to find there
-    let c0 = cellc(wp.xyz, L);
-    var seen: array<u32, 27>; var ns = 0u;
-    for (var dz = -1; dz <= 1; dz++) { for (var dy = -1; dy <= 1; dy++) { for (var dx = -1; dx <= 1; dx++) {
-      let hc = chash(c0 + vec3i(dx, dy, dz), L);
-      var dup = false; for (var q = 0u; q < ns; q++) { if (seen[q] == hc) { dup = true; } }
-      if (dup) { continue; }
-      seen[ns] = hc; ns++;
+  if (lo.y < 0.0) { push_pair(i, 0u); }
+  for (var L = 0u; L < P.levels; L++) {
+    if (ld(C_LEVEL + L) == 0u) { continue; }
+    var c0: vec3i; var c1: vec3i;
+    if (L >= Li) { let c = cellc(wp.xyz, L); c0 = c - vec3i(1); c1 = c + vec3i(1); }
+    else { let e = vec3f(lcell(L)); c0 = cellc(lo - e, L); c1 = cellc(hi + e, L); }
+    for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
+      let cell = vec3i(cx, cy, cz);
+      let hc = chash(cell, L);
       let s0 = ld(P.o_gstart + hc); let s1 = s0 + ld(P.o_gcount + hc);
       for (var s = s0; s < s1; s++) {
         let j = ld(P.o_sorted + s);
-        if (L == Li && j <= i) { continue; }
-        if (u32(Hs(j, H_WP).w) != L) { continue; }
+        let wj = Hs(j, H_WP);
+        if (u32(wj.w) != L || any(cellc(wj.xyz, L) != cell)) { continue; }
         let bj = sbody(j);
         if (bj == bi) { continue; }
-        if (!ia && !dyn_awake(bj)) { continue; }   // nothing moves: no contact to solve
+        if (dyn_awake(bj) && j <= i) { continue; }
         let lj = Hs(j, H_LO).xyz; let hj = Hs(j, H_HI).xyz;
         if (any(lo > hj) || any(lj > hi)) { continue; }
         push_pair(i, j);
@@ -830,14 +833,17 @@ class GpuWorld {
     this.bodies = bodies; this.shapes = shapes;
     const n = bodies.length, ns = shapes.length;
     this.n = n; this.n1 = n + 1; this.ns = ns; this.ns1 = ns + 1;
+    // capacity: bodies and shapes can be added later (debris), up to these counts
+    this.capB = Math.max(n, opt.maxBodies || 0); this.capS = Math.max(ns, opt.maxShapes || 0);
+    const cb1 = this.capB + 1, cs1 = this.capS + 1;
     this.substeps = opt.substeps || 12;
     this.colorLimit = opt.colorLimit || 24;
     this.anchor = opt.anchor ?? true;
     this.sleep = opt.sleep ?? true;
     this.levels = 4;
-    this.maxMan = Math.max(64, Math.ceil((opt.manPerShape || 4) * ns));
-    this.maxPairs = Math.max(128, Math.ceil((opt.pairsPerShape || 8) * ns));
-    let G = 256; while (G < 2 * this.ns1) G *= 2; this.G = G;
+    this.maxMan = opt.maxContacts || Math.max(64, Math.ceil((opt.manPerShape || 4) * this.capS));
+    this.maxPairs = opt.maxPairs || Math.max(128, Math.ceil((opt.pairsPerShape || 8) * this.capS));
+    let G = 256; while (G < 2 * cs1) G *= 2; this.G = G;
     let T = 256; while (T < 2 * this.maxMan) T *= 2; this.T = T;
     // base cell: a typical brick with motion margin; larger shapes go to coarser levels (x4 each)
     const ext = shapes.map(s => 2 * Math.hypot(...s.h)).sort((a, b) => a - b);
@@ -846,15 +852,15 @@ class GpuWorld {
     const L = {};
     const take = (k, len) => { L[k] = o; o += len; };
     take('gcount', G); take('gstart', G); take('gfill', G);
-    take('sorted', this.ns1); take('cell', this.ns1); take('mask', this.n1);
+    take('sorted', cs1); take('cell', cs1); take('mask', cb1);
     take('ccount', 33); take('cstart', 33); take('cfill', 33);
     take('order', this.maxMan); take('mcolor', this.maxMan);
     take('t0', T); take('t1', T);
-    take('pairs', 2 * this.maxPairs); take('bcount', this.n1); take('bstart', this.n1); take('bfill', this.n1);
-    take('blist', 2 * this.maxMan); take('par', this.n1); take('mint', this.n1);
+    take('pairs', 2 * this.maxPairs); take('bcount', cb1); take('bstart', cb1); take('bfill', cb1);
+    take('blist', 2 * this.maxMan); take('par', cb1); take('mint', cb1);
     this.L = L; this.nInts = o;
 
-    const bod = new Float32Array(this.n1 * 20), sol = new Float32Array(this.n1 * 24), shp = new Float32Array(this.ns1 * 32);
+    const bod = new Float32Array(cb1 * 20), sol = new Float32Array(cb1 * 24), shp = new Float32Array(cs1 * 32);
     bodies.forEach((b, k) => {
       const i = k + 1;
       bod.set([...b.p, b.im, ...b.q, ...b.il, 0, 0, ...b.p, ...b.q], i * 20);
@@ -944,6 +950,7 @@ class GpuWorld {
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
     clr(0, 16); clr(L.gcount, this.G); clr(L.gfill, this.G); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.bcount, this.n1); clr(L.bfill, this.n1);
+    if (!this.n) { this.frame++; return; }
     const nb = Math.ceil(this.n / 64) || 1, nsh = Math.ceil(this.ns / 64) || 1;
     const stamp = this.ts && !this.qPending;
     const pass = (stage, args = false) => {
@@ -991,6 +998,43 @@ class GpuWorld {
     this.frame++;
   }
 
+  // ---- incremental edits (debris, a changing static structure)
+  // Append bodies (same format as create); returns the index of the first new body (0-based).
+  addBodies(list) {
+    const { bodies, shapes } = buildBodies(list);
+    if (this.n + bodies.length > this.capB || this.ns + shapes.length > this.capS) throw new Error('GpuWorld capacity');
+    const first = this.n;
+    const bod = new Float32Array(bodies.length * 20), sol = new Float32Array(bodies.length * 24), shp = new Float32Array(shapes.length * 32);
+    bodies.forEach((b, k) => { bod.set([...b.p, b.im, ...b.q, ...b.il, 0, 0, ...b.p, ...b.q], k * 20); sol.set([...b.v, 0, ...b.w, 0], k * 24); });
+    shapes.forEach((s, k) => { shp.set([s.body + first, s.mat, 0, 0, ...s.lp, 0, ...s.lq, ...s.h, 0], k * 32); });
+    const q = this.device.queue;
+    q.writeBuffer(this.bodBuf, this.n1 * 80, bod); q.writeBuffer(this.solBuf, this.n1 * 96, sol); q.writeBuffer(this.shpBuf, this.ns1 * 128, shp);
+    for (const s of shapes) this.shapes.push({ ...s, body: s.body + first });
+    for (const b of bodies) this.bodies.push(b);
+    this.n += bodies.length; this.n1 += bodies.length; this.ns += shapes.length; this.ns1 += shapes.length;
+    return first;
+  }
+  // Static shapes of fixed body `body` (1-based body index): set (create when slot is null) or kill.
+  // centre and half extents in metres, axis-aligned; returns the slot (1-based shape index).
+  setStaticShape(slot, body, centre, half, mat) {
+    const b = this.bodies[body - 1];
+    if (slot == null) {
+      if (this.ns + 1 > this.capS) throw new Error('GpuWorld capacity');
+      slot = this.ns1; this.ns++; this.ns1++;
+      this.shapes.push(null);
+    }
+    const lp = [centre[0] - b.p[0], centre[1] - b.p[1], centre[2] - b.p[2]];
+    const rec = { body, mat, lp, lq: [0, 0, 0, 1], h: half };
+    this.shapes[slot - 1] = rec;
+    this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, mat, 0, 0, ...lp, 0, 0, 0, 0, 1, ...half, 0]));
+    return slot;
+  }
+  killShape(slot) {
+    const s = this.shapes[slot - 1]; if (!s) return;
+    s.dead = true;
+    this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([s.body, s.mat, 1, 0]));
+  }
+
   step(dt = 1 / 60) {
     const enc = this.device.createCommandEncoder();
     this.encode(enc, dt);
@@ -1036,13 +1080,18 @@ class GpuWorld {
   }
 
   // Shapes as 10 floats each (p, q, h) for rendering, plus per-body state.
-  async readPose() {
+  // minBody > 0 returns only the shapes of bodies from that (1-based) index on, e.g. debris, with their
+  // materials in `mats`; dead shapes are skipped.
+  async readPose(minBody = 0) {
     const bod = await this.read(this.bodBuf, this.n1 * 80), sol = await this.read(this.solBuf, this.n1 * 96);
-    const pose = new Float32Array(this.ns * 10);
-    this.shapes.forEach((s, k) => {
+    const list = minBody ? this.shapes.filter(s => s && !s.dead && s.body >= minBody) : this.shapes;
+    const pose = new Float32Array(list.length * 10), mats = new Uint8Array(list.length);
+    list.forEach((s, k) => {
+      if (!s) return;
       const b = s.body * 20, p = [bod[b], bod[b + 1], bod[b + 2]], q = [bod[b + 4], bod[b + 5], bod[b + 6], bod[b + 7]];
       const wp = mv(q2m(q), s.lp), wq = qmulJ(q, s.lq);
       pose.set([p[0] + wp[0], p[1] + wp[1], p[2] + wp[2], ...wq, ...s.h], k * 10);
+      mats[k] = s.mat;
     });
     const body = new Float32Array(this.n * 7), vel = new Float32Array(this.n * 3), ang = new Float32Array(this.n * 3), sleeping = new Uint8Array(this.n);
     for (let i = 0; i < this.n; i++) {
@@ -1051,7 +1100,7 @@ class GpuWorld {
       vel.set(sol.subarray(s, s + 3), i * 3); ang.set(sol.subarray(s + 4, s + 7), i * 3);
       sleeping[i] = bod[b + 12] > 0.5 ? 1 : 0;
     }
-    return { pose, body, vel, ang, sleeping };
+    return { pose, mats, body, vel, ang, sleeping };
   }
 
   // This step's contacts: bodies, restitution, normal impulse total (N s) and approach speed (m/s) per contact,
