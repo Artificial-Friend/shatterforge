@@ -125,6 +125,31 @@ The engine test drops the tower 1.4 m at 5.2 m/s onto 285 stumps:
 - **The tower.** It breaks just above its bottom slab: that section carries 354 MN, and stopping the tower in one frame takes 1,395 MN.
 - **The crush-down.** The upper tower is cut free and goes on crushing in later rounds.
 
+### Connections, building kinds, reinforced concrete
+
+- **Connections.** A joint is a connection between two elements, and its strength is the weaker brick's strength times a factor per mode (compression, tension, shear):
+  - a seam inside one element: 1 / 1 / 1
+  - concrete slab to column or core: 1 / 0.5 / 0.45 (the shear is the slab's punching strength, about 0.33 √f_c)
+  - timber elements joined to each other (nailed or bolted): 1 / 0.1 / 0.25
+  - any other connection between different elements: 1 / 0.7 / 0.7
+- **Building kinds.** The same layout can be built three ways (settings):
+
+  | Building | Storeys | Built of | Worst joint, intact |
+  | --- | --- | --- | --- |
+  | Concrete frame | 12 | reinforced concrete | 82 % of strength |
+  | Masonry | 5 | masonry piers and facade, with a concrete core and floors | 94 % of strength |
+  | Mass timber | 6 | timber floors, posts, core and stairs | 53 % of strength |
+
+  Each fails through its own connections.
+- **Reinforced concrete.** Cast concrete elements (slabs, columns, core, stairs) are flagged as reinforced and fail in two stages. The first failure cracks the joint, or splits a brick but keeps the joint: the steel holds, and half the strength is left. A second failure separates it. Precast cladding is plain and fails at once. With this, cutting the perimeter takes 8 rounds and 349 joint failures (it was 6 rounds and 177).
+
+### Blasts on debris
+
+- **The ray.** The click ray tests the debris as drawn (oriented boxes) as well as the building.
+- **A falling piece** that is hit crumbles inside the blast radius (`blast_piece`), and the rest splits into its connected parts.
+- **The blast wave.** Every blast throws the debris within 2.5 radii outward.
+- **Concentrated hits.** A big piece is still broken by a hit that puts 100 kJ or more into one contact, such as the steel ball, even when the hit barely changes the piece's motion.
+
 ### Steel ball and settings
 
 - **Steel ball.** Key 4 switches the click from blasting to a steel ball fired from the camera: 0.5 m and 60 m/s by default. Its hits go through the same impact path as everything else.

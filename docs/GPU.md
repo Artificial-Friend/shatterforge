@@ -76,6 +76,29 @@ Extra contacts are now solved in parallel by Jacobi iteration with mass splittin
 
 The test (`plate`) drops a slab piece of 144 bricks, as one body, onto 144 blocks. 119 of its contacts are extra contacts, and it settles flat at 0.6249 m (expected 0.625), at rest.
 
+## Broad phase
+
+Every shape, whether moving, resting or static, searches only its own grid level and the coarser ones: a 3 × 3 × 3 neighbourhood at each.
+
+- **Why this is enough.** A shape's level fits its size, so anything it overlaps on those levels sits in a neighbouring cell. A big shape never scans finer levels, because the small shapes there find it.
+- **Who is checked.** A moving shape checks everything in its cells. A resting or static shape looks only into cells flagged as holding a moving shape, and only at the moving shapes there.
+- **Uniqueness.** Each pair is found once: on one level by the lower index, across levels by the finer shape.
+
+This replaces the previous rule, where only moving shapes searched and a large moving piece scanned finer levels over its whole extent. That cost about 10 ms per step in a collapse. On the first frame of the 2,000-box pile, the old and new searches find the same 5,871 candidate pairs (test `paircount`).
+
+## Dispatch
+
+All dispatches are direct, so the browser does not validate them one by one; Chromium validates indirect dispatches individually, and about 800 per step stalled whole frames.
+
+- **Sizes are safe bounds.** A colour holds at most one contact per body, so colour passes are sized by the body count. Every other pass is sized by capacity. The kernels skip work past their real counts.
+- **No estimates.** Sizes estimated from read-back stats arrive late, and they left contacts unsolved in fast-changing scenes.
+- **Colour cap.** At most 16 sequential colours are solved per sub-step by default (`maxColors`); contacts beyond them go to the parallel pass.
+- **Read-backs in flight.** Up to three stats read-backs and three debris read-backs are in flight at once. A late, older result is dropped, but impact events are never dropped.
+
+## Slots
+
+The slots of retired bodies and shapes are reused (`addBodies` returns the bodies' slots). `roomBodies()` and `roomShapes()` give the free capacity. `setVelocity` pushes a body and wakes it.
+
 ## Sleeping
 
 A body counts as at rest when, over the last 0.5 s, both hold:
