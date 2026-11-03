@@ -202,13 +202,24 @@ impl Game {
                 let t = self.b.tbox(c.brick);
                 if c.at <= t.min[c.axis] || c.at >= t.max[c.axis] { continue; }
                 cracked.push(c.brick);
+                let reinf = self.b.flags[c.brick as usize] & crate::brick::F_REINF != 0;
                 let n = self.b.split(c.brick, c.axis, c.at);
                 let mut jj = self.b.jhead[n as usize];
-                while jj != NONE { if self.b.joint_other(jj, n) == c.brick { self.b.remove_joint(jj); break; } jj = self.b.joint_next(jj, n); }
+                while jj != NONE {
+                    if self.b.joint_other(jj, n) == c.brick {
+                        // reinforced concrete cracks but the steel holds the two halves: the joint stays, cracked
+                        if reinf { self.b.jdmg[jj as usize] = self.b.jdmg[jj as usize].max(1); } else { self.b.remove_joint(jj); }
+                        break;
+                    }
+                    jj = self.b.joint_next(jj, n);
+                }
                 done.push(c.brick);
             } else {
                 if self.b.ja[j as usize] == NONE { continue; }
                 let (x, y) = (self.b.ja[j as usize], self.b.jb[j as usize]);
+                // reinforced on both sides and not yet cracked: it cracks; cracked already: it separates
+                let reinf = (self.b.flags[x as usize] & self.b.flags[y as usize]) & crate::brick::F_REINF != 0;
+                if reinf && self.b.jdmg[j as usize] == 0 { self.b.jdmg[j as usize] = 1; done.push(j); continue; }
                 self.b.remove_joint(j);
                 self.b.log.push(x); self.b.log.push(y);
                 done.push(j);

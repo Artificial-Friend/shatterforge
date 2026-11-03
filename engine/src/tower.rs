@@ -101,6 +101,7 @@ impl Storey {
             let ek = element_in(e, self.kind);
             let b = out.add([x - HALF, y + self.y0, z - HALF], [x1 - x, y1 - y, z1 - z], ek.material, ek.paint, structure);
             if ek.infill { out.flags[b as usize] |= F_INFILL; }
+            if ek.material == mat::CONCRETE && !ek.infill { out.flags[b as usize] |= crate::brick::F_REINF; }
             if matches!(e, el::STAIR | el::STAIR2 | el::LANDING) { out.flags[b as usize] |= crate::brick::F_MONO; }
         } } }
     }

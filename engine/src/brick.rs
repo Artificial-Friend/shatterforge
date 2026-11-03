@@ -22,6 +22,8 @@ pub const F_INFILL: u8 = 2;
 pub const F_DYNAMIC: u8 = 4;
 /// cast monolithically with its neighbours (stair flights): its joints are not sections for bending
 pub const F_MONO: u8 = 8;
+/// reinforced concrete: a failure first cracks it (the steel holds, half the strength is left), a second one separates
+pub const F_REINF: u8 = 16;
 
 /// Spatial index: each brick sits in exactly one cell, the cell holding its min corner, at the finest of four
 /// levels (1, 4, 16, 64 m) whose cell is at least as large as the brick. A query visits, per level, the cells

@@ -515,12 +515,15 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
         let mut ratio = fabs(f) / (area * cap);
         // bending across a joint between two bricks of one plate (side by side): the face is the section
         let mono = (b.flags[b.ja[ju] as usize] | b.flags[b.jb[ju] as usize]) & crate::brick::F_MONO != 0;
+        // a cracked reinforced joint has half its strength left (the steel across the crack)
+        let residual = if b.jdmg[ju] > 0 { 0.5 } else { 1.0 };
         if gravity && ax != 1 && !infill && !mono {
             let depth = (hi[1] - lo[1]) as f32 * TICK;
             let width = (hi[2 - ax] - lo[2 - ax]) as f32 * TICK;
             let mc = if ax == 0 { m[0] } else { m[1] };
             ratio = ratio.max(fabs(mc) / (width * depth * depth / 6.0) / flexural(ma).min(flexural(mb)));
         }
+        ratio /= residual;
         if ratio > out.max_ratio { out.max_ratio = ratio; }
         if ratio > 1.0 { out.failed.push((j, ratio)); }
     }
