@@ -92,18 +92,49 @@ After a blast, the page runs one structural round per frame until nothing more f
 
 One round over the whole tower takes about 60 ms native and 90–190 ms in wasm.
 
-### Falling pieces (`Game::impact`, `piece_impact`)
+### Impacts (`Game::impacts`)
 
-The GPU reports contacts whose approach speed is above 2 m/s and whose ½·J·v is above 20 kJ. For each body the page takes the strongest of these contacts per frame and passes it to the engine in the tower frame.
+Every frame, the page sends the engine the GPU's hard contacts, from both sides of each contact: up to 32 per falling piece and 96 for the standing structure. Each contact is passed in the tower frame with its point, the direction it pushes the body, its impulse J, its approach speed v and the material on the other side.
 
-- **Crushing.** The volume ½·J·v / crush energy around the contact (radius capped at 1.5 m) is refined to 0.25 m and turned into crumbs.
-- **Cracking.** The piece is analysed with inertial loads m·J/(M·dt) drawn to the contact, and failures crack it as above.
-- **New pieces.** Each connected part becomes a new GPU body. It starts with the parent's velocity at its centre of mass.
+- **Crushing on both sides.** The impact energy ½·J·v crushes the same volume on each side: V = E / (c_self + c_other), where c is the crush energy per m³ of each material. Concrete on concrete crushes half each; glass on concrete crushes mostly the glass. The radius is capped at 1.5 m.
+- **The standing structure takes the hit.**
+  - The downward part of the contact force, J/dt, is added as a load on the bricks around the contact.
+  - A structural check runs on the whole structure, and up to 256 joints fail.
+  - Whatever comes loose detaches as new pieces.
+  - GPU bodies wake when static bricks are removed under them.
+- **A falling piece cracks.** Its bricks decelerate with it, and their inertia flows to all of its contacts. Only failures within one storey of the contacts count: a rigid stop in one frame would otherwise load every storey with the full deceleration.
+- **Crush-down.**
+  - **Required force.** The force needed to stop the piece is (ΣJ + |ΣJ·d|) / 2 / dt. For a piece hit from one side this is the net impulse; for a piece squeezed between two sides it is the larger side.
+  - **Weakest section.** The engine finds the weakest section within a storey of the contacts: the compressive strength times the area of the structural bricks and joints it cuts.
+  - **Cut and carry on.** If the required force exceeds that capacity, the piece is cut at that section. The parts beyond the cut keep their pre-impact velocity, minus what the section could absorb (capacity·dt / mass). They meet the crushed zone again on the next frame, so the collapse goes storey by storey.
+- **Infill holds nothing together.** Glass, cladding and partitions carry no load. Where the structure behind them has come apart, their joints are cut, and each infill brick stays with the structural part it rests on.
+- **Budgets.**
+  - Fragments under 16 bricks count as rubble, and at most 48 per piece stay as bodies.
+  - At most 256 crumbs per call stay as bodies, and 128 per piece.
+  - The rest of the crushed material is removed as dust and counted.
 
-In the page test, the ground storey was cut all round, so the 30-storey tower dropped 1.4 m. It broke into 7 pieces and about 110 crumbs on landing, and everything settled with no NaN.
+The engine test drops the tower 1.4 m at 5.2 m/s onto 285 stumps:
+- **The stumps.** 460 crumbs, and 256 joints fail.
+- **The tower.** It breaks just above its bottom slab: that section carries 354 MN, and stopping the tower in one frame takes 1,395 MN.
+- **The crush-down.** The upper tower is cut free and goes on crushing in later rounds.
+
+### Engine in a worker
+
+The authoritative engine runs in a Web Worker: blasts, the structural rounds and impacts. One job runs at a time, in this order: blasts, then impacts, then structural rounds.
+
+- **The page's copy.** The page keeps a copy of the brick store for walking, aiming and meshes. After each job that changed the store, the copy is replaced with the worker's (`Bricks::save`/`load`, about 88 B per brick).
+- **Frame rate.** Analysis therefore no longer stops the frame. A blast reaches the screen when its job is done.
+- **Fallback.** Without workers, the same jobs run inline.
+
+### Debris display
+
+- **Colours.** Debris boxes carry material + 16 × paint and use the tower mesh's colours.
+- **No GPU backlog.** GPU steps are only queued while fewer than two are unfinished, so read-backs never fall behind.
+- **Smooth motion.** Debris is drawn blended between the last two read-backs, matched shape by shape.
 
 ### Limits
 
-- **Debris doesn't damage the tower.** Falling debris breaks itself but does not yet damage the standing tower.
-- **One contact per body per frame.** Each body breaks at its strongest contact only. A big piece landing on many stumps at once is therefore under-damaged: no pancaking of the floors above.
-- **Stutter.** Structural rounds run on the main thread, so a collapse stutters. They should move to a worker, or analyse only the region around the damage.
+- **Vertical loads only.** The standing structure takes only the vertical part of an impact. A sideways hit crushes material but does not load the frame sideways.
+- **Mass is not conserved.** Crushed material beyond the rubble and crumb budgets is removed as dust.
+- **Frame rate depends on GPU throughput.** The worker keeps analysis off the drawing thread, but when the GPU cannot keep up, physics runs in slow motion rather than dropping frames.
+- **Snapshot cost.** The page's copy of the store is replaced as a whole after each changing job. That is about 0.4 MB for the intact tower and more after a collapse; sending only the changes would be cheaper.
