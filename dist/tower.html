@@ -2084,8 +2084,9 @@ function benchTick(now, dt) {
   }
   if (f - BENCH.lastRow >= 60 || f >= BENCH.end) {
     BENCH.lastRow = f;
-    let roof = 0; if (snapCur) for (let k = 0; k < snapCur.pose.length / 10; k++) roof = Math.max(roof, snapCur.pose[k * 10 + 1] + snapCur.pose[k * 10 + 8]);
-    BENCH.rows.push({ sim: f / 60, wall: (now - BENCH.wall0) / 1000, fps, steps: rate.steps, gpu: g, gpuStages: gpu.gpuMs ? { ...gpu.gpuMs } : null, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, breaks, dust: dustBricks, impacts: impactMs, structure: failedJoints, roof });
+    let roof = 0, bad = 0;
+    if (snapCur) for (let k = 0; k < snapCur.pose.length / 10; k++) { const y = snapCur.pose[k * 10 + 1] + snapCur.pose[k * 10 + 8]; if (Number.isFinite(y)) roof = Math.max(roof, y); else bad++; }
+    BENCH.rows.push({ sim: f / 60, wall: (now - BENCH.wall0) / 1000, fps, steps: rate.steps, gpu: g, gpuStages: gpu.gpuMs ? { ...gpu.gpuMs } : null, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, breaks, dust: dustBricks, impacts: impactMs, structure: failedJoints, roof, bad });
     benchShow();
   }
   if (f >= BENCH.end) { BENCH.on = false; BENCH.phase = 'done'; Math.random = mathRandom; benchShow(true); }
@@ -2100,8 +2101,8 @@ function benchShow(done) {
   lines.push(`settings: crush depth ${setting.crush} m · crumbs ${setting.crumbs} · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
   lines.push(`cut: 36 blasts in ${(BENCH.cutMs / 1000).toFixed(1)} s`);
   lines.push('');
-  lines.push('  sim s  wall s   fps  steps/s  GPU ms  bodies  awake  contacts  breaks   dust  roof m');
-  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)}`);
+  lines.push('  sim s  wall s   fps  steps/s  GPU ms  bodies  awake  contacts  breaks   dust  roof m  bad poses');
+  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)} ${String(x.bad).padStart(10)}`);
   if (done) {
     const simT = last.sim || 0, wallT = last.wall || 1;
     lines.push('');
