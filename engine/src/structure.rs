@@ -338,6 +338,14 @@ fn cells_of(t: &crate::brick::TBox) -> (Vec<i32>, Vec<i32>) {
     (cut(t.min[0], t.max[0]), cut(t.min[2], t.max[2]))
 }
 
+/// The width of plate that carries a moment across a section. The cell graph sends a bay's load through the
+/// faces of the cells next to a support, but in a plate the moment spreads sideways about as far as its lever
+/// arm (M / F) on each side: the section is the face widened by that, up to the plate's own width.
+fn spread(face: f32, m: f32, f: f32, extent: f32) -> f32 {
+    let arm = if fabs(f) > 1e-3 { fabs(m / f) } else { 0.0 };
+    (face + 2.0 * arm).min(extent).max(face)
+}
+
 /// Analyse `set` under per-brick loads `load` (N) acting along `dir`, supported at `sink` bricks.
 /// Moments are evaluated for vertical loads (gravity).
 pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) -> Analysis {
@@ -346,12 +354,37 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
     let mut first = vec![NONE; b.len()];     // brick -> first node
     let mut grid: Vec<(usize, usize)> = vec![(0, 0); set.len()];
     let mut links: Vec<Link> = Vec::new();
+    let mut cuts: Vec<(Vec<i32>, Vec<i32>)> = Vec::with_capacity(set.len());   // each brick's cell boundaries
+    let mut slot = vec![0u32; b.len()];   // brick -> its place in `set`
+    for (k, &i) in set.iter().enumerate() { slot[i as usize] = k as u32; }
     for (k, &i) in set.iter().enumerate() {
         let t = b.tbox(i);
         let infill = b.flags[i as usize] & F_INFILL != 0;
-        let (xs, zs) = if infill { (vec![t.min[0], t.max[0]], vec![t.min[2], t.max[2]]) } else { cells_of(&t) };
+        let (xs, zs) = if infill { (vec![t.min[0], t.max[0]], vec![t.min[2], t.max[2]]) } else {
+            // the edges of the supports it rests on are where the moment peaks: cells are cut there too
+            let (mut xs, mut zs) = cells_of(&t);
+            let mut j = b.jhead[i as usize];
+            let (mut ex, mut ez) = (Vec::new(), Vec::new());
+            while j != NONE {
+                let oi = b.joint_other(j, i);
+                let o = b.tbox(oi);
+                // (infill carries nothing: glass, cladding and partitions under a slab are no supports)
+                if b.jaxis[j as usize] == 1 && o.max[1] == t.min[1] && b.flags[oi as usize] & F_INFILL == 0 {
+                    for v in [o.min[0], o.max[0]] { if v > t.min[0] && v < t.max[0] { ex.push(v); } }
+                    for v in [o.min[2], o.max[2]] { if v > t.min[2] && v < t.max[2] { ez.push(v); } }
+                }
+                j = b.joint_next(j, i);
+            }
+            let merge = |base: &mut Vec<i32>, extra: Vec<i32>| {
+                for v in extra { base.push(v); }
+                base.sort_unstable(); base.dedup();
+            };
+            merge(&mut xs, ex); merge(&mut zs, ez);
+            (xs, zs)
+        };
         first[i as usize] = nodes.len() as u32;
         grid[k] = (xs.len() - 1, zs.len() - 1);
+        cuts.push((xs.clone(), zs.clone()));
         let vol = ((t.max[0] - t.min[0]) * (t.max[2] - t.min[2])) as f32;
         for cz in 0..zs.len() - 1 { for cx in 0..xs.len() - 1 {
             let (lo, hi) = ([xs[cx], t.min[1], zs[cz]], [xs[cx + 1], t.max[1], zs[cz + 1]]);
@@ -384,10 +417,26 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
             if first[o as usize] != NONE && b.ja[j as usize] == i {
                 let ax = b.jaxis[j as usize] as usize;
                 let infill = (b.flags[i as usize] | b.flags[o as usize]) & F_INFILL != 0;
-                let ko = set.iter().position(|&x| x == o).unwrap_or(0);
+                let ko = slot[o as usize] as usize;
                 let (na, nb) = (grid[k], grid[ko]);
                 let plane = b.tbox(i).max[ax];
-                for ca in 0..na.0 * na.1 { for cb in 0..nb.0 * nb.1 {
+                // the cells of o that overlap a cell of i: found by the cell boundaries (both are grids)
+                let (bx, bz) = (&cuts[ko].0, &cuts[ko].1);
+                let range = |c: &Vec<i32>, lo: i32, hi: i32| -> (usize, usize) {
+                    let n = c.len() - 1;
+                    let a = c.partition_point(|&v| v <= lo).saturating_sub(1).min(n);
+                    let z = c.partition_point(|&v| v < hi).min(n);
+                    (a, z.max(a))
+                };
+                let mut pairs: Vec<(usize, usize)> = Vec::new();
+                for ca in 0..na.0 * na.1 {
+                    let p = &nodes[(first[i as usize] + ca as u32) as usize];
+                    if ax != 1 && p.hi[ax] != plane { continue; }
+                    let (x0, x1) = if ax == 0 { (0, nb.0) } else { range(bx, p.lo[0], p.hi[0]) };
+                    let (z0, z1) = if ax == 2 { (0, nb.1) } else { range(bz, p.lo[2], p.hi[2]) };
+                    for cz in z0..z1 { for cx in x0..x1 { pairs.push((ca, cz * nb.0 + cx)); } }
+                }
+                for (ca, cb) in pairs {
                     let (ia, ib) = (first[i as usize] + ca as u32, first[o as usize] + cb as u32);
                     let (p, q) = (&nodes[ia as usize], &nodes[ib as usize]);
                     let mut lo = [0; 3]; let mut hi = [0; 3]; let mut ok = true;
@@ -403,7 +452,7 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
                     let mono = (b.flags[i as usize] | b.flags[o as usize]) & crate::brick::F_MONO != 0;
                     let k = if infill { 0.02 } else if mono { 0.05 } else { 1.0 };
                     links.push(Link { a: ia, b: ib, cond: cond * k, joint: j, axis: ax, face_lo: lo, face_hi: hi });
-                } }
+                }
             }
             j = b.joint_next(j, i);
         }
@@ -443,7 +492,7 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
         let alpha = (rz / pap) as f32;
         for k in 0..n { phi[k] += alpha * p[k]; r[k] -= alpha * ap[k]; }
         it += 1;
-        if dotp(&r, &r) < 1e-10 * r0 { break; }
+        if dotp(&r, &r) < 1e-8 * r0 { break; }
         pre(&r, &mut z);
         let rz2 = dotp(&r, &z); let beta = (rz2 / rz) as f32; rz = rz2;
         for k in 0..n { p[k] = z[k] + beta * p[k]; }
@@ -519,8 +568,10 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
         let residual = if b.jdmg[ju] > 0 { 0.5 } else { 1.0 };
         if gravity && ax != 1 && !infill && !mono {
             let depth = (hi[1] - lo[1]) as f32 * TICK;
-            let width = (hi[2 - ax] - lo[2 - ax]) as f32 * TICK;
             let mc = if ax == 0 { m[0] } else { m[1] };
+            let (ta, tb) = (b.tbox(b.ja[ju]), b.tbox(b.jb[ju]));
+            let extent = ((ta.max[2 - ax] - ta.min[2 - ax]).min(tb.max[2 - ax] - tb.min[2 - ax])) as f32 * TICK;
+            let width = spread((hi[2 - ax] - lo[2 - ax]) as f32 * TICK, mc, f, extent);
             ratio = ratio.max(fabs(mc) / (width * depth * depth / 6.0) / flexural(ma).min(flexural(mb)));
         }
         ratio /= residual;
@@ -537,8 +588,9 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
         let mut ratio = fabs(flow[l]) / (area * strength(m)[2]);
         if gravity {
             let depth = (k.face_hi[1] - k.face_lo[1]) as f32 * TICK;
-            let width = (k.face_hi[2 - k.axis] - k.face_lo[2 - k.axis]) as f32 * TICK;
             let mc = if k.axis == 0 { mlink[l][0] } else { mlink[l][1] };
+            let t = b.tbox(i);
+            let width = spread((k.face_hi[2 - k.axis] - k.face_lo[2 - k.axis]) as f32 * TICK, mc, flow[l], (t.max[2 - k.axis] - t.min[2 - k.axis]) as f32 * TICK);
             ratio = ratio.max(fabs(mc) / (width * depth * depth / 6.0) / flexural(m));
         }
         if ratio > out.max_ratio { out.max_ratio = ratio; }
