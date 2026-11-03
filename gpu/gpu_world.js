@@ -1131,26 +1131,42 @@ class GpuWorld {
   // Append bodies (same format as create); returns the index of the first new body (0-based).
   addBodies(list) {
     const { bodies, shapes } = buildBodies(list);
-    if (this.n + bodies.length > this.capB || this.ns + shapes.length > this.capS) throw new Error('GpuWorld capacity');
-    const first = this.n;
-    const bod = new Float32Array(bodies.length * 20), sol = new Float32Array(bodies.length * 24), shp = new Float32Array(shapes.length * 32);
-    bodies.forEach((b, k) => { bod.set([...b.p, b.im, ...b.q, ...b.il, 0, 0, ...b.p, ...b.q], k * 20); sol.set([...b.v, 0, ...b.w, 0], k * 24); });
-    shapes.forEach((s, k) => { shp.set([s.body + first, s.mat, 0, 0, ...s.lp, 0, ...s.lq, ...s.h, 0], k * 32); });
+    this.freeBodies = this.freeBodies || []; this.freeShapes = this.freeShapes || [];
+    const nb = Math.max(0, bodies.length - this.freeBodies.length), nsh = Math.max(0, shapes.length - this.freeShapes.length);
+    if (this.n + nb > this.capB || this.ns + nsh > this.capS) throw new Error('GpuWorld capacity');
     const q = this.device.queue;
-    q.writeBuffer(this.bodBuf, this.n1 * 80, bod); q.writeBuffer(this.solBuf, this.n1 * 96, sol); q.writeBuffer(this.shpBuf, this.ns1 * 128, shp);
-    for (const s of shapes) this.shapes.push({ ...s, body: s.body + first });
-    for (const b of bodies) this.bodies.push(b);
-    this.n += bodies.length; this.n1 += bodies.length; this.ns += shapes.length; this.ns1 += shapes.length;
-    return first;
+    // slots of retired bodies and shapes are reused first, then the arrays grow
+    const bslot = bodies.map(() => this.freeBodies.length ? this.freeBodies.pop() : (this.n++, this.n1++, this.n1 - 1));
+    this.bodyShapes = this.bodyShapes || new Map();
+    for (let k = 0; k < bodies.length; k++) {
+      const b = bodies[k], i = bslot[k];
+      this.bodyShapes.set(i, []);
+      q.writeBuffer(this.bodBuf, i * 80, new Float32Array([...b.p, b.im, ...b.q, ...b.il, 0, 0, ...b.p, ...b.q]));
+      q.writeBuffer(this.solBuf, i * 96, new Float32Array([...b.v, 0, ...b.w, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+      this.bodies[i - 1] = b;
+    }
+    for (const s of shapes) {
+      const slot = this.freeShapes.length ? this.freeShapes.pop() : (this.ns++, this.ns1++, this.ns1 - 1);
+      const body = bslot[s.body - 1];
+      q.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, s.mat, 0, 0, ...s.lp, 0, ...s.lq, ...s.h, 0]));
+      this.shapes[slot - 1] = { ...s, body };
+      (this.bodyShapes = this.bodyShapes || new Map());
+      if (!this.bodyShapes.has(body)) this.bodyShapes.set(body, []);
+      this.bodyShapes.get(body).push(slot);
+    }
+    return bslot;
   }
   // Static shapes of fixed body `body` (1-based body index): set (create when slot is null) or kill.
   // centre and half extents in metres, axis-aligned; returns the slot (1-based shape index).
   setStaticShape(slot, body, centre, half, mat) {
     const b = this.bodies[body - 1];
     if (slot == null) {
-      if (this.ns + 1 > this.capS) throw new Error('GpuWorld capacity');
-      slot = this.ns1; this.ns++; this.ns1++;
-      this.shapes.push(null);
+      if (this.freeShapes && this.freeShapes.length) slot = this.freeShapes.pop();
+      else {
+        if (this.ns + 1 > this.capS) throw new Error('GpuWorld capacity');
+        slot = this.ns1; this.ns++; this.ns1++;
+        this.shapes.push(null);
+      }
     }
     const lp = [centre[0] - b.p[0], centre[1] - b.p[1], centre[2] - b.p[2]];
     const rec = { body, mat, lp, lq: [0, 0, 0, 1], h: half };
@@ -1162,17 +1178,30 @@ class GpuWorld {
   killBody(body) {
     const b = this.bodies[body - 1]; if (!b || b.dead) return;
     b.dead = true;
-    this.shapes.forEach((s, k) => { if (s && s.body === body && !s.dead) this.killShape(k + 1); });
+    const own = this.bodyShapes && this.bodyShapes.get(body);
+    if (own) { for (const k of own) if (this.shapes[k - 1] && this.shapes[k - 1].body === body) this.killShape(k); this.bodyShapes.delete(body); }
+    else this.shapes.forEach((s, k) => { if (s && s.body === body && !s.dead) this.killShape(k + 1); });
+    (this.freeBodies = this.freeBodies || []).push(body);
     this.device.queue.writeBuffer(this.bodBuf, body * 80, new Float32Array([0, -1000, 0, 0]));
     this.device.queue.writeBuffer(this.bodBuf, body * 80 + 48, new Float32Array([1, 0, -1000, 0]));
   }
   // Take the impact events collected since the last call.
+  // free capacity: bodies and shapes (retired slots are reused)
+  roomBodies() { return this.capB - this.n + (this.freeBodies ? this.freeBodies.length : 0); }
+  roomShapes() { return this.capS - this.ns + (this.freeShapes ? this.freeShapes.length : 0); }
+  // Set a body's velocity and wake it (p, q: its current pose, which a wake records as its rest pose)
+  setVelocity(body, v, w, p, q) {
+    const qd = this.device.queue;
+    qd.writeBuffer(this.solBuf, body * 96, new Float32Array([...v, 1, ...w, 0]));
+    qd.writeBuffer(this.bodBuf, body * 80 + 48, new Float32Array([0, ...p, ...q]));
+  }
   // Wake all sleeping bodies at the next step (call when static shapes under them were removed).
   wakeAll() { this.wakeReq = true; }
   takeEvents() { const e = this.events; this.events = []; return e; }
   killShape(slot) {
-    const s = this.shapes[slot - 1]; if (!s) return;
+    const s = this.shapes[slot - 1]; if (!s || s.dead) return;
     s.dead = true;
+    (this.freeShapes = this.freeShapes || []).push(slot);
     this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([s.body, s.mat, 1, 0]));
   }
 
@@ -1248,6 +1277,7 @@ class GpuWorld {
   // minBody > 0 returns only the shapes of bodies from that (1-based) index on, e.g. debris, with their
   // materials in `mats`; dead shapes are skipped.
   async readPose(minBody = 0) {
+    const frame = this.frame;   // the step this read-back shows
     const bod = await this.read(this.bodBuf, this.n1 * 80), sol = await this.read(this.solBuf, this.n1 * 96);
     const t0 = performance.now();
     const list = [], slots = [];
@@ -1267,7 +1297,7 @@ class GpuWorld {
       vel.set(sol.subarray(s, s + 3), i * 3); ang.set(sol.subarray(s + 4, s + 7), i * 3);
       sleeping[i] = bod[b + 12] > 0.5 ? 1 : 0;
     }
-    return { pose, mats, cols, slots: Uint32Array.from(slots), body, vel, ang, sleeping, jsMs: performance.now() - t0 };
+    return { pose, mats, cols, slots: Uint32Array.from(slots), body, vel, ang, sleeping, frame, jsMs: performance.now() - t0 };
   }
 
   // This step's contacts: bodies, restitution, normal impulse total (N s) and approach speed (m/s) per contact,

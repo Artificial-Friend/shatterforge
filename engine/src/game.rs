@@ -511,6 +511,48 @@ impl Game {
         n + scrumbs.len() + spieces.len()
     }
 
+    /// A blast at c (m, tower frame) with radius r (m) on falling piece `piece`: what is inside crumbles, the
+    /// rest splits into its connected parts. Output as `impacts` (no static changes, one broken piece).
+    pub fn blast_piece(&mut self, piece: u32, c: V3, r: f32) -> usize {
+        self.b.log.clear();
+        self.emit(&[], &[]);
+        let pid = piece as usize;
+        if pid >= self.pieces.len() || self.pieces[pid].is_empty() { self.out.push(0.0); return 0; }
+        let mut set = core::mem::take(&mut self.pieces[pid]);
+        let ct = [c.x / TICK, c.y / TICK, c.z / TICK];
+        let rt = r / TICK;
+        let near: Vec<u32> = set.iter().copied().filter(|&i| sphere_hits(&self.b, i, ct, rt + 1.0)).collect();
+        if near.is_empty() { self.pieces[pid] = set; self.out.push(0.0); return 0; }
+        let mut created = Vec::new();
+        self.b.refine_bricks(near, ct, rt + 1.0, 2, &mut created);
+        set.extend_from_slice(&created);
+        let mut crumbs = Vec::new();
+        for k in (0..set.len()).rev() { let i = set[k]; if dist2(&self.b, i, ct) <= rt * rt { crumbs.push(i); set.swap_remove(k); } }
+        for &i in &crumbs { self.b.flags[i as usize] &= !F_DYNAMIC; self.b.remove(i); self.b.flags[i as usize] |= F_DYNAMIC; }
+        let keep = self.crumb_keep;
+        if crumbs.len() > keep { let n = crumbs.len(); let kept: Vec<u32> = (0..keep).map(|k| crumbs[k * n / keep]).collect(); self.dust += n - keep; crumbs = kept; }
+        let mut kids: Vec<(i32, bool, Vec<u32>)> = crumbs.iter().map(|&i| (-1, true, vec![i])).collect();
+        if !set.is_empty() {
+            sever_infill(&mut self.b, &set);
+            let mut groups = components(&self.b, &set);
+            groups.sort_by_key(|g| core::cmp::Reverse(g.len()));
+            let mut room = self.rubble_keep;
+            for g in groups {
+                if g.len() < RUBBLE_MIN { if room == 0 { for &i in &g { self.b.flags[i as usize] &= !F_DYNAMIC; self.b.remove(i); self.b.flags[i as usize] |= F_DYNAMIC; } self.dust += g.len(); continue; } room -= 1; }
+                let id = self.new_piece(g.clone());
+                kids.push((id as i32, true, g));
+            }
+        }
+        self.out.push(1.0);
+        self.out.push(pid as f32); self.out.push(kids.len() as f32); self.out.push(0.0);
+        for (id, hit, g) in &kids {
+            self.out.push(*id as f32); self.out.push(if *hit { 1.0 } else { 0.0 }); self.out.push(g.len() as f32);
+            for &i in g { Self::push_box(&mut self.out, &self.b, i); }
+        }
+        self.out.extend_from_slice(&[0.0; 6]);
+        kids.len()
+    }
+
     /// Ray from o along unit d (m): distance to the first static brick, or a negative value.
     pub fn raycast(&mut self, o: V3, d: V3, max: f32) -> f32 {
         match self.b.raycast([o.x / TICK, o.y / TICK, o.z / TICK], [d.x, d.y, d.z], max / TICK) { Some((_, t, _)) => t * TICK, None => -1.0 }
@@ -839,5 +881,16 @@ mod tests {
             total_free_cuts += 1;
         }
         assert!(total_free_cuts >= 2, "the crush-down goes on storey by storey");
+    }
+    #[test] fn a_blast_on_a_falling_piece_crumbles_it_and_splits_the_rest() {
+        let mut g = Game::new(3);
+        // cut the ground storey all round: the upper floors come loose as a piece
+        let mut x = -11.6f32; let mut piece = -1i32;
+        while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 { g.blast(v3(x, 1.6, z), 0.7); for (id, sz) in bodies_in(&g.out) { if id >= 0 && sz > 100 { piece = id; } } z += 0.8; } x += 0.8; }
+        assert!(piece >= 0);
+        let before = g.pieces[piece as usize].len();
+        let n = g.blast_piece(piece as u32, v3(0.0, 4.0, -11.0), 1.2);
+        std::println!("blast on a piece of {before} bricks: {n} bodies");
+        assert!(n > 5, "crumbs and the rest");
     }
 }

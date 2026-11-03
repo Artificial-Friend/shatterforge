@@ -107,6 +107,7 @@ static mut SNAP: Vec<u8> = Vec::new();
 /// Room for `n` impact records (11 floats each, see `Game::impacts`); returns where to write them.
 #[no_mangle] pub extern "C" fn impacts_in(n: u32) -> *mut f32 { let g = game(); g.inp.clear(); g.inp.resize(n as usize * 11, 0.0); g.inp.as_mut_ptr() }
 #[no_mangle] pub extern "C" fn impacts(dt: f32) -> u32 { game().impacts(dt) as u32 }
+#[no_mangle] pub extern "C" fn piece_blast(piece: u32, x: f32, y: f32, z: f32, r: f32) -> u32 { game().blast_piece(piece, v3(x, y, z), r) as u32 }
 #[no_mangle] pub extern "C" fn dust_bricks() -> u32 { game().dust as u32 }
 #[no_mangle] pub extern "C" fn piece_impact(piece: u32, px: f32, py: f32, pz: f32, dx: f32, dy: f32, dz: f32, impulse: f32, approach: f32, dt: f32) -> u32 {
     game().impact(piece, v3(px, py, pz), v3(dx, dy, dz), impulse, approach, dt) as u32

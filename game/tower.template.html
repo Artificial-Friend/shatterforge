@@ -185,7 +185,7 @@ function pullDebris() {
     r.t = performance.now();
     r.index = new Map(); for (let k = 0; k < r.slots.length; k++) r.index.set(r.slots[k], k);
     snapPrev = snapCur; snapCur = r;
-    velHist.unshift(r.vel); if (velHist.length > 4) velHist.pop(); lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
+    velHist.unshift({ v: r.vel, frame: r.frame }); if (velHist.length > 4) velHist.pop(); lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
     const n = Math.min(MAXD, r.pose.length / 10);
     for (let k = 0; k < n; k++) dMesh.setColorAt(k, debrisColour(r.cols[k], r.slots[k]));
     if (dMesh.instanceColor) { dMesh.instanceColor.updateRange.count = n * 3; dMesh.instanceColor.needsUpdate = true; }
@@ -268,7 +268,7 @@ function applyStatic(updates) {
 function addPieces(list, xf, vel, cool) {
   if (!gpu || !list.length) return;
   // capacity: bodies and shapes (slots of retired bodies are not reused)
-  let room = gpu.capB - gpu.n, sroom = gpu.capS - gpu.ns, k = 0;
+  let room = gpu.roomBodies(), sroom = gpu.roomShapes(), k = 0;
   while (k < list.length && room > 0 && sroom >= list[k].boxes.length) { sroom -= list[k].boxes.length; room--; k++; }
   if (k < list.length) { dropped += list.length - k; list = list.slice(0, k); }
   const R = xf ? xf.R : [[1, 0, 0], [0, 1, 0], [0, 0, 1]], qs = xf ? m2q(R) : [0, 0, 0, 1], C = xf ? xf.C : [0, 0, 0], T = xf ? xf.T : [0, 0, 0];
@@ -285,10 +285,10 @@ function addPieces(list, xf, vel, cool) {
     const v = vel ? vel(c, b) : { v: [0, 0, 0], w: [0, 0, 0] };
     return { shapes, v: v.v, w: v.w };
   });
-  const first = gpu.addBodies(bodies);
+  const idxs = gpu.addBodies(bodies);
   list.forEach((b, k) => {
     if (b.id < 0) return;
-    const idx = first + k + 1, gb = gpu.bodies[idx - 1];
+    const idx = idxs[k], gb = gpu.bodies[idx - 1];
     bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, v0: bodies[k].v, f0: gpu.frame, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: performance.now() + (cool || 0) });
   });
 }
@@ -317,6 +317,7 @@ onmessage = async (m) => {
   let n = 0;
   if (d.op === 'blast') n = E.blast(d.x, d.y, d.z, d.r);
   else if (d.op === 'structure') n = E.structure_step(d.max);
+  else if (d.op === 'pblast') n = E.piece_blast(d.piece, d.x, d.y, d.z, d.r);
   else if (d.op === 'impacts') { const p = E.impacts_in(d.recs.length / 11); new Float32Array(E.memory.buffer, p, d.recs.length).set(d.recs); n = E.impacts(d.dt); }
   const out = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
   let snap = null;
@@ -343,6 +344,7 @@ function runInline(job) {
   let n = 0;
   if (job.op === 'blast') n = E.blast(job.x, job.y, job.z, job.r);
   else if (job.op === 'structure') n = E.structure_step(job.max);
+  else if (job.op === 'pblast') n = E.piece_blast(job.piece, job.x, job.y, job.z, job.r);
   else { const p = E.impacts_in(job.recs.length / 11); new Float32Array(E.memory.buffer, p, job.recs.length).set(job.recs); n = E.impacts(job.dt); }
   return { op: job.op, n, out: new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), dust: E.dust_bricks(), ms: performance.now() - t0, inline: true };
 }
@@ -370,6 +372,7 @@ function finishInner(r) {
   // the page's copy of the store
   if (r.snap) { const p = E.snap_in(r.snap.length); new Uint8Array(E.memory.buffer, p, r.snap.length).set(r.snap); E.snap_load(r.lo, r.hi); }
   if (r.op === 'blast') onBlast(job, r);
+  else if (r.op === 'pblast') onImpacts(job, r);
   else if (r.op === 'structure') onStructure(r);
   else onImpacts(job, r);
 }
@@ -381,12 +384,72 @@ function readStatic(f) {
   return { updates, bodies: sb.bodies, o: sb.o };
 }
 
+// The ray against the debris as drawn (oriented boxes): the nearest hit, as { t, slot }
+function rayDebris(o, d, maxT) {
+  const r = snapCur; if (!r) return null;
+  let best = null;
+  const n = r.pose.length / 10;
+  for (let k = 0; k < n; k++) {
+    const b = k * 10, p = [r.pose[b], r.pose[b + 1], r.pose[b + 2]], h = [r.pose[b + 7], r.pose[b + 8], r.pose[b + 9]];
+    // quick reject: the ray against the bounding sphere
+    const ox = o[0] - p[0], oy = o[1] - p[1], oz = o[2] - p[2], rad = Math.hypot(h[0], h[1], h[2]);
+    const bq = ox * d[0] + oy * d[1] + oz * d[2], cq = ox * ox + oy * oy + oz * oz - rad * rad;
+    if (cq > 0 && bq > 0) continue;
+    if (bq * bq - cq < 0) continue;
+    // the slab test in the box's own frame
+    const Rt = mt(q2m([r.pose[b + 3], r.pose[b + 4], r.pose[b + 5], r.pose[b + 6]]));
+    const lo = mv(Rt, [ox, oy, oz]), ld = mv(Rt, d);
+    let t0 = 0, t1 = best ? best.t : maxT, ok = true;
+    for (let a = 0; a < 3 && ok; a++) {
+      if (Math.abs(ld[a]) < 1e-9) { if (Math.abs(lo[a]) > h[a]) ok = false; continue; }
+      let ta = (-h[a] - lo[a]) / ld[a], tb = (h[a] - lo[a]) / ld[a];
+      if (ta > tb) [ta, tb] = [tb, ta];
+      t0 = Math.max(t0, ta); t1 = Math.min(t1, tb); if (t0 > t1) ok = false;
+    }
+    if (ok) best = { t: t0, slot: r.slots[k] };
+  }
+  return best;
+}
+// A blast throws the debris near it outward (strongest at the centre, nothing beyond 2.5 radii)
+function blastWave(c, r) {
+  if (!gpu || !lastBodies) return;
+  const reach = 2.5 * r;
+  for (let i = 2; i <= gpu.n; i++) {
+    const o = (i - 1) * 7; if (o + 6 >= lastBodies.length) break;
+    const b = gpu.bodies[i - 1]; if (!b || b.dead) continue;
+    const p = [lastBodies[o], lastBodies[o + 1], lastBodies[o + 2]];
+    const dx = p[0] - c[0], dy = p[1] - c[1], dz = p[2] - c[2], dist = Math.hypot(dx, dy, dz);
+    if (dist > reach || dist < 1e-6) continue;
+    const s = 6 * (1 - dist / reach) * r;   // m/s
+    const vo = (i - 1) * 3, v = lastVel ? [lastVel[vo] + dx / dist * s, lastVel[vo + 1] + dy / dist * s + 0.3 * s, lastVel[vo + 2] + dz / dist * s] : [dx / dist * s, dy / dist * s, dz / dist * s];
+    gpu.setVelocity(i, v, [0, 1, 2].map(() => (Math.random() - 0.5) * 2), p, [lastBodies[o + 3], lastBodies[o + 4], lastBodies[o + 5], lastBodies[o + 6]]);
+  }
+  lastActive = performance.now();
+}
 function doBlast() {
   const d = new THREE.Vector3(); cam.getWorldDirection(d);
   const o = cam.position;
-  const t = E.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 200);
-  if (t < 0) return;
-  const p = o.clone().addScaledVector(d, t + 0.05);
+  const ts = E.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 200);
+  const hit = gpu ? rayDebris([o.x, o.y, o.z], [d.x, d.y, d.z], ts >= 0 ? ts : 200) : null;
+  if (hit) {
+    // debris is nearer than the building: a piece breaks, loose rubble is thrown
+    const p = o.clone().addScaledVector(d, hit.t + 0.05), c = [p.x, p.y, p.z];
+    const sh = gpu.shapes[hit.slot - 1], idx = sh ? sh.body : 0;
+    if (bodyInfo.has(idx)) {
+      const xf = frameOf(idx), Rt = mt(xf.R);
+      const sp = mv(Rt, [c[0] - xf.T[0], c[1] - xf.T[1], c[2] - xf.T[2]]).map((v, k) => v + xf.C[k]);
+      const vo = (idx - 1) * 3, v = lastVel ? [lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]] : [0, 0, 0], w = lastAng ? [lastAng[vo], lastAng[vo + 1], lastAng[vo + 2]] : [0, 0, 0];
+      const ctx = new Map([[idx, { J: [0, 0, 0], vPre: v, vPost: v, w0: w }]]);
+      jobs.blast.push({ op: 'pblast', piece: bodyInfo.get(idx).piece, x: sp[0], y: sp[1], z: sp[2], r: radius, blastC: c, ctx });
+    }
+    blastWave(c, radius);
+    lastBlast = bodyInfo.has(idx) ? `blast on a falling piece` : `blast in the rubble`;
+    pump();
+    return;
+  }
+  if (ts < 0) return;
+  const p = o.clone().addScaledVector(d, ts + 0.05);
+  blastWave([p.x, p.y, p.z], radius);
   jobs.blast.push({ op: 'blast', x: p.x, y: p.y, z: p.z, r: radius, ctx: { d: [d.x, d.y, d.z], t0: performance.now() } });
   pump();
 }
@@ -451,9 +514,9 @@ function impacts() {
         // the velocity before the hit: events arrive a read-back or two late, so take the fastest of the last
         // few read-backs (the hit only slows the body)
         let pre = null, best = -1;
-        for (const v of velHist) if (vo + 2 < v.length) { const sp = Math.hypot(v[vo], v[vo + 1], v[vo + 2]); if (sp > best) { best = sp; pre = [v[vo], v[vo + 1], v[vo + 2]]; } }
-        // a body made a few steps ago (a piece cut free) has little history: its starting velocity counts too
         const inf = bodyInfo.get(idx);
+        for (const { v, frame } of velHist) if (vo + 2 < v.length && frame > inf.f0) { const sp = Math.hypot(v[vo], v[vo + 1], v[vo + 2]); if (sp > best) { best = sp; pre = [v[vo], v[vo + 1], v[vo + 2]]; } }
+        // a body made a few steps ago (a piece cut free) has little history: its starting velocity counts too
         if (inf.v0 && gpu.frame - inf.f0 <= 8) { const sp = Math.hypot(...inf.v0); if (sp > best) { best = sp; pre = inf.v0.slice(); } }
         c = { J: [0, 0, 0], n: 0, vPre: pre, vPost: lastVel ? [lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]] : [0, 0, 0], w0: lastAng ? [lastAng[vo], lastAng[vo + 1], lastAng[vo + 2]] : [0, 0, 0] };
       } else c = { n: 0 };
@@ -546,6 +609,7 @@ function onImpacts(job, r) {
       const base = b.hit ? vNow : vFree;
       const v = [base[0] + w0[1] * rr[2] - w0[2] * rr[1], base[1] + w0[2] * rr[0] - w0[0] * rr[2], base[2] + w0[0] * rr[1] - w0[1] * rr[0]];
       if (b.id < 0) for (let k = 0; k < 3; k++) v[k] += (Math.random() - 0.5) * 2;   // crushed crumbs scatter
+      if (b.id < 0 && job.blastC) { const dd = [cc[0] - job.blastC[0], cc[1] - job.blastC[1], cc[2] - job.blastC[2]], l = Math.hypot(...dd) || 1; for (let k = 0; k < 3; k++) v[k] += dd[k] / l * (2 + 2 * Math.random()); }
       return { v, w: w0.slice() };
     }, 0);
     breaks++;
@@ -631,7 +695,7 @@ function fireBall() {
   const d = new THREE.Vector3(); cam.getWorldDirection(d);
   const r = setting.bsize / 2, v = setting.bspeed;
   const c = [cam.position.x + d.x * (r + 0.6), cam.position.y + d.y * (r + 0.6), cam.position.z + d.z * (r + 0.6)];
-  if (gpu.capB - gpu.n < 1 || gpu.capS - gpu.ns < 4) return;
+  if (gpu.roomBodies() < 1 || gpu.roomShapes() < 4) return;
   gpu.addBodies([{ shapes: ballShapes(c, r), v: [d.x * v, d.y * v, d.z * v], w: [0, 0, 0] }]);
   lastActive = performance.now();
   balls++;
