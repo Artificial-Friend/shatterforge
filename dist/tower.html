@@ -47,6 +47,8 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
   <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
+  <label>Physics sub-steps <b id="v-substeps"></b><input type="range" id="s-substeps" min="4" max="16" step="1"><span class="hint">per 1/60 s step: more = stiffer, more accurate stacks, slower</span></label>
+  <label>Solver colours (max) <b id="v-colors"></b><input type="range" id="s-colors" min="8" max="31" step="1"><span class="hint">contacts beyond go to a parallel pass: fewer = faster, a little softer</span></label>
   <label>Ball speed <b id="v-bspeed"></b><input type="range" id="s-bspeed" min="20" max="300" step="10"></label>
   <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
   <h2>Diagnostics</h2>
@@ -1001,6 +1003,10 @@ class GpuWorld {
     const cb1 = this.capB + 1, cs1 = this.capS + 1;
     this.substeps = opt.substeps || 12;
     this.colorLimit = opt.colorLimit || 24;
+    // most sequential colours per solve; contacts beyond go to the parallel (Jacobi) pass. Each colour is a
+    // dispatch per sub-step, and dispatch count is what a step costs at this scale
+    this.maxColors = opt.maxColors || 16;
+    this.colorLimit = Math.min(this.colorLimit, this.maxColors);
     this.indirect = !!opt.indirect;   // the old indirect-dispatch path (for comparison)
     this.anchor = opt.anchor ?? true;
     this.sleep = opt.sleep ?? true;
@@ -1295,7 +1301,7 @@ class GpuWorld {
       if (seq < this.statLatest) return;
       this.statLatest = seq;
       this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7] };
-      this.colorLimit = Math.min(31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
+      this.colorLimit = Math.min(this.maxColors, 31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
       // per-colour contact counts (they size the direct dispatches): keep a slowly decaying maximum
       const cc = new Uint32Array(raw, 64 + 48 * this.maxEvents, 33);
       for (let c = 0; c < 33; c++) this.colCounts[c] = Math.max(cc[c], Math.floor(this.colCounts[c] * 0.95));
@@ -1447,7 +1453,7 @@ const M4 = new THREE.Matrix4(), QQ = new THREE.Quaternion(), PP = new THREE.Vect
 let reading = 0, debrisShapes = 0, pendingChunks = null, readGen = 0, blastGen = 0;
 // Debris poses come back from the GPU a frame or more late, and not every frame: they are drawn blended
 // between the last two read-backs (matched shape by shape), so motion stays smooth.
-let snapPrev = null, snapCur = null, stepsDone = 0, readsDone = 0, readSeq = 0, readLatest = 0;
+let snapPrev = null, snapCur = null, stepsDone = 0, readsDone = 0, readSeq = 0, readLatest = 0, stepsAtRead = 0;
 // main-thread time per frame by stage (smoothed), shown in the HUD
 const perf = {};
 function timed(name, fn) { const t = performance.now(); const r = fn(); const d = performance.now() - t; perf[name] = perf[name] == null ? d : perf[name] * 0.9 + d * 0.1; return r; }
@@ -1458,13 +1464,13 @@ const MAX_READS = 3;
 function pullDebris() {
   if (!gpu || !diag.readback || reading >= MAX_READS) return;
   reading++;
-  const gen = blastGen, seq = ++readSeq;
+  const gen = blastGen, seq = ++readSeq, issuedAt = stepsDone;
   const tr = performance.now();
   gpu.readPose(debrisFrom).then(r => {
     perfAdd('read wait', performance.now() - tr);
     reading--;
     if (seq < readLatest) return;
-    readLatest = seq; readsDone++;
+    readLatest = seq; readsDone++; stepsAtRead = Math.max(stepsAtRead, issuedAt);
     const t0 = performance.now();
     // the tower mesh changes in the same frame as the debris that replaces it appears (no gap)
     if (pendingChunks && gen === blastGen) { for (const k of pendingChunks) chunkMesh(k); pendingChunks = null; }
@@ -1868,6 +1874,8 @@ const SETTINGS = {
   crush: { el: 's-crush', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: v => setParam(2, v) },
   crumbs: { el: 's-crumbs', def: 256, fmt: v => `${v}`, apply: v => setParam(0, v) },
   rubble: { el: 's-rubble', def: 64, fmt: v => `${v}`, apply: v => setParam(1, v) },
+  substeps: { el: 's-substeps', def: 12, fmt: v => `${v}`, apply: v => { if (gpu) gpu.substeps = v; } },
+  colors: { el: 's-colors', def: 16, fmt: v => `${v}`, apply: v => { if (gpu) { gpu.maxColors = v; gpu.colorLimit = Math.min(gpu.colorLimit, v); } } },
   bspeed: { el: 's-bspeed', def: 60, fmt: v => `${v} m/s`, apply: () => {} },
   bsize: { el: 's-bsize', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: () => {} },
 };
@@ -1953,7 +1961,9 @@ function frameBody(now, dt) {
       // stalled everything: they arrive late while nothing new is submitted)
       const stepMs = gpu.gpuMs ? Object.values(gpu.gpuMs).reduce((a, b) => a + b, 0) : 4;
       const maxSteps = stepMs * 2 < 12 ? 2 : 1;
-      let n = 0; while (acc >= 1 / 60 && n < maxSteps) { gpu.step(1 / 60); acc -= 1 / 60; n++; stepsDone++; }
+      // and never run ahead of the read-backs: at most a few steps queued past the newest one that came back,
+      // or work piles up in the GPU queue and everything (debris, breaking) shows seconds late
+      let n = 0; while (acc >= 1 / 60 && n < maxSteps && (!diag.readback || stepsDone - stepsAtRead < 3)) { gpu.step(1 / 60); acc -= 1 / 60; n++; stepsDone++; }
       perfAdd('step', performance.now() - ts);
       if (acc > 0.1) acc = 0;
       pullDebris();
@@ -2004,6 +2014,7 @@ function hud() {
         const n = f[0], shapes = [], idx = [];
         for (let k = 0; k < n; k++) { const o = 1 + k * 8; idx.push(f[o]); shapes.push(boxShape(f, o + 1)); }
         gpu = await GpuWorld.create(dev, [{ fixed: true, shapes }], { substeps: 12, sleep: true, maxBodies: 30000, maxShapes: n + 120000, maxContacts: 160000, maxPairs: 320000, eventSpeed: 2.0, eventEnergy: 20000 });
+        gpu.substeps = setting.substeps || 12; gpu.maxColors = setting.colors || 16; gpu.colorLimit = Math.min(gpu.colorLimit, gpu.maxColors);
         idx.forEach((b, k) => slots.set(b, k + 1));
       }
     }

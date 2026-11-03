@@ -918,6 +918,10 @@ class GpuWorld {
     const cb1 = this.capB + 1, cs1 = this.capS + 1;
     this.substeps = opt.substeps || 12;
     this.colorLimit = opt.colorLimit || 24;
+    // most sequential colours per solve; contacts beyond go to the parallel (Jacobi) pass. Each colour is a
+    // dispatch per sub-step, and dispatch count is what a step costs at this scale
+    this.maxColors = opt.maxColors || 16;
+    this.colorLimit = Math.min(this.colorLimit, this.maxColors);
     this.indirect = !!opt.indirect;   // the old indirect-dispatch path (for comparison)
     this.anchor = opt.anchor ?? true;
     this.sleep = opt.sleep ?? true;
@@ -1212,7 +1216,7 @@ class GpuWorld {
       if (seq < this.statLatest) return;
       this.statLatest = seq;
       this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7] };
-      this.colorLimit = Math.min(31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
+      this.colorLimit = Math.min(this.maxColors, 31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
       // per-colour contact counts (they size the direct dispatches): keep a slowly decaying maximum
       const cc = new Uint32Array(raw, 64 + 48 * this.maxEvents, 33);
       for (let c = 0; c < 33; c++) this.colCounts[c] = Math.max(cc[c], Math.floor(this.colCounts[c] * 0.95));
