@@ -938,7 +938,7 @@ class GpuWorld {
     take('t0', T); take('t1', T);
     take('pairs', 2 * this.maxPairs); take('bcount', cb1); take('bstart', cb1); take('bfill', cb1);
     take('blist', 2 * this.maxMan); take('par', cb1); take('mint', cb1); take('ocount', cb1); take('acc', 6 * cb1);
-    this.maxEvents = 128; take('events', 12 * this.maxEvents);
+    this.maxEvents = 512; take('events', 12 * this.maxEvents);
     this.L = L; this.nInts = o;
 
     const bod = new Float32Array(cb1 * 20), sol = new Float32Array(cb1 * 24), shp = new Float32Array(cs1 * 32);
@@ -964,7 +964,7 @@ class GpuWorld {
     this.colBuf = buf(256 * 33, U.UNIFORM | U.COPY_DST, cu);
     this.argBuf = buf(128 * 4, U.STORAGE | U.INDIRECT);
     this.evSpeed = opt.eventSpeed ?? 2.0; this.evEnergy = opt.eventEnergy ?? 0;   // events off unless asked for
-    this.statBuf = buf(64 + 48 * 128, U.COPY_DST | U.MAP_READ);
+    this.statBuf = buf(64 + 48 * this.maxEvents, U.COPY_DST | U.MAP_READ);
     this.events = [];
     this.stats = { manifolds: 0, overflow: 0, colors: 0, pairs: 0, dropped: 0, candidates: 0, awake: n };
     this.statPending = false;
@@ -1033,7 +1033,9 @@ class GpuWorld {
     d.queue.writeBuffer(this.parBuf, 0, this.params(dt));
     const L = this.L, cur = this.frame & 1;
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
-    clr(0, 16); clr(L.gcount, this.G); clr(L.gfill, this.G); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
+    // counters; impact events keep accumulating until a step copies them out (a pending read-back skips the copy)
+    if (this.statCopied === false) { clr(0, 7); clr(8, 8); } else clr(0, 16);
+    clr(L.gcount, this.G); clr(L.gfill, this.G); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (!this.n) { this.frame++; return; }
     const nb = Math.ceil(this.n / 64) || 1, nsh = Math.ceil(this.ns / 64) || 1;
