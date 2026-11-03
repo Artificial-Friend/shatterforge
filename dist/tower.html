@@ -49,6 +49,15 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
   <label>Ball speed <b id="v-bspeed"></b><input type="range" id="s-bspeed" min="20" max="300" step="10"></label>
   <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
+  <h2>Diagnostics</h2>
+  <span class="hint">switch parts off one at a time while debris moves; the one that brings the frame rate back is the cause</span>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-physics" checked> step the physics</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-readback" checked> read debris back from the GPU</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-draw" checked> draw debris</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-shadows" checked> shadows</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-events" checked> impact events (breaking)</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-timing" checked> GPU timing queries</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-indirect"> old indirect dispatches (for comparison)</label>
   <span class="hint">O or Esc closes · settings are remembered in this browser</span>
 </div>
 <div class="start" id="start">
@@ -992,6 +1001,7 @@ class GpuWorld {
     const cb1 = this.capB + 1, cs1 = this.capS + 1;
     this.substeps = opt.substeps || 12;
     this.colorLimit = opt.colorLimit || 24;
+    this.indirect = !!opt.indirect;   // the old indirect-dispatch path (for comparison)
     this.anchor = opt.anchor ?? true;
     this.sleep = opt.sleep ?? true;
     this.levels = 4;
@@ -1040,7 +1050,8 @@ class GpuWorld {
     this.evSpeed = opt.eventSpeed ?? 2.0; this.evEnergy = opt.eventEnergy ?? 0;   // events off unless asked for
     // a ring of stats read-back buffers: the browser delivers mappings late, so one pending read must not hold
     // back the next step's stats and impact events
-    this.statBufs = [0, 1, 2].map(() => ({ buf: buf(64 + 48 * this.maxEvents, U.COPY_DST | U.MAP_READ), busy: false }));
+    this.statBufs = [0, 1, 2].map(() => ({ buf: buf(64 + 48 * this.maxEvents + 33 * 4, U.COPY_DST | U.MAP_READ), busy: false }));
+    this.colCounts = new Array(33).fill(0);
     this.statBuf = this.statBufs[0].buf; this.statSeq = 0; this.statLatest = 0;
     this.events = [];
     this.stats = { manifolds: 0, overflow: 0, colors: 0, pairs: 0, dropped: 0, candidates: 0, awake: n };
@@ -1128,7 +1139,24 @@ class GpuWorld {
       return p;
     };
     const run = (p, k, x) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(x); };
-    const ind = (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); };
+    // Indirect dispatches are validated one by one by the browser (on its GPU process, which also draws the
+    // page); at ~800 per step that stalled whole frames. By default every dispatch is direct: sized by capacity
+    // for the once-per-step kernels, by the recent contact count (with margin) in the solver loops; the
+    // kernels skip work past their real counts.
+    const wgCap = (n) => Math.max(1, Math.ceil(n / 64));
+    const recent = Math.max(this.stats.manifolds || 0, this.recentMan || 0);
+    this.recentMan = Math.max(this.stats.manifolds || 0, (this.recentMan || 0) * 0.9);
+    const estMan = Math.min(this.maxMan, Math.ceil(recent * 2 + 2048));
+    // a colour's contacts this step: twice its recent count plus room for new contacts (new debris)
+    // (and at least a geometric share of the expected total, colour c getting 1/2^(c+1) of it)
+    const colEst = (c) => Math.min(estMan, Math.max(Math.ceil(this.colCounts[c] * 2 + 512), Math.ceil(estMan / (2 << c))));
+    const recentP = Math.max(this.stats.pairs || 0, this.recentPairs || 0);
+    this.recentPairs = Math.max(this.stats.pairs || 0, (this.recentPairs || 0) * 0.9);
+    const estPairs = Math.min(this.maxPairs, Math.ceil(recentP * 2 + 8192));
+    const dirWg = { 396: wgCap(estPairs), 384: wgCap(estMan) };   // narrow (args 99), per-manifold (args 96)
+    const ind = this.indirect
+      ? (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); }
+      : (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(k === 'restitute_ovf' ? 1 : dirWg[off] ?? wgCap(Math.min(estMan, this.colCounts[this.colorLimit] * 2 + 2048))); };
     let p;
     if (this.wakeReq) { this.wakeReq = false; p = pass(null); run(p, 'wake_all', nb); p.end(); }
     p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'pairs', nsh); p.end();
@@ -1142,7 +1170,7 @@ class GpuWorld {
     const C = this.colorLimit;
     const colors = (k) => {
       p.setPipeline(this.pl[k]);
-      for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); }
+      for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); if (this.indirect) p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); else p.dispatchWorkgroups(wgCap(colEst(c))); }
       p.setBindGroup(1, this.bg1, [0]);
       if (k === 'restitute') { ind(p, 'restitute_ovf', C * 12); return; }
       // overflow contacts: two Jacobi rounds with mass splitting
@@ -1170,6 +1198,7 @@ class GpuWorld {
       sb.busy = true; this.statNext = sb;
       enc.copyBufferToBuffer(this.intBuf, 0, sb.buf, 0, 64);
       if (this.evEnergy > 0) enc.copyBufferToBuffer(this.intBuf, L.events * 4, sb.buf, 64, 48 * this.maxEvents);
+      enc.copyBufferToBuffer(this.intBuf, L.ccount * 4, sb.buf, 64 + 48 * this.maxEvents, 33 * 4);
       this.statCopied = true;
     } else this.statCopied = false;
     this.frame++;
@@ -1188,6 +1217,8 @@ class GpuWorld {
     q.writeBuffer(this.bodBuf, this.n1 * 80, bod); q.writeBuffer(this.solBuf, this.n1 * 96, sol); q.writeBuffer(this.shpBuf, this.ns1 * 128, shp);
     for (const s of shapes) this.shapes.push({ ...s, body: s.body + first });
     for (const b of bodies) this.bodies.push(b);
+    this.recentMan = (this.recentMan || 0) + 4 * shapes.length;   // new bodies bring new contacts before the stats show them
+    this.recentPairs = (this.recentPairs || 0) + 8 * shapes.length;
     this.n += bodies.length; this.n1 += bodies.length; this.ns += shapes.length; this.ns1 += shapes.length;
     return first;
   }
@@ -1265,6 +1296,9 @@ class GpuWorld {
       this.statLatest = seq;
       this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7] };
       this.colorLimit = Math.min(31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
+      // per-colour contact counts (they size the direct dispatches): keep a slowly decaying maximum
+      const cc = new Uint32Array(raw, 64 + 48 * this.maxEvents, 33);
+      for (let c = 0; c < 33; c++) this.colCounts[c] = Math.max(cc[c], Math.floor(this.colCounts[c] * 0.95));
     }, () => { sb.busy = false; });
   }
 
@@ -1422,7 +1456,7 @@ function perfAdd(name, d) { perf[name] = perf[name] == null ? d : perf[name] * 0
 // arrives every frame; an older one arriving after a newer is dropped.
 const MAX_READS = 3;
 function pullDebris() {
-  if (!gpu || reading >= MAX_READS) return;
+  if (!gpu || !diag.readback || reading >= MAX_READS) return;
   reading++;
   const gen = blastGen, seq = ++readSeq;
   const tr = performance.now();
@@ -1838,6 +1872,23 @@ const SETTINGS = {
   bsize: { el: 's-bsize', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: () => {} },
 };
 const setting = {};
+const diag = { physics: true, readback: true, draw: true, shadows: true, events: true, timing: true, indirect: false };
+function initDiag() {
+  for (const k of Object.keys(diag)) {
+    const el = $('d-' + k);
+    el.addEventListener('change', () => {
+      diag[k] = el.checked;
+      if (k === 'shadows') { renderer.shadowMap.enabled = el.checked; scene.traverse(o => { if (o.material) o.material.needsUpdate = true; }); }
+      if (k === 'draw') dMesh.visible = el.checked;
+      if (k === 'events' && gpu) gpu.evEnergy = el.checked ? 20000 : 0;
+      if (k === 'indirect' && gpu) gpu.indirect = el.checked;
+      if (k === 'timing' && gpu) { if (!el.checked) { gpu.tsSaved = gpu.ts; gpu.ts = false; } else gpu.ts = gpu.tsSaved ?? gpu.ts; }
+    });
+  }
+}
+// long tasks the browser reports (anything on the main thread over 50 ms that is not our timed code)
+const longTasks = { n: 0, ms: 0, last: '' };
+try { new PerformanceObserver(l => { for (const e of l.getEntries()) { longTasks.n++; longTasks.ms += e.duration; longTasks.last = `${e.name} ${e.duration.toFixed(0)} ms`; } }).observe({ entryTypes: ['longtask'] }); } catch (e) {}
 function setParam(id, v) { if (E) E.set_param(id, +v); if (worker) worker.postMessage({ op: 'param', id, v: +v }); }
 function initSettings() {
   let saved = {}; try { saved = JSON.parse(localStorage.getItem('sf-settings') || '{}'); } catch (e) {}
@@ -1875,7 +1926,12 @@ setRadius(0.7);
 let last = performance.now(), acc = 0, fps = 60, frames = 0, fpsT = last;
 function frame(now) {
   requestAnimationFrame(frame);
+  const fj = performance.now();
+  perfAdd('interval', now - last);
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  try { frameBody(now, dt); } finally { perfAdd('frame js', performance.now() - fj); }
+}
+function frameBody(now, dt) {
   if (E) {
     const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)), r = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
     const run = keys.has('ShiftLeft') || keys.has('ShiftRight');
@@ -1889,7 +1945,7 @@ function frame(now) {
     cam.rotation.set(pitch, yaw, 0);
     pump();
     // physics runs while anything is awake (and briefly after a blast, before the first stats arrive)
-    if (gpu && !physicsPaused && (gpu.stats.awake > 0 || now - lastActive < 2000)) {
+    if (gpu && diag.physics && !physicsPaused && (gpu.stats.awake > 0 || now - lastActive < 2000)) {
       acc += dt;
       // never queue more GPU work than it finishes: a backlog makes every read-back late
       const ts = performance.now();
@@ -1904,7 +1960,7 @@ function frame(now) {
       timed('impacts', impacts);
     }
   }
-  timed('draw', () => drawDebris(now));
+  if (diag.draw) timed('draw', () => drawDebris(now));
   timed('render', () => renderer.render(scene, cam));
   frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; hud(); }
 }
@@ -1920,7 +1976,7 @@ function hud() {
     `<span class="k">bricks</span> ${E.bricks_alive().toLocaleString()} · <span class="k">joints</span> ${E.joints_live().toLocaleString()} · ${E.bytes_per_brick().toFixed(0)} B/brick`,
     gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake` : `<span class="k">debris physics</span> off (no WebGPU)`,
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'}` : '',
-    gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s` : '',
+    gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
     `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}`,
     lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,
@@ -1935,7 +1991,7 @@ function hud() {
     E.game_new(STOREYS);
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
     await startWorker(bytes);
-    initSettings();
+    initSettings(); initDiag();
     E.player_set(0, 0.0, -16);
   } catch (e) { $('warn').textContent = 'Could not start the engine: ' + e.message; return; }
   try {

@@ -918,6 +918,7 @@ class GpuWorld {
     const cb1 = this.capB + 1, cs1 = this.capS + 1;
     this.substeps = opt.substeps || 12;
     this.colorLimit = opt.colorLimit || 24;
+    this.indirect = !!opt.indirect;   // the old indirect-dispatch path (for comparison)
     this.anchor = opt.anchor ?? true;
     this.sleep = opt.sleep ?? true;
     this.levels = 4;
@@ -966,7 +967,8 @@ class GpuWorld {
     this.evSpeed = opt.eventSpeed ?? 2.0; this.evEnergy = opt.eventEnergy ?? 0;   // events off unless asked for
     // a ring of stats read-back buffers: the browser delivers mappings late, so one pending read must not hold
     // back the next step's stats and impact events
-    this.statBufs = [0, 1, 2].map(() => ({ buf: buf(64 + 48 * this.maxEvents, U.COPY_DST | U.MAP_READ), busy: false }));
+    this.statBufs = [0, 1, 2].map(() => ({ buf: buf(64 + 48 * this.maxEvents + 33 * 4, U.COPY_DST | U.MAP_READ), busy: false }));
+    this.colCounts = new Array(33).fill(0);
     this.statBuf = this.statBufs[0].buf; this.statSeq = 0; this.statLatest = 0;
     this.events = [];
     this.stats = { manifolds: 0, overflow: 0, colors: 0, pairs: 0, dropped: 0, candidates: 0, awake: n };
@@ -1054,7 +1056,24 @@ class GpuWorld {
       return p;
     };
     const run = (p, k, x) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(x); };
-    const ind = (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); };
+    // Indirect dispatches are validated one by one by the browser (on its GPU process, which also draws the
+    // page); at ~800 per step that stalled whole frames. By default every dispatch is direct: sized by capacity
+    // for the once-per-step kernels, by the recent contact count (with margin) in the solver loops; the
+    // kernels skip work past their real counts.
+    const wgCap = (n) => Math.max(1, Math.ceil(n / 64));
+    const recent = Math.max(this.stats.manifolds || 0, this.recentMan || 0);
+    this.recentMan = Math.max(this.stats.manifolds || 0, (this.recentMan || 0) * 0.9);
+    const estMan = Math.min(this.maxMan, Math.ceil(recent * 2 + 2048));
+    // a colour's contacts this step: twice its recent count plus room for new contacts (new debris)
+    // (and at least a geometric share of the expected total, colour c getting 1/2^(c+1) of it)
+    const colEst = (c) => Math.min(estMan, Math.max(Math.ceil(this.colCounts[c] * 2 + 512), Math.ceil(estMan / (2 << c))));
+    const recentP = Math.max(this.stats.pairs || 0, this.recentPairs || 0);
+    this.recentPairs = Math.max(this.stats.pairs || 0, (this.recentPairs || 0) * 0.9);
+    const estPairs = Math.min(this.maxPairs, Math.ceil(recentP * 2 + 8192));
+    const dirWg = { 396: wgCap(estPairs), 384: wgCap(estMan) };   // narrow (args 99), per-manifold (args 96)
+    const ind = this.indirect
+      ? (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); }
+      : (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(k === 'restitute_ovf' ? 1 : dirWg[off] ?? wgCap(Math.min(estMan, this.colCounts[this.colorLimit] * 2 + 2048))); };
     let p;
     if (this.wakeReq) { this.wakeReq = false; p = pass(null); run(p, 'wake_all', nb); p.end(); }
     p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'pairs', nsh); p.end();
@@ -1068,7 +1087,7 @@ class GpuWorld {
     const C = this.colorLimit;
     const colors = (k) => {
       p.setPipeline(this.pl[k]);
-      for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); }
+      for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); if (this.indirect) p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); else p.dispatchWorkgroups(wgCap(colEst(c))); }
       p.setBindGroup(1, this.bg1, [0]);
       if (k === 'restitute') { ind(p, 'restitute_ovf', C * 12); return; }
       // overflow contacts: two Jacobi rounds with mass splitting
@@ -1096,6 +1115,7 @@ class GpuWorld {
       sb.busy = true; this.statNext = sb;
       enc.copyBufferToBuffer(this.intBuf, 0, sb.buf, 0, 64);
       if (this.evEnergy > 0) enc.copyBufferToBuffer(this.intBuf, L.events * 4, sb.buf, 64, 48 * this.maxEvents);
+      enc.copyBufferToBuffer(this.intBuf, L.ccount * 4, sb.buf, 64 + 48 * this.maxEvents, 33 * 4);
       this.statCopied = true;
     } else this.statCopied = false;
     this.frame++;
@@ -1114,6 +1134,8 @@ class GpuWorld {
     q.writeBuffer(this.bodBuf, this.n1 * 80, bod); q.writeBuffer(this.solBuf, this.n1 * 96, sol); q.writeBuffer(this.shpBuf, this.ns1 * 128, shp);
     for (const s of shapes) this.shapes.push({ ...s, body: s.body + first });
     for (const b of bodies) this.bodies.push(b);
+    this.recentMan = (this.recentMan || 0) + 4 * shapes.length;   // new bodies bring new contacts before the stats show them
+    this.recentPairs = (this.recentPairs || 0) + 8 * shapes.length;
     this.n += bodies.length; this.n1 += bodies.length; this.ns += shapes.length; this.ns1 += shapes.length;
     return first;
   }
@@ -1191,6 +1213,9 @@ class GpuWorld {
       this.statLatest = seq;
       this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7] };
       this.colorLimit = Math.min(31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
+      // per-colour contact counts (they size the direct dispatches): keep a slowly decaying maximum
+      const cc = new Uint32Array(raw, 64 + 48 * this.maxEvents, 33);
+      for (let c = 0; c < 33; c++) this.colCounts[c] = Math.max(cc[c], Math.floor(this.colCounts[c] * 0.95));
     }, () => { sb.busy = false; });
   }
 

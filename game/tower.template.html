@@ -49,6 +49,15 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
   <label>Ball speed <b id="v-bspeed"></b><input type="range" id="s-bspeed" min="20" max="300" step="10"></label>
   <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
+  <h2>Diagnostics</h2>
+  <span class="hint">switch parts off one at a time while debris moves; the one that brings the frame rate back is the cause</span>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-physics" checked> step the physics</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-readback" checked> read debris back from the GPU</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-draw" checked> draw debris</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-shadows" checked> shadows</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-events" checked> impact events (breaking)</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-timing" checked> GPU timing queries</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-indirect"> old indirect dispatches (for comparison)</label>
   <span class="hint">O or Esc closes · settings are remembered in this browser</span>
 </div>
 <div class="start" id="start">
@@ -159,7 +168,7 @@ function perfAdd(name, d) { perf[name] = perf[name] == null ? d : perf[name] * 0
 // arrives every frame; an older one arriving after a newer is dropped.
 const MAX_READS = 3;
 function pullDebris() {
-  if (!gpu || reading >= MAX_READS) return;
+  if (!gpu || !diag.readback || reading >= MAX_READS) return;
   reading++;
   const gen = blastGen, seq = ++readSeq;
   const tr = performance.now();
@@ -575,6 +584,23 @@ const SETTINGS = {
   bsize: { el: 's-bsize', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: () => {} },
 };
 const setting = {};
+const diag = { physics: true, readback: true, draw: true, shadows: true, events: true, timing: true, indirect: false };
+function initDiag() {
+  for (const k of Object.keys(diag)) {
+    const el = $('d-' + k);
+    el.addEventListener('change', () => {
+      diag[k] = el.checked;
+      if (k === 'shadows') { renderer.shadowMap.enabled = el.checked; scene.traverse(o => { if (o.material) o.material.needsUpdate = true; }); }
+      if (k === 'draw') dMesh.visible = el.checked;
+      if (k === 'events' && gpu) gpu.evEnergy = el.checked ? 20000 : 0;
+      if (k === 'indirect' && gpu) gpu.indirect = el.checked;
+      if (k === 'timing' && gpu) { if (!el.checked) { gpu.tsSaved = gpu.ts; gpu.ts = false; } else gpu.ts = gpu.tsSaved ?? gpu.ts; }
+    });
+  }
+}
+// long tasks the browser reports (anything on the main thread over 50 ms that is not our timed code)
+const longTasks = { n: 0, ms: 0, last: '' };
+try { new PerformanceObserver(l => { for (const e of l.getEntries()) { longTasks.n++; longTasks.ms += e.duration; longTasks.last = `${e.name} ${e.duration.toFixed(0)} ms`; } }).observe({ entryTypes: ['longtask'] }); } catch (e) {}
 function setParam(id, v) { if (E) E.set_param(id, +v); if (worker) worker.postMessage({ op: 'param', id, v: +v }); }
 function initSettings() {
   let saved = {}; try { saved = JSON.parse(localStorage.getItem('sf-settings') || '{}'); } catch (e) {}
@@ -612,7 +638,12 @@ setRadius(0.7);
 let last = performance.now(), acc = 0, fps = 60, frames = 0, fpsT = last;
 function frame(now) {
   requestAnimationFrame(frame);
+  const fj = performance.now();
+  perfAdd('interval', now - last);
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  try { frameBody(now, dt); } finally { perfAdd('frame js', performance.now() - fj); }
+}
+function frameBody(now, dt) {
   if (E) {
     const f = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw)), r = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
     const run = keys.has('ShiftLeft') || keys.has('ShiftRight');
@@ -626,7 +657,7 @@ function frame(now) {
     cam.rotation.set(pitch, yaw, 0);
     pump();
     // physics runs while anything is awake (and briefly after a blast, before the first stats arrive)
-    if (gpu && !physicsPaused && (gpu.stats.awake > 0 || now - lastActive < 2000)) {
+    if (gpu && diag.physics && !physicsPaused && (gpu.stats.awake > 0 || now - lastActive < 2000)) {
       acc += dt;
       // never queue more GPU work than it finishes: a backlog makes every read-back late
       const ts = performance.now();
@@ -641,7 +672,7 @@ function frame(now) {
       timed('impacts', impacts);
     }
   }
-  timed('draw', () => drawDebris(now));
+  if (diag.draw) timed('draw', () => drawDebris(now));
   timed('render', () => renderer.render(scene, cam));
   frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; hud(); }
 }
@@ -657,7 +688,7 @@ function hud() {
     `<span class="k">bricks</span> ${E.bricks_alive().toLocaleString()} · <span class="k">joints</span> ${E.joints_live().toLocaleString()} · ${E.bytes_per_brick().toFixed(0)} B/brick`,
     gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake` : `<span class="k">debris physics</span> off (no WebGPU)`,
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'}` : '',
-    gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s` : '',
+    gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
     `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}`,
     lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,
@@ -672,7 +703,7 @@ function hud() {
     E.game_new(STOREYS);
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
     await startWorker(bytes);
-    initSettings();
+    initSettings(); initDiag();
     E.player_set(0, 0.0, -16);
   } catch (e) { $('warn').textContent = 'Could not start the engine: ' + e.message; return; }
   try {
