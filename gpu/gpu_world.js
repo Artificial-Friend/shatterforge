@@ -964,7 +964,10 @@ class GpuWorld {
     this.colBuf = buf(256 * 33, U.UNIFORM | U.COPY_DST, cu);
     this.argBuf = buf(128 * 4, U.STORAGE | U.INDIRECT);
     this.evSpeed = opt.eventSpeed ?? 2.0; this.evEnergy = opt.eventEnergy ?? 0;   // events off unless asked for
-    this.statBuf = buf(64 + 48 * this.maxEvents, U.COPY_DST | U.MAP_READ);
+    // a ring of stats read-back buffers: the browser delivers mappings late, so one pending read must not hold
+    // back the next step's stats and impact events
+    this.statBufs = [0, 1, 2].map(() => ({ buf: buf(64 + 48 * this.maxEvents, U.COPY_DST | U.MAP_READ), busy: false }));
+    this.statBuf = this.statBufs[0].buf; this.statSeq = 0; this.statLatest = 0;
     this.events = [];
     this.stats = { manifolds: 0, overflow: 0, colors: 0, pairs: 0, dropped: 0, candidates: 0, awake: n };
     this.statPending = false;
@@ -1088,9 +1091,11 @@ class GpuWorld {
       enc.copyBufferToBuffer(this.qBuf, 0, this.qRead, 0, 16 * k);
       this.qCopied = k;
     } else this.qCopied = 0;
-    if (!this.statPending) {
-      enc.copyBufferToBuffer(this.intBuf, 0, this.statBuf, 0, 64);
-      if (this.evEnergy > 0) enc.copyBufferToBuffer(this.intBuf, L.events * 4, this.statBuf, 64, 48 * this.maxEvents);
+    const sb = this.statBufs.find(b => !b.busy);
+    if (sb) {
+      sb.busy = true; this.statNext = sb;
+      enc.copyBufferToBuffer(this.intBuf, 0, sb.buf, 0, 64);
+      if (this.evEnergy > 0) enc.copyBufferToBuffer(this.intBuf, L.events * 4, sb.buf, 64, 48 * this.maxEvents);
       this.statCopied = true;
     } else this.statCopied = false;
     this.frame++;
@@ -1168,13 +1173,13 @@ class GpuWorld {
 
   pollStats() {
     this.pollTimes();
-    if (!this.statCopied || this.statPending) return;
-    this.statPending = true;
-    this.statBuf.mapAsync(GPUMapMode.READ).then(() => {
-      const raw = this.statBuf.getMappedRange().slice(0);
-      this.statBuf.unmap();
+    if (!this.statCopied || !this.statNext) return;
+    const sb = this.statNext, seq = ++this.statSeq; this.statNext = null;
+    sb.buf.mapAsync(GPUMapMode.READ).then(() => {
+      const raw = sb.buf.getMappedRange().slice(0);
+      sb.buf.unmap(); sb.busy = false;
       const u = new Uint32Array(raw), f = new Float32Array(raw);
-      this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7] };
+      // events are never lost: every copied step's events count, even when an older copy arrives late
       if (this.evEnergy > 0) {
         const n = Math.min(u[7], this.maxEvents);
         for (let k = 0; k < n; k++) {
@@ -1182,9 +1187,11 @@ class GpuWorld {
           this.events.push({ a: u[o], b: u[o + 1], sa: u[o + 2], sb: u[o + 3], p: [f[o + 4], f[o + 5], f[o + 6]], n: [f[o + 7], f[o + 8], f[o + 9]], impulse: f[o + 10], approach: f[o + 11] });
         }
       }
+      if (seq < this.statLatest) return;
+      this.statLatest = seq;
+      this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7] };
       this.colorLimit = Math.min(31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
-      this.statPending = false;
-    }, () => { this.statPending = false; });
+    }, () => { sb.busy = false; });
   }
 
   // Copy `size` bytes of `buffer` back. Staging buffers are kept per source buffer and reused (grown when
@@ -1249,7 +1256,7 @@ class GpuWorld {
   }
 
   destroy() {
-    for (const b of [this.bodBuf, this.solBuf, this.shpBuf, this.intBuf, this.manBuf, this.coldBuf, this.parBuf, this.colBuf, this.argBuf, this.statBuf, this.qBuf, this.qRead]) if (b) b.destroy();
+    for (const b of [this.bodBuf, this.solBuf, this.shpBuf, this.intBuf, this.manBuf, this.coldBuf, this.parBuf, this.colBuf, this.argBuf, ...this.statBufs.map(b => b.buf), this.qBuf, this.qRead]) if (b) b.destroy();
     if (this.qs) this.qs.destroy();
   }
 }

@@ -147,21 +147,27 @@ function debrisColour(code, k) {
   return colTmp.setRGB(c[0] * s, c[1] * s, c[2] * s);
 }
 const M4 = new THREE.Matrix4(), QQ = new THREE.Quaternion(), PP = new THREE.Vector3(), SS = new THREE.Vector3();
-let reading = false, debrisShapes = 0, pendingChunks = null, readGen = 0, blastGen = 0;
+let reading = 0, debrisShapes = 0, pendingChunks = null, readGen = 0, blastGen = 0;
 // Debris poses come back from the GPU a frame or more late, and not every frame: they are drawn blended
 // between the last two read-backs (matched shape by shape), so motion stays smooth.
-let snapPrev = null, snapCur = null, gpuInflight = 0;
+let snapPrev = null, snapCur = null, stepsDone = 0, readsDone = 0, readSeq = 0, readLatest = 0;
 // main-thread time per frame by stage (smoothed), shown in the HUD
 const perf = {};
 function timed(name, fn) { const t = performance.now(); const r = fn(); const d = performance.now() - t; perf[name] = perf[name] == null ? d : perf[name] * 0.9 + d * 0.1; return r; }
 function perfAdd(name, d) { perf[name] = perf[name] == null ? d : perf[name] * 0.9 + d * 0.1; }
+// Several read-backs are kept in flight (each resolves a frame or more after it was issued), so a fresh one
+// arrives every frame; an older one arriving after a newer is dropped.
+const MAX_READS = 3;
 function pullDebris() {
-  if (!gpu || reading) return;
-  reading = true;
-  const gen = blastGen;
+  if (!gpu || reading >= MAX_READS) return;
+  reading++;
+  const gen = blastGen, seq = ++readSeq;
   const tr = performance.now();
   gpu.readPose(debrisFrom).then(r => {
     perfAdd('read wait', performance.now() - tr);
+    reading--;
+    if (seq < readLatest) return;
+    readLatest = seq; readsDone++;
     const t0 = performance.now();
     // the tower mesh changes in the same frame as the debris that replaces it appears (no gap)
     if (pendingChunks && gen === blastGen) { for (const k of pendingChunks) chunkMesh(k); pendingChunks = null; }
@@ -171,10 +177,9 @@ function pullDebris() {
     velHist.unshift(r.vel); if (velHist.length > 4) velHist.pop(); lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
     const n = Math.min(MAXD, r.pose.length / 10);
     for (let k = 0; k < n; k++) dMesh.setColorAt(k, debrisColour(r.cols[k], r.slots[k]));
-    if (dMesh.instanceColor) dMesh.instanceColor.needsUpdate = true;
+    if (dMesh.instanceColor) { dMesh.instanceColor.updateRange.count = n * 3; dMesh.instanceColor.needsUpdate = true; }
     perfAdd('read', performance.now() - t0 + (r.jsMs || 0));
-    reading = false;
-  }, () => { reading = false; });
+  }, () => { reading = Math.max(0, reading - 1); });
 }
 const QA = new THREE.Quaternion(), QB = new THREE.Quaternion();
 function drawDebris(now) {
@@ -199,7 +204,7 @@ function drawDebris(now) {
     M4.compose(PP, QQ, SS); dMesh.setMatrixAt(k, M4);
   }
   dMesh.count = n; debrisShapes = n;
-  dMesh.instanceMatrix.needsUpdate = true;
+  dMesh.instanceMatrix.updateRange.count = n * 16; dMesh.instanceMatrix.needsUpdate = true;
 }
 
 // ---- the static tower, falling pieces and their breaking
@@ -625,7 +630,11 @@ function frame(now) {
       acc += dt;
       // never queue more GPU work than it finishes: a backlog makes every read-back late
       const ts = performance.now();
-      let n = 0; while (acc >= 1 / 60 && n < 2 && gpuInflight < 2) { gpu.step(1 / 60); acc -= 1 / 60; n++; gpuInflight++; dev.queue.onSubmittedWorkDone().then(() => gpuInflight--); }
+      // pace the steps by the GPU's own measured step time (waiting on the browser's completion callbacks
+      // stalled everything: they arrive late while nothing new is submitted)
+      const stepMs = gpu.gpuMs ? Object.values(gpu.gpuMs).reduce((a, b) => a + b, 0) : 4;
+      const maxSteps = stepMs * 2 < 12 ? 2 : 1;
+      let n = 0; while (acc >= 1 / 60 && n < maxSteps) { gpu.step(1 / 60); acc -= 1 / 60; n++; stepsDone++; }
       perfAdd('step', performance.now() - ts);
       if (acc > 0.1) acc = 0;
       pullDebris();
@@ -636,8 +645,11 @@ function frame(now) {
   timed('render', () => renderer.render(scene, cam));
   frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; hud(); }
 }
+const rate = { steps: 0, reads: 0, t: performance.now(), s0: 0, r0: 0 };
 function hud() {
   if (!E) return;
+  const tn = performance.now(), dt = (tn - rate.t) / 1000;
+  if (dt > 0.4) { rate.steps = (stepsDone - rate.s0) / dt; rate.reads = (readsDone - rate.r0) / dt; rate.t = tn; rate.s0 = stepsDone; rate.r0 = readsDone; }
   const y = E.player_get(1), storey = Math.max(0, Math.floor((y + 0.01) / 3.75));
   const g = gpu && gpu.gpuMs ? Object.values(gpu.gpuMs).reduce((a, b) => a + b, 0) : null;
   $('hud').innerHTML = [
@@ -645,6 +657,7 @@ function hud() {
     `<span class="k">bricks</span> ${E.bricks_alive().toLocaleString()} · <span class="k">joints</span> ${E.joints_live().toLocaleString()} · ${E.bytes_per_brick().toFixed(0)} B/brick`,
     gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake` : `<span class="k">debris physics</span> off (no WebGPU)`,
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'}` : '',
+    gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
     `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}`,
     lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,
