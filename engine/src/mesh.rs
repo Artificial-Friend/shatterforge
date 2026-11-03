@@ -27,6 +27,7 @@ pub fn colour(b: &Bricks, i: u32) -> [f32; 3] {
     let iu = i as usize;
     let base = match (b.mat[iu], b.paint[iu]) {
         (mat::GLASS, _) => [0.36, 0.50, 0.58],
+        (mat::MASONRY, _) => [0.60, 0.36, 0.28],   // brick
         (mat::TIMBER, _) => [0.86, 0.84, 0.79],
         (_, 0) => [0.62, 0.61, 0.58],   // slab
         (_, 1) => [0.56, 0.56, 0.54],   // column

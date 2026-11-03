@@ -35,6 +35,7 @@ button:disabled { opacity: .5; cursor: default; }
 .settings label { display: flex; flex-direction: column; gap: 3px; color: var(--mute); }
 .settings label b { color: var(--ink); font-weight: 500; }
 .settings input[type=range] { width: 100%; accent-color: var(--accent); }
+.settings select { font: inherit; background: #0e0f10; color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; padding: 4px; }
 .settings .hint { color: var(--mute); font-size: 11px; }
 </style>
 
@@ -44,6 +45,7 @@ button:disabled { opacity: .5; cursor: default; }
 <div class="tool" id="tool"><span data-r="0.4">1 · 0.4 m</span><span data-r="0.7">2 · 0.7 m</span><span data-r="1.2">3 · 1.2 m</span><span data-r="ball">4 · steel ball</span><span class="o">O · settings</span></div>
 <div class="settings" id="settings" hidden>
   <h2>Settings</h2>
+  <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
   <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
@@ -65,7 +67,7 @@ button:disabled { opacity: .5; cursor: default; }
 <div class="start" id="start">
   <div class="card">
     <div class="eyebrow">Shatterforge · phase 1</div>
-    <h1>A 12-storey office tower at real scale</h1>
+    <h1 id="title">A 12-storey office tower at real scale</h1>
     <p>Every wall, slab, column and stair is a real-size brick: storeys are 3.75 m, doors 0.875 × 2.125 m, corridors 1.75 m, steps 0.25 m. Walk in through the lobby, take the stair in the core, and knock holes in it. What falls off is simulated on the GPU as rigid pieces.</p>
     <dl class="keys">
       <dt>Mouse</dt><dd>look (click the view first)</dd>
@@ -88,7 +90,11 @@ __GPU_WORLD_JS__
 <script>
 const WASM_B64 = "__WASM_B64__";
 const $ = (id) => document.getElementById(id);
-const TICK = 0.125, STOREYS = 12;
+const TICK = 0.125;
+// the building (remembered): 0 concrete frame, 1 masonry, 2 timber, each at a height it can stand
+let KIND = 0; try { KIND = +(JSON.parse(localStorage.getItem('sf-settings') || '{}').kind || 0); } catch (e) {}
+if (![0, 1, 2].includes(KIND)) KIND = 0;
+const STOREYS = [12, 5, 6][KIND];
 let E = null, gpu = null, dev = null, slots = new Map(), debrisFrom = 2;
 let radius = 0.7, fly = false, locked = false, yaw = Math.PI, pitch = 0, physicsPaused = true, lastActive = -1e9;
 const keys = new Set();
@@ -152,7 +158,7 @@ const PAINTCOL = [[0.62, 0.61, 0.58], [0.56, 0.56, 0.54], [0.79, 0.77, 0.71], [0
 const colTmp = new THREE.Color();
 function debrisColour(code, k) {
   const m = code & 15, paint = code >> 4;
-  const c = m === GLASS ? [0.36, 0.50, 0.58] : m === TIMBER ? [0.86, 0.84, 0.79] : m === 2 ? [0.22, 0.23, 0.25] : (PAINTCOL[paint] || [0.7, 0.7, 0.7]);
+  const c = m === GLASS ? [0.36, 0.50, 0.58] : m === 1 ? [0.60, 0.36, 0.28] : m === TIMBER ? [0.86, 0.84, 0.79] : m === 2 ? [0.22, 0.23, 0.25] : (PAINTCOL[paint] || [0.7, 0.7, 0.7]);
   const h = ((Math.imul(k, 2654435761) >>> 24) & 255) / 255, s = 0.96 + 0.06 * h;
   // the tower mesh is sRGB-like vertex colour: keep the same space
   return colTmp.setRGB(c[0] * s, c[1] * s, c[2] * s);
@@ -309,7 +315,7 @@ onmessage = async (m) => {
   const d = m.data;
   if (d.op === 'init') {
     E = (await WebAssembly.instantiate(d.wasm, {})).instance.exports;
-    E.game_new(d.storeys); E.game_mesh(0);
+    E.game_new_kind(d.storeys, d.kind); E.game_mesh(0);
     postMessage({ op: 'ready' }); return;
   }
   if (d.op === 'param') { E.set_param(d.id, d.v); return; }
@@ -333,7 +339,7 @@ function startWorker(bytes) {
       const w = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })));
       w.onmessage = (m) => { if (m.data.op === 'ready') { worker = w; w.onmessage = (m) => finish(m.data); res(true); } };
       w.onerror = () => res(false);
-      w.postMessage({ op: 'init', wasm: bytes, storeys: STOREYS });
+      w.postMessage({ op: 'init', wasm: bytes, storeys: STOREYS, kind: KIND });
       setTimeout(() => res(false), 15000);
     } catch (e) { res(false); }
   });
@@ -674,6 +680,9 @@ try { new PerformanceObserver(l => { for (const e of l.getEntries()) { longTasks
 function setParam(id, v) { if (E) E.set_param(id, +v); if (worker) worker.postMessage({ op: 'param', id, v: +v }); }
 function initSettings() {
   let saved = {}; try { saved = JSON.parse(localStorage.getItem('sf-settings') || '{}'); } catch (e) {}
+  const ks = $('s-kind'); ks.value = String(KIND);
+  ks.addEventListener('change', () => { setting.kind = +ks.value; try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} location.reload(); });
+  setting.kind = KIND;
   for (const [k, d] of Object.entries(SETTINGS)) {
     const el = $(d.el); el.value = saved[k] ?? d.def; setting[k] = +el.value; $('v-' + k).textContent = d.fmt(el.value); d.apply(setting[k]);
     el.addEventListener('input', () => { setting[k] = +el.value; $('v-' + k).textContent = d.fmt(el.value); d.apply(setting[k]); try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} });
@@ -772,7 +781,8 @@ function hud() {
   try {
     const bytes = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
     E = (await WebAssembly.instantiate(bytes, {})).instance.exports;
-    E.game_new(STOREYS);
+    E.game_new_kind(STOREYS, KIND);
+    $('title').textContent = ['A 12-storey concrete-frame tower at real scale', 'A 5-storey masonry building at real scale', 'A 6-storey mass-timber building at real scale'][KIND];
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
     await startWorker(bytes);
     initSettings(); initDiag();

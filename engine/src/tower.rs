@@ -40,6 +40,21 @@ pub mod el {
     pub const STAIR2: u16 = 12;   // alternate steps, so neighbouring steps stay separate bricks
     pub const COUNT: usize = 13;
 }
+/// What the tower is built of: 0 a reinforced-concrete frame, 1 load-bearing masonry piers and facade with a concrete
+/// core and floors,
+/// 2 mass timber (floors, posts, core and stairs of timber).
+pub fn element_in(e: u16, kind: u8) -> Element {
+    use el::*;
+    let mut k = element(e);
+    match kind {
+        // (the core and parapet stay concrete: masonry spanning the core doors and the parapet between piers would
+        // need lintels and beams the layout does not have)
+        1 => { if matches!(e, COLUMN | SPANDREL | HEADER | MULLION) { k.material = mat::MASONRY; } }
+        2 => { if matches!(e, SLAB | COLUMN | CORE | STAIR | STAIR2 | LANDING | PARAPET | SPANDREL | HEADER | MULLION) { k.material = mat::TIMBER; } }
+        _ => {}
+    }
+    k
+}
 pub fn element(e: u16) -> Element {
     use el::*;
     let (material, paint, infill) = match e {
@@ -57,9 +72,9 @@ pub fn element(e: u16) -> Element {
 }
 
 /// One storey's paint grid: W x STOREY x W element ids.
-struct Storey { g: Vec<u16>, y0: i32 }
+struct Storey { g: Vec<u16>, y0: i32, kind: u8 }
 impl Storey {
-    fn new(y0: i32) -> Self { Storey { g: vec![0; (W * STOREY * W) as usize], y0 } }
+    fn new(y0: i32) -> Self { Storey { g: vec![0; (W * STOREY * W) as usize], y0, kind: 0 } }
     /// Paint the box [x0,x1) x [y0,y1) x [z0,z1) in world ticks (clipped to this storey).
     fn fill(&mut self, x: (i32, i32), y: (i32, i32), z: (i32, i32), e: u16) {
         let (xa, xb) = ((x.0 + HALF).max(0), (x.1 + HALF).min(W));
@@ -83,7 +98,7 @@ impl Storey {
             let mut y1 = y + 1;
             'yl: while y1 < STOREY { for zz in z..z1 { for xx in x..x1 { if !free(xx, y1, zz) { break 'yl; } } } y1 += 1; }
             for yy in y..y1 { for zz in z..z1 { for xx in x..x1 { done[idx(xx, yy, zz)] = true; } } }
-            let ek = element(e);
+            let ek = element_in(e, self.kind);
             let b = out.add([x - HALF, y + self.y0, z - HALF], [x1 - x, y1 - y, z1 - z], ek.material, ek.paint, structure);
             if ek.infill { out.flags[b as usize] |= F_INFILL; }
             if matches!(e, el::STAIR | el::STAIR2 | el::LANDING) { out.flags[b as usize] |= crate::brick::F_MONO; }
@@ -215,10 +230,12 @@ fn stair(s: &mut Storey, floor: i32) {
 }
 
 /// Build the tower: `storeys` storeys plus the roof with its penthouse. Returns the brick store with joints.
-pub fn build(storeys: i32, structure: u16) -> Bricks {
+pub fn build(storeys: i32, structure: u16) -> Bricks { build_kind(storeys, structure, 0) }
+pub fn build_kind(storeys: i32, structure: u16, kind: u8) -> Bricks {
     let mut b = Bricks::new();
     for k in 0..=storeys {
         let mut s = Storey::new(k * STOREY);
+        s.kind = kind;
         paint_storey(&mut s, k, storeys);
         // flight B of the storey below reaches 2 ticks into this storey's slab level: nothing to add, the slab
         // is solid there (outside the opening)

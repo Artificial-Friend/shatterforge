@@ -61,8 +61,10 @@ const CRUSH_DEPTH: f32 = 0.5;
 fn chunk_of(y: i32) -> i32 { y.div_euclid(tower::STOREY) }
 
 impl Game {
-    pub fn new(storeys: i32) -> Self {
-        let b = tower::build(storeys, 1);
+    pub fn new(storeys: i32) -> Self { Self::new_kind(storeys, 0) }
+    /// A tower of `storeys` storeys built as `kind` (see `tower::element_in`).
+    pub fn new_kind(storeys: i32, kind: u8) -> Self {
+        let b = tower::build_kind(storeys, 1, kind);
         let n = (storeys + 2) as usize;
         let mut g = Game { b, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
                            out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH };
@@ -892,5 +894,23 @@ mod tests {
         let n = g.blast_piece(piece as u32, v3(0.0, 4.0, -11.0), 1.2);
         std::println!("blast on a piece of {before} bricks: {n} bodies");
         assert!(n > 5, "crumbs and the rest");
+    }
+    #[test] fn each_kind_of_building_stands_at_its_height() {
+        for (kind, storeys, name) in [(0u8, 12, "concrete frame"), (1, 5, "masonry"), (2, 6, "timber")] {
+            let mut g = Game::new_kind(storeys, kind);
+            {
+                let set: std::vec::Vec<u32> = (0..g.b.len() as u32).filter(|&i| g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
+                let load: std::vec::Vec<f32> = set.iter().map(|&i| structure::mass(&g.b, i) * 9.81).collect();
+                let sink: std::vec::Vec<bool> = set.iter().map(|&i| g.b.y[i as usize] <= 0).collect();
+                let a = structure::analyse(&g.b, &set, &load, &sink, v3(0.0, -1.0, 0.0));
+                let mut w: std::vec::Vec<_> = a.failed.iter().map(|&(j, r)| { let (x, y) = (g.b.ja[j as usize] as usize, g.b.jb[j as usize] as usize); (r, g.b.paint[x], g.b.mat[x], g.b.paint[y], g.b.mat[y], g.b.jaxis[j as usize], g.b.y[x]) }).collect();
+                w.sort_by(|p, q| q.0.partial_cmp(&p.0).unwrap());
+                for f in w.iter().take(6) { std::println!("  joint {:.2}: paint/mat {}/{} - {}/{}, axis {}, y {}", f.0, f.1, f.2, f.3, f.4, f.5, f.6); }
+                for c in a.cracks.iter().take(6) { std::println!("  crack {:.2}: paint/mat {}/{}, axis {}", c.ratio, g.b.paint[c.brick as usize], g.b.mat[c.brick as usize], c.axis); }
+            }
+            let n = g.structure_step(64);
+            std::println!("{name}, {storeys} storeys: worst joint at {:.0}% of strength, {n} failures", g.max_ratio * 100.0);
+            assert_eq!(n, 0, "{name} stands");
+        }
     }
 }

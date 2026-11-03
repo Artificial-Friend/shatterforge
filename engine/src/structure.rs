@@ -24,6 +24,28 @@ pub fn strength(m: u8) -> [f32; 3] {
     }
 }
 /// Energy (J/m^3) to crush the material to rubble.
+/// How strong a joint is relative to the weaker of its two bricks, in [compression, tension, shear]: a joint
+/// is a connection between two elements, and connections are usually weaker than what they join.
+/// - a seam inside one element (two bricks of one slab, one column) is the material itself
+/// - concrete slab to column or core: a cast connection, sound in compression; in shear it is the slab's
+///   punching strength (about 0.33 sqrt(f_c) = 1.8 MPa against 4 MPa) and in tension what the connection
+///   steel carries
+/// - timber elements joined to each other: nailed or bolted, a fraction of the wood
+/// - anything else between different elements: somewhat weaker than the material
+pub fn connection(b: &Bricks, j: u32) -> [f32; 3] {
+    let (a, c) = (b.ja[j as usize] as usize, b.jb[j as usize] as usize);
+    let (ma, mc) = (b.mat[a], b.mat[c]);
+    let (pa, pc) = (b.paint[a], b.paint[c]);
+    if pa == pc && ma == mc { return [1.0, 1.0, 1.0]; }
+    if ma == mat::TIMBER && mc == mat::TIMBER { return [1.0, 0.1, 0.25]; }
+    if ma == mat::CONCRETE && mc == mat::CONCRETE {
+        let slab = |p: u8| p == 0;
+        let support = |p: u8| p == 1 || p == 3;
+        if (slab(pa) && support(pc)) || (slab(pc) && support(pa)) { return [1.0, 0.5, 0.45]; }
+    }
+    [1.0, 0.7, 0.7]
+}
+
 pub fn crush_energy(m: u8) -> f32 {
     match m { mat::CONCRETE => 1.0e6, mat::MASONRY => 0.4e6, mat::STEEL => 20e6, mat::GLASS => 0.05e6, _ => 0.2e6 }
 }
@@ -489,7 +511,7 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
         let area = b.jarea[ju] as f32 * TICK * TICK;
         let (ma, mb) = (b.mat[b.ja[ju] as usize], b.mat[b.jb[ju] as usize]);
         let infill = (b.flags[b.ja[ju] as usize] | b.flags[b.jb[ju] as usize]) & F_INFILL != 0;
-        let cap = strength(ma)[mode].min(strength(mb)[mode]);
+        let cap = strength(ma)[mode].min(strength(mb)[mode]) * connection(b, j)[mode];
         let mut ratio = fabs(f) / (area * cap);
         // bending across a joint between two bricks of one plate (side by side): the face is the section
         let mono = (b.flags[b.ja[ju] as usize] | b.flags[b.jb[ju] as usize]) & crate::brick::F_MONO != 0;

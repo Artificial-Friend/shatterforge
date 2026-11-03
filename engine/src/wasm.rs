@@ -59,6 +59,8 @@ static mut GAME: Option<Game> = None;
 fn game() -> &'static mut Game { unsafe { GAME.as_mut().unwrap() } }
 
 #[no_mangle] pub extern "C" fn game_new(storeys: u32) { unsafe { GAME = Some(Game::new(storeys as i32)); } }
+/// A tower of `kind`: 0 concrete frame, 1 masonry, 2 timber.
+#[no_mangle] pub extern "C" fn game_new_kind(storeys: u32, kind: u32) { unsafe { GAME = Some(Game::new_kind(storeys as i32, kind as u8)); } }
 // ---- handing the brick store between the simulation worker and the page
 static mut SNAP: Vec<u8> = Vec::new();
 #[allow(static_mut_refs)]
