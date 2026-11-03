@@ -416,12 +416,22 @@ function impacts() {
     c.n += keep.length;
     let xf = null, Rt = null;
     if (idx !== 1) { xf = frameOf(idx); Rt = mt(xf.R); }
+    // only the strongest contacts are sent, and the GPU reports only those above the event thresholds: for a
+    // piece, scale their impulses up to its real change of momentum, M |v_before - v_now|
+    let scale = 1;
+    if (idx !== 1 && c.vPre && lastVel) {
+      const vo = (idx - 1) * 3, M = gpu.bodies[idx - 1].mass || 0;
+      const dv = Math.hypot(c.vPre[0] - lastVel[vo], c.vPre[1] - lastVel[vo + 1], c.vPre[2] - lastVel[vo + 2]);
+      let jk = 0; for (const { e } of keep) jk += e.impulse;
+      if (jk > 0) scale = Math.min(50, Math.max(1, M * dv / jk));
+    }
     for (const { e, sgn, other } of keep) {
       const dw = [sgn * e.n[0], sgn * e.n[1], sgn * e.n[2]];
-      if (c.J) for (let k = 0; k < 3; k++) c.J[k] += dw[k] * e.impulse;
+      const imp = e.impulse * scale;
+      if (c.J) for (let k = 0; k < 3; k++) c.J[k] += dw[k] * imp;
       let p = e.p, d = dw;
       if (xf) { p = mv(Rt, [e.p[0] - xf.T[0], e.p[1] - xf.T[1], e.p[2] - xf.T[2]]).map((v, k) => v + xf.C[k]); d = mv(Rt, dw); }
-      recs.push(idx === 1 ? -1 : bodyInfo.get(idx).piece, p[0], p[1], p[2], d[0], d[1], d[2], e.impulse, e.approach, other, 0);
+      recs.push(idx === 1 ? -1 : bodyInfo.get(idx).piece, p[0], p[1], p[2], d[0], d[1], d[2], imp, e.approach, other, 0);
     }
   }
   job.recs = job.recs.concat(recs);

@@ -328,6 +328,7 @@ impl Game {
         // what is left of the budgets for the falling pieces (shared by all of this call's pieces)
         let mut crumb_room = CRUMB_KEEP - scrumbs.len().min(CRUMB_KEEP);
         let mut rubble_room = RUBBLE_KEEP;
+        let mut rubble: Vec<u32> = Vec::new();
         let mut spieces = Vec::new();
         if !extra.is_empty() || !scrumbs.is_empty() {
             let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
@@ -467,8 +468,23 @@ impl Game {
                     Some((ax, sg, at)) => g.iter().any(|&i| { let t = self.b.tbox(i); (t.min[ax] * sg).min(t.max[ax] * sg) < at }),
                     None => g.iter().any(|&i| near_contact(&self.b, i)),
                 };
+                // the side of a section that gave way, where the contacts are, is the crushed storey: it does not
+                // stay a solid block for the floors above to land on, it falls apart into rubble
+                if hit && cut_at.is_some() { rubble.extend_from_slice(&g); continue; }
                 let id = self.new_piece(g.clone());
                 kids.push((id as i32, hit, g));
+            }
+            if !rubble.is_empty() {
+                // the biggest pieces of rubble stay as bodies (within the crumb budget), the rest goes as dust
+                let vol = |b: &Bricks, i: u32| { let t = b.tbox(i); ((t.max[0] - t.min[0]) * (t.max[1] - t.min[1]) * (t.max[2] - t.min[2])) as i64 };
+                rubble.sort_by_key(|&i| core::cmp::Reverse(vol(&self.b, i)));
+                let keep = rubble.len().min(crumb_room);
+                crumb_room -= keep;
+                for (k, &i) in rubble.iter().enumerate() {
+                    self.b.flags[i as usize] &= !F_DYNAMIC; self.b.remove(i); self.b.flags[i as usize] |= F_DYNAMIC;
+                    if k < keep { kids.push((-1, true, vec![i])); } else { self.dust += 1; }
+                }
+                rubble.clear();
             }
             broken.push((pid as u32, kids));
         }
@@ -779,13 +795,24 @@ mod tests {
             let tlow = g.pieces[top].iter().map(|&i| g.b.y[i as usize] as i32).min().unwrap();
             let below: std::vec::Vec<usize> = live.iter().copied().filter(|&p| p != top).collect();
             let mt: f32 = g.pieces[top].iter().map(|&i| structure::mass(&g.b, i)).sum();
-            let mut recs = std::vec::Vec::new();
+            let mut recs: std::vec::Vec<(usize, [f32; 3])> = std::vec::Vec::new();
             for &p in &below { for &i in &g.pieces[p] { let t = g.b.tbox(i); if t.max[1] <= tlow && t.max[1] >= tlow - 8 && g.b.flags[i as usize] & crate::brick::F_INFILL == 0 {
                 recs.push((p, [(t.min[0] + t.max[0]) as f32 * 0.5 * TICK, t.max[1] as f32 * TICK, (t.min[2] + t.max[2]) as f32 * 0.5 * TICK])); } } }
-            if recs.is_empty() { std::println!("round {round}: nothing under the top piece {top} (bottom {tlow}); below: {:?}", below.iter().map(|&p| (p, g.pieces[p].len(), g.pieces[p].iter().map(|&i| g.b.y[i as usize] as i32 + g.b.sy[i as usize] as i32).max().unwrap())).collect::<std::vec::Vec<_>>()); break; }
+            // nothing left of the crushed storey under it: it falls onto what stands below (the stumps)
+            let mut on_static = false;
+            if recs.is_empty() {
+                let stat: std::vec::Vec<u32> = (0..g.b.len() as u32).filter(|&i| g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && g.b.flags[i as usize] & crate::brick::F_INFILL == 0 && g.b.tbox(i).max[1] <= tlow).collect();
+                let topy = stat.iter().map(|&i| g.b.tbox(i).max[1]).filter(|&y| y > 0).max().unwrap_or(0);
+                for &i in &stat { let t = g.b.tbox(i); if t.max[1] >= topy - 2 && topy > 0 { recs.push((usize::MAX, [(t.min[0] + t.max[0]) as f32 * 0.5 * TICK, t.max[1] as f32 * TICK, (t.min[2] + t.max[2]) as f32 * 0.5 * TICK])); } }
+                on_static = true;
+                std::println!("round {round}: the top piece falls {:.1} m onto {} stumps", (tlow - topy) as f32 * TICK, recs.len());
+            }
+            if recs.is_empty() { break; }
             let j = mt * 5.0 / recs.len() as f32;
             for (p, c) in &recs {
-                g.inp.extend_from_slice(&[top as f32, c[0], c[1], c[2], 0.0, 1.0, 0.0, j, 5.0, 0.0, 0.0]);
+                // the top piece's own contact point is at its underside
+                g.inp.extend_from_slice(&[top as f32, c[0], tlow as f32 * TICK, c[2], 0.0, 1.0, 0.0, j, 5.0, 0.0, 0.0]);
+                if on_static { g.inp.extend_from_slice(&[-1.0, c[0], c[1], c[2], 0.0, -1.0, 0.0, j, 5.0, 0.0, 0.0]); continue; }
                 g.inp.extend_from_slice(&[*p as f32, c[0], c[1], c[2], 0.0, -1.0, 0.0, j, 5.0, 0.0, 0.0]);
                 // the storey below passes the load on to the ground
                 g.inp.extend_from_slice(&[*p as f32, c[0], 2.0, c[2], 0.0, 1.0, 0.0, j, 0.5, 0.0, 0.0]);
