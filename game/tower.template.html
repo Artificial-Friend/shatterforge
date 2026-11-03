@@ -455,12 +455,14 @@ function onImpacts(job, r) {
     // the velocity before the impacts: the contacts pushed the body by sum(J d) / M
     const vPre = [0, 1, 2].map(k => c.vPost[k] - c.J[k] / M);
     const Jl = Math.hypot(...c.J) || 1, D = c.J.map(v => v / Jl);
-    // parts cut free keep falling, slowed by what the section that gave way could carry
+    // parts cut free keep falling, slowed by the energy it took to crush the section that gave way
     let mFree = 0;
     for (const kd of kids) if (!kd.hit) for (const bx of kd.boxes) mFree += bx[3] * bx[4] * bx[5] * TICK * TICK * TICK * ((MATERIALS[bx[6] & 15] || MATERIALS[0]).density);
+    // (cap is the energy crushing that section took: the speed into the contacts drops to sqrt(v^2 - 2E/m))
     const along = vPre[0] * D[0] + vPre[1] * D[1] + vPre[2] * D[2];   // < 0: moving into the contacts
-    const slow = mFree > 0 ? Math.min(Math.max(-along, 0), cap / 60 / mFree) : 0;
-    const vFree = [0, 1, 2].map(k => vPre[k] + D[k] * slow);
+    const speed = Math.max(-along, 0);
+    const after = mFree > 0 ? Math.sqrt(Math.max(0, speed * speed - 2 * cap / mFree)) : speed;
+    const vFree = [0, 1, 2].map(k => vPre[k] + D[k] * (speed - after));
     // the hit parts move on as the body does now
     const vo = (idx - 1) * 3, vNow = lastVel ? [lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]] : c.vPost, w0 = c.w0;
     gpu.killBody(idx); bodyInfo.delete(idx);
