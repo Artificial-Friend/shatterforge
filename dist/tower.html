@@ -1551,7 +1551,7 @@ function pump() {
   let job = null;
   if (jobs.blast.length) job = jobs.blast.shift();
   else if (jobs.impacts) { job = jobs.impacts; jobs.impacts = null; }
-  else if (jobs.structure && gpu && !physicsPaused) { jobs.structure = false; job = { op: 'structure', max: 48 }; }
+  else if (jobs.structure && gpu && (!physicsPaused || window.__forceJobs)) { jobs.structure = false; job = { op: 'structure', max: 48 }; }
   else if (jobs.structure && !gpu) { jobs.structure = false; job = { op: 'structure', max: 48 }; }
   if (!job) return;
   busy = job;
