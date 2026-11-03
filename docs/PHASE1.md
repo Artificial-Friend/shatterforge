@@ -125,6 +125,13 @@ The engine test drops the tower 1.4 m at 5.2 m/s onto 285 stumps:
 - **The tower.** It breaks just above its bottom slab: that section carries 354 MN, and stopping the tower in one frame takes 1,395 MN.
 - **The crush-down.** The upper tower is cut free and goes on crushing in later rounds.
 
+### Steel ball and settings
+
+- **Steel ball.** Key 4 switches the click from blasting to a steel ball fired from the camera: 0.5 m and 60 m/s by default. Its hits go through the same impact path as everything else.
+- **Energy split.** Impact energy divides by the other side's crush energy, V_self = E·c_other / (c_self·(c_self + c_other)). The weaker material takes most of it: steel on concrete crushes the concrete, and concrete on concrete crushes half each.
+- **Settings.** Key O opens the settings panel. It sets the crush depth (how much a crushed section absorbs), the crumbs and rubble kept per impact, and the ball's speed and size. The engine parameters go to the worker and to the page's copy (`set_param`), and the settings are remembered in the browser.
+- **Timing.** The status panel shows main-thread time per stage and GPU time per stage.
+
 ### Engine in a worker
 
 The authoritative engine runs in a Web Worker: blasts, the structural rounds and impacts. One job runs at a time, in this order: blasts, then impacts, then structural rounds.

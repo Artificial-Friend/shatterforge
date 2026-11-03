@@ -30,12 +30,27 @@ h1 { font: 600 24px/1.2 var(--sans); margin: 0; text-wrap: balance; }
 button { font: 600 15px var(--sans); padding: 11px 18px; border-radius: 5px; border: 0; background: var(--accent); color: #1a120c; cursor: pointer; align-self: flex-start; }
 button:disabled { opacity: .5; cursor: default; }
 .warn { color: #f1786c; font: 12px var(--mono); }
+.settings { position: fixed; right: max(12px, env(safe-area-inset-right, 0px)); top: calc(10px + env(safe-area-inset-top, 0px)); width: min(320px, calc(100vw - 24px)); background: #15171a; border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; font: 12px/1.4 var(--mono); }
+.settings h2 { font: 600 14px var(--sans); margin: 0; }
+.settings label { display: flex; flex-direction: column; gap: 3px; color: var(--mute); }
+.settings label b { color: var(--ink); font-weight: 500; }
+.settings input[type=range] { width: 100%; accent-color: var(--accent); }
+.settings .hint { color: var(--mute); font-size: 11px; }
 </style>
 
 <canvas id="cv"></canvas>
 <div class="cross"></div>
 <div class="hud" id="hud">loading…</div>
-<div class="tool" id="tool"><span data-r="0.4">1 · 0.4 m</span><span data-r="0.7">2 · 0.7 m</span><span data-r="1.2">3 · 1.2 m</span></div>
+<div class="tool" id="tool"><span data-r="0.4">1 · 0.4 m</span><span data-r="0.7">2 · 0.7 m</span><span data-r="1.2">3 · 1.2 m</span><span data-r="ball">4 · steel ball</span><span class="o">O · settings</span></div>
+<div class="settings" id="settings" hidden>
+  <h2>Settings</h2>
+  <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
+  <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
+  <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
+  <label>Ball speed <b id="v-bspeed"></b><input type="range" id="s-bspeed" min="20" max="300" step="10"></label>
+  <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
+  <span class="hint">O or Esc closes · settings are remembered in this browser</span>
+</div>
 <div class="start" id="start">
   <div class="card">
     <div class="eyebrow">Shatterforge · phase 1</div>
@@ -47,6 +62,8 @@ button:disabled { opacity: .5; cursor: default; }
       <dt>F</dt><dd>fly mode on/off · Q / E down / up while flying</dd>
       <dt>Click</dt><dd>blast at the crosshair</dd>
       <dt>1 2 3</dt><dd>blast radius 0.4 / 0.7 / 1.2 m</dd>
+      <dt>4</dt><dd>fire a steel ball instead (it hits the walls for real)</dd>
+      <dt>O</dt><dd>settings: collapse energy, debris budget, ball</dd>
     </dl>
     <div class="warn" id="warn"></div>
     <button id="go" disabled>Loading…</button>
@@ -124,7 +141,7 @@ const PAINTCOL = [[0.62, 0.61, 0.58], [0.56, 0.56, 0.54], [0.79, 0.77, 0.71], [0
 const colTmp = new THREE.Color();
 function debrisColour(code, k) {
   const m = code & 15, paint = code >> 4;
-  const c = m === GLASS ? [0.36, 0.50, 0.58] : m === TIMBER ? [0.86, 0.84, 0.79] : (PAINTCOL[paint] || [0.7, 0.7, 0.7]);
+  const c = m === GLASS ? [0.36, 0.50, 0.58] : m === TIMBER ? [0.86, 0.84, 0.79] : m === 2 ? [0.22, 0.23, 0.25] : (PAINTCOL[paint] || [0.7, 0.7, 0.7]);
   const h = ((Math.imul(k, 2654435761) >>> 24) & 255) / 255, s = 0.96 + 0.06 * h;
   // the tower mesh is sRGB-like vertex colour: keep the same space
   return colTmp.setRGB(c[0] * s, c[1] * s, c[2] * s);
@@ -134,11 +151,18 @@ let reading = false, debrisShapes = 0, pendingChunks = null, readGen = 0, blastG
 // Debris poses come back from the GPU a frame or more late, and not every frame: they are drawn blended
 // between the last two read-backs (matched shape by shape), so motion stays smooth.
 let snapPrev = null, snapCur = null, gpuInflight = 0;
+// main-thread time per frame by stage (smoothed), shown in the HUD
+const perf = {};
+function timed(name, fn) { const t = performance.now(); const r = fn(); const d = performance.now() - t; perf[name] = perf[name] == null ? d : perf[name] * 0.9 + d * 0.1; return r; }
+function perfAdd(name, d) { perf[name] = perf[name] == null ? d : perf[name] * 0.9 + d * 0.1; }
 function pullDebris() {
   if (!gpu || reading) return;
   reading = true;
   const gen = blastGen;
+  const tr = performance.now();
   gpu.readPose(debrisFrom).then(r => {
+    perfAdd('read wait', performance.now() - tr);
+    const t0 = performance.now();
     // the tower mesh changes in the same frame as the debris that replaces it appears (no gap)
     if (pendingChunks && gen === blastGen) { for (const k of pendingChunks) chunkMesh(k); pendingChunks = null; }
     r.t = performance.now();
@@ -148,6 +172,7 @@ function pullDebris() {
     const n = Math.min(MAXD, r.pose.length / 10);
     for (let k = 0; k < n; k++) dMesh.setColorAt(k, debrisColour(r.cols[k], r.slots[k]));
     if (dMesh.instanceColor) dMesh.instanceColor.needsUpdate = true;
+    perfAdd('read', performance.now() - t0 + (r.jsMs || 0));
     reading = false;
   }, () => { reading = false; });
 }
@@ -271,6 +296,7 @@ onmessage = async (m) => {
     E.game_new(d.storeys); E.game_mesh(0);
     postMessage({ op: 'ready' }); return;
   }
+  if (d.op === 'param') { E.set_param(d.id, d.v); return; }
   const t0 = performance.now();
   let n = 0;
   if (d.op === 'blast') n = E.blast(d.x, d.y, d.z, d.r);
@@ -317,6 +343,12 @@ function pump() {
   else finish(runInline(job));
 }
 function finish(r) {
+  const tf = performance.now();
+  finishInner(r);
+  perfAdd('apply', performance.now() - tf);
+  pump();
+}
+function finishInner(r) {
   const job = busy; busy = null;
   workerMs = r.ms; dustBricks = r.dust; structRatio = r.ratio;
   // the page's copy of the store
@@ -324,7 +356,6 @@ function finish(r) {
   if (r.op === 'blast') onBlast(job, r);
   else if (r.op === 'structure') onStructure(r);
   else onImpacts(job, r);
-  pump();
 }
 function readStatic(f) {
   let o = 0;
@@ -508,7 +539,7 @@ function onImpacts(job, r) {
 // ---- input
 cv.addEventListener('click', () => {
   if (!locked) { const r = cv.requestPointerLock && cv.requestPointerLock(); if (r && r.catch) r.catch(() => {}); return; }
-  doBlast();
+  if (radius === 'ball') fireBall(); else doBlast();
 });
 document.addEventListener('pointerlockchange', () => { locked = document.pointerLockElement === cv; });
 let drag = null;
@@ -523,11 +554,53 @@ addEventListener('mousemove', (e) => {
 addEventListener('keydown', (e) => {
   keys.add(e.code);
   if (e.code === 'KeyF') fly = !fly;
-  if (e.code === 'Digit1') setRadius(0.4); if (e.code === 'Digit2') setRadius(0.7); if (e.code === 'Digit3') setRadius(1.2);
-  if (e.code === 'KeyB' && !locked) doBlast();
+  if (e.code === 'Digit1') setRadius(0.4); if (e.code === 'Digit2') setRadius(0.7); if (e.code === 'Digit3') setRadius(1.2); if (e.code === 'Digit4') setRadius('ball');
+  if (e.code === 'KeyB' && !locked) { if (radius === 'ball') fireBall(); else doBlast(); }
+  if (e.code === 'KeyO' || (e.code === 'Escape' && !$('settings').hidden)) toggleSettings(e.code === 'KeyO' ? undefined : false);
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
-function setRadius(r) { radius = r; document.querySelectorAll('#tool span').forEach(s => s.classList.toggle('on', +s.dataset.r === r)); }
+function setRadius(r) { radius = r; document.querySelectorAll('#tool span').forEach(s => s.classList.toggle('on', s.dataset.r === String(r))); }
+
+// ---- settings (engine parameters go to both the worker and the page's copy)
+const SETTINGS = {
+  crush: { el: 's-crush', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: v => setParam(2, v) },
+  crumbs: { el: 's-crumbs', def: 256, fmt: v => `${v}`, apply: v => setParam(0, v) },
+  rubble: { el: 's-rubble', def: 64, fmt: v => `${v}`, apply: v => setParam(1, v) },
+  bspeed: { el: 's-bspeed', def: 60, fmt: v => `${v} m/s`, apply: () => {} },
+  bsize: { el: 's-bsize', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: () => {} },
+};
+const setting = {};
+function setParam(id, v) { if (E) E.set_param(id, +v); if (worker) worker.postMessage({ op: 'param', id, v: +v }); }
+function initSettings() {
+  let saved = {}; try { saved = JSON.parse(localStorage.getItem('sf-settings') || '{}'); } catch (e) {}
+  for (const [k, d] of Object.entries(SETTINGS)) {
+    const el = $(d.el); el.value = saved[k] ?? d.def; setting[k] = +el.value; $('v-' + k).textContent = d.fmt(el.value); d.apply(setting[k]);
+    el.addEventListener('input', () => { setting[k] = +el.value; $('v-' + k).textContent = d.fmt(el.value); d.apply(setting[k]); try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} });
+  }
+}
+function toggleSettings(on) {
+  const p = $('settings'); p.hidden = on === undefined ? !p.hidden : !on;
+  if (!p.hidden && document.exitPointerLock) document.exitPointerLock();
+}
+
+// ---- the steel ball: a heavy round body fired from the camera; its hits crush and load the walls
+function ballShapes(c, r) {
+  // three crossed boxes and a core: round enough to roll and hit like a ball
+  const a = r, b = r * 0.62;
+  return [[a, b, b], [b, a, b], [b, b, a], [r * 0.82, r * 0.82, r * 0.82]].map(h => ({ p: c.slice(), q: [0, 0, 0, 1], h, mat: 2, col: 2 }));
+}
+function fireBall() {
+  if (!gpu) return;
+  const d = new THREE.Vector3(); cam.getWorldDirection(d);
+  const r = setting.bsize / 2, v = setting.bspeed;
+  const c = [cam.position.x + d.x * (r + 0.6), cam.position.y + d.y * (r + 0.6), cam.position.z + d.z * (r + 0.6)];
+  if (gpu.capB - gpu.n < 1 || gpu.capS - gpu.ns < 4) return;
+  gpu.addBodies([{ shapes: ballShapes(c, r), v: [d.x * v, d.y * v, d.z * v], w: [0, 0, 0] }]);
+  lastActive = performance.now();
+  balls++;
+  lastBlast = `steel ball ${(2 * r).toFixed(2)} m at ${v} m/s`;
+}
+let balls = 0;
 setRadius(0.7);
 
 // ---- loop
@@ -551,14 +624,16 @@ function frame(now) {
     if (gpu && !physicsPaused && (gpu.stats.awake > 0 || now - lastActive < 2000)) {
       acc += dt;
       // never queue more GPU work than it finishes: a backlog makes every read-back late
+      const ts = performance.now();
       let n = 0; while (acc >= 1 / 60 && n < 2 && gpuInflight < 2) { gpu.step(1 / 60); acc -= 1 / 60; n++; gpuInflight++; dev.queue.onSubmittedWorkDone().then(() => gpuInflight--); }
+      perfAdd('step', performance.now() - ts);
       if (acc > 0.1) acc = 0;
       pullDebris();
-      impacts();
+      timed('impacts', impacts);
     }
   }
-  drawDebris(now);
-  renderer.render(scene, cam);
+  timed('draw', () => drawDebris(now));
+  timed('render', () => renderer.render(scene, cam));
   frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; hud(); }
 }
 function hud() {
@@ -570,8 +645,9 @@ function hud() {
     `<span class="k">bricks</span> ${E.bricks_alive().toLocaleString()} · <span class="k">joints</span> ${E.joints_live().toLocaleString()} · ${E.bytes_per_brick().toFixed(0)} B/brick`,
     gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake` : `<span class="k">debris physics</span> off (no WebGPU)`,
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'}` : '',
+    `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
     `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}`,
-    lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to blast · radius ${radius} m</span>`,
+    lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,
   ].filter(Boolean).join('<br>');
 }
 
@@ -583,6 +659,7 @@ function hud() {
     E.game_new(STOREYS);
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
     await startWorker(bytes);
+    initSettings();
     E.player_set(0, 0.0, -16);
   } catch (e) { $('warn').textContent = 'Could not start the engine: ' + e.message; return; }
   try {

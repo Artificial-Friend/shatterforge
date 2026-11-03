@@ -75,6 +75,11 @@ static mut SNAP: Vec<u8> = Vec::new();
     for k in lo..=hi { g.remesh(k); }
     g.dirty = (lo.max(0), hi.min(g.chunks.len() as i32 - 1));
 }
+/// Settings: 0 crumbs kept per impacts call, 1 rubble fragments kept, 2 crush depth (m).
+#[no_mangle] pub extern "C" fn set_param(id: u32, v: f32) {
+    let g = game();
+    match id { 0 => g.crumb_keep = (v.max(0.0) as usize).max(2), 1 => g.rubble_keep = v.max(0.0) as usize, 2 => g.crush_depth = v.max(0.0), _ => {} }
+}
 #[no_mangle] pub extern "C" fn game_mesh(on: u32) { game().mesh = on != 0; }
 #[no_mangle] pub extern "C" fn chunk_count() -> u32 { game().chunks.len() as u32 }
 #[no_mangle] pub extern "C" fn chunk_vptr(k: u32) -> *const f32 { game().chunks[k as usize].v.as_ptr() }

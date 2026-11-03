@@ -42,9 +42,15 @@ pub struct Game {
     pub mesh: bool,
     /// the last section cut: [contacts at, plane, capacity MN, crush energy per metre MJ, required force MN, squeezed]
     pub cut_dbg: [f32; 6],
+    /// settings: crumbs and rubble bricks kept as bodies per impacts call, rubble fragments kept, and how deep a
+    /// section that gives way is crushed (m; more = a crushed storey absorbs more of the fall)
+    pub crumb_keep: usize,
+    pub rubble_keep: usize,
+    pub crush_depth: f32,
 }
 
-/// fragments of fewer bricks than this count as rubble; at most RUBBLE_KEEP of them per impacts call stay as bodies
+/// fragments of fewer bricks than this count as rubble; at most `rubble_keep` (default RUBBLE_KEEP) of them per
+/// impacts call stay as bodies
 const RUBBLE_MIN: usize = 48;
 const RUBBLE_KEEP: usize = 64;
 /// crumbs kept as bodies per impacts call (the rest of the crushed material goes as dust)
@@ -59,7 +65,7 @@ impl Game {
         let b = tower::build(storeys, 1);
         let n = (storeys + 2) as usize;
         let mut g = Game { b, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6] };
+                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH };
         for k in 0..n as i32 { g.remesh(k); }
         g
     }
@@ -286,7 +292,9 @@ impl Game {
             who: r[0] as i32, p: [r[1] / TICK, r[2] / TICK, r[3] / TICK], d: v3(r[4], r[5], r[6]), j: r[7], v: r[8], other: r[9] as i32,
         }).collect();
         let ce = |m: i32| if m < 0 { 0.0 } else { structure::crush_energy(m as u8) };
-        let crush_r = |e: f32, cs: f32, co: f32| { let co = if co > 0.0 { co } else { cs }; cbrt(3.0 * e / (cs + co) / (4.0 * core::f32::consts::PI)).min(1.5) };
+        // the energy divides by the other side's crush energy: the weaker material takes most of it
+        // (steel on concrete crushes the concrete, concrete on concrete half each): V = E c_o / (c_s (c_s + c_o))
+        let crush_r = |e: f32, cs: f32, co: f32| { let co = if co > 0.0 { co } else { cs }; cbrt(3.0 * e * co / (cs * (cs + co)) / (4.0 * core::f32::consts::PI)).min(1.5) };
         self.b.log.clear();
         // ---- the standing structure
         let mut scrumbs = Vec::new();
@@ -324,10 +332,10 @@ impl Game {
         scrumbs.sort_unstable(); scrumbs.dedup();
         // crumb budget: beyond it, crushed material goes as dust (an even sample of the crumbs stays)
         let thin = |v: &mut Vec<u32>, keep: usize, dust: &mut usize| { if v.len() > keep { let n = v.len(); let kept: Vec<u32> = (0..keep).map(|k| v[k * n / keep]).collect(); *dust += n - keep; *v = kept; } };
-        thin(&mut scrumbs, CRUMB_KEEP / 2, &mut self.dust);
+        thin(&mut scrumbs, self.crumb_keep / 2, &mut self.dust);
         // what is left of the budgets for the falling pieces (shared by all of this call's pieces)
-        let mut crumb_room = CRUMB_KEEP - scrumbs.len().min(CRUMB_KEEP);
-        let mut rubble_room = RUBBLE_KEEP;
+        let mut crumb_room = self.crumb_keep - scrumbs.len().min(self.crumb_keep);
+        let mut rubble_room = self.rubble_keep;
         let mut rubble: Vec<u32> = Vec::new();
         let mut spieces = Vec::new();
         if !extra.is_empty() || !scrumbs.is_empty() {
@@ -401,7 +409,7 @@ impl Game {
                         if f_req > cap {
                             // a failed section stops resisting once its material is crushed: the energy it takes
                             // is the crush energy of its area over the crushed depth
-                            cap_used = epm * CRUSH_DEPTH;
+                            cap_used = epm * self.crush_depth;
                             cut_at = Some((ax, sg, at));
                             let s0 = from.iter().map(|&p| p * sg as f32).fold(f32::MAX, f32::min);
                             self.cut_dbg = [s0, at as f32, cap / 1e6, epm / 1e6, f_req / 1e6, if squeezed { 1.0 } else { 0.0 }];

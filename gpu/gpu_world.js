@@ -1011,7 +1011,9 @@ class GpuWorld {
     const f = new Float32Array(128), u = new Uint32Array(f.buffer);
     const cur = this.frame & 1, L = this.L;
     f.set([0, -9.81, 0, h, invH, omega / a1, a2 * a3, a3, 3.0, 1.0, 0.02, dt, this.cell]);
-    u[13] = this.n1; u[14] = this.G - 1; u[15] = this.maxMan;
+    // the grid is sized by the shapes there are, not by capacity (it is cleared and scanned every step)
+    let g = 256; while (g < 2 * this.ns1 && g < this.G) g *= 2; this.Geff = g;
+    u[13] = this.n1; u[14] = g - 1; u[15] = this.maxMan;
     u[16] = this.T - 1; u[17] = this.colorLimit; f[18] = 0.25 * Math.PI * invH; u[19] = cur * this.maxMan;
     u[20] = (1 - cur) * this.maxMan; u[21] = L.gcount; u[22] = L.gstart; u[23] = L.gfill;
     u[24] = L.sorted; u[25] = L.cell; u[26] = L.mask; u[27] = L.ccount;
@@ -1035,7 +1037,7 @@ class GpuWorld {
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
     // counters; impact events keep accumulating until a step copies them out (a pending read-back skips the copy)
     if (this.statCopied === false) { clr(0, 7); clr(8, 8); } else clr(0, 16);
-    clr(L.gcount, this.G); clr(L.gfill, this.G); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
+    clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (!this.n) { this.frame++; return; }
     const nb = Math.ceil(this.n / 64) || 1, nsh = Math.ceil(this.ns / 64) || 1;
@@ -1185,14 +1187,25 @@ class GpuWorld {
     }, () => { this.statPending = false; });
   }
 
+  // Copy `size` bytes of `buffer` back. Staging buffers are kept per source buffer and reused (grown when
+  // needed); a read while that one is still mapping gets a temporary buffer.
   async read(buffer, size) {
-    const rb = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.staging = this.staging || new Map();
+    let st = this.staging.get(buffer), temp = false;
+    if (!st || st.busy || st.size < size) {
+      if (st && st.busy) temp = true;
+      else { if (st) st.buf.destroy(); st = { buf: this.device.createBuffer({ size: Math.max(size, 4096) * 2, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }), size: Math.max(size, 4096) * 2, busy: false }; this.staging.set(buffer, st); }
+    }
+    const rb = temp ? this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) : st.buf;
+    if (!temp) st.busy = true;
     const enc = this.device.createCommandEncoder(); enc.copyBufferToBuffer(buffer, 0, rb, 0, size);
     this.device.queue.submit([enc.finish()]);
-    await rb.mapAsync(GPUMapMode.READ);
-    const f = new Float32Array(rb.getMappedRange().slice(0));
-    rb.unmap(); rb.destroy();
-    return f;
+    try {
+      await rb.mapAsync(GPUMapMode.READ, 0, size);
+      const f = new Float32Array(rb.getMappedRange(0, size).slice(0));
+      rb.unmap();
+      return f;
+    } finally { if (temp) rb.destroy(); else st.busy = false; }
   }
 
   // Shapes as 10 floats each (p, q, h) for rendering, plus per-body state.
@@ -1200,6 +1213,7 @@ class GpuWorld {
   // materials in `mats`; dead shapes are skipped.
   async readPose(minBody = 0) {
     const bod = await this.read(this.bodBuf, this.n1 * 80), sol = await this.read(this.solBuf, this.n1 * 96);
+    const t0 = performance.now();
     const list = [], slots = [];
     this.shapes.forEach((s, k) => { if (!minBody || (s && !s.dead && s.body >= minBody)) { list.push(s); slots.push(k + 1); } });
     const pose = new Float32Array(list.length * 10), mats = new Uint8Array(list.length), cols = new Uint16Array(list.length);
@@ -1217,7 +1231,7 @@ class GpuWorld {
       vel.set(sol.subarray(s, s + 3), i * 3); ang.set(sol.subarray(s + 4, s + 7), i * 3);
       sleeping[i] = bod[b + 12] > 0.5 ? 1 : 0;
     }
-    return { pose, mats, cols, slots: Uint32Array.from(slots), body, vel, ang, sleeping };
+    return { pose, mats, cols, slots: Uint32Array.from(slots), body, vel, ang, sleeping, jsMs: performance.now() - t0 };
   }
 
   // This step's contacts: bodies, restitution, normal impulse total (N s) and approach speed (m/s) per contact,
