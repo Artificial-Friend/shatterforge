@@ -468,6 +468,7 @@ function onImpacts(job, r) {
     const speed = Math.max(-along, 0);
     const after = mFree > 0 ? Math.sqrt(Math.max(0, speed * speed - 2 * cap / mFree)) : speed;
     const vFree = [0, 1, 2].map(k => vPre[k] + D[k] * (speed - after));
+    if (window.__dbg) console.warn(`break piece ${parent} (body ${idx}, ${M.toFixed(0)} kg): crumbs ${kids.filter(k => k.id < 0).length}, parts ${kids.filter(k => k.id >= 0 && k.boxes.length > 20).map(k => (k.hit ? 'H' : 'F') + k.boxes.length).join(' ')} · vPre ${vPre.map(v => v.toFixed(2))} (${c.vPre ? 'history' : 'impulse'}) vPost ${c.vPost.map(v => v.toFixed(2))} · D ${D.map(v => v.toFixed(2))} · E ${(cap / 1e6).toFixed(2)} MJ mFree ${mFree.toFixed(0)} · speed ${speed.toFixed(2)} -> ${after.toFixed(2)}`);
     // the hit parts move on as the body does now
     const vo = (idx - 1) * 3, vNow = lastVel ? [lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]] : c.vPost, w0 = c.w0;
     gpu.killBody(idx); bodyInfo.delete(idx);
@@ -480,6 +481,7 @@ function onImpacts(job, r) {
     }, 0);
     breaks++;
   }
+  if (window.__dbg && nbr) console.warn(`last cut: contacts at ${f[o].toFixed(0)} ticks, plane ${f[o + 1]}, capacity ${f[o + 2].toFixed(0)} MN, ${f[o + 3].toFixed(1)} MJ/m, needed ${f[o + 4].toFixed(0)} MN, squeezed ${f[o + 5]}`);
   lastActive = performance.now();
 }
 

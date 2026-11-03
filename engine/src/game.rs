@@ -40,6 +40,8 @@ pub struct Game {
     pub dust: usize,
     /// build meshes (off in a worker that only simulates)
     pub mesh: bool,
+    /// the last section cut: [contacts at, plane, capacity MN, crush energy per metre MJ, required force MN, squeezed]
+    pub cut_dbg: [f32; 6],
 }
 
 /// fragments of fewer bricks than this count as rubble; at most RUBBLE_KEEP of them per impacts call stay as bodies
@@ -57,7 +59,7 @@ impl Game {
         let b = tower::build(storeys, 1);
         let n = (storeys + 2) as usize;
         let mut g = Game { b, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true };
+                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6] };
         for k in 0..n as i32 { g.remesh(k); }
         g
     }
@@ -400,6 +402,8 @@ impl Game {
                             // is the crush energy of its area over the crushed depth
                             cap_used = epm * CRUSH_DEPTH;
                             cut_at = Some((ax, sg, at));
+                            let s0 = from.iter().map(|&p| p * sg as f32).fold(f32::MAX, f32::min);
+                            self.cut_dbg = [s0, at as f32, cap / 1e6, epm / 1e6, f_req / 1e6, if squeezed { 1.0 } else { 0.0 }];
                             cracked += cut_section(&mut self.b, &mut set, ax, at);
                         }
                     }
@@ -479,6 +483,7 @@ impl Game {
                 n += 1;
             }
         }
+        self.out.extend_from_slice(&self.cut_dbg);
         n + scrumbs.len() + spieces.len()
     }
 
