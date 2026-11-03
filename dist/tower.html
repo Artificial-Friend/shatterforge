@@ -30,7 +30,7 @@ h1 { font: 600 24px/1.2 var(--sans); margin: 0; text-wrap: balance; }
 button { font: 600 15px var(--sans); padding: 11px 18px; border-radius: 5px; border: 0; background: var(--accent); color: #1a120c; cursor: pointer; align-self: flex-start; }
 button:disabled { opacity: .5; cursor: default; }
 .warn { color: #f1786c; font: 12px var(--mono); }
-.settings { position: fixed; right: max(12px, env(safe-area-inset-right, 0px)); top: calc(10px + env(safe-area-inset-top, 0px)); width: min(320px, calc(100vw - 24px)); background: #15171a; border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; font: 12px/1.4 var(--mono); }
+.settings { position: fixed; right: max(12px, env(safe-area-inset-right, 0px)); top: calc(10px + env(safe-area-inset-top, 0px)); width: min(320px, calc(100vw - 24px)); max-height: calc(100vh - 20px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); overflow-y: auto; overscroll-behavior: contain; background: #15171a; border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; font: 12px/1.4 var(--mono); }
 .settings h2 { font: 600 14px var(--sans); margin: 0; }
 .settings label { display: flex; flex-direction: column; gap: 3px; color: var(--mute); }
 .settings label b { color: var(--ink); font-weight: 500; }
@@ -60,7 +60,7 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
   <h2>Benchmark</h2>
   <span class="hint">the same scripted destruction every run: the ground storey cut by 36 fixed blasts, the tower dropping and crushing down, three steel balls; 12 s of simulated time, then a report</span>
-  <button id="bench-go" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run benchmark (reloads the page)</button>
+  <button id="bench-go" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run benchmark (reloads the page) · key K</button>
   <h2>Diagnostics</h2>
   <span class="hint">switch parts off one at a time while debris moves; the one that brings the frame rate back is the cause</span>
   <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-physics" checked> step the physics</label>
@@ -84,7 +84,8 @@ button:disabled { opacity: .5; cursor: default; }
       <dt>Click</dt><dd>blast at the crosshair</dd>
       <dt>1 2 3</dt><dd>blast radius 0.4 / 0.7 / 1.2 m</dd>
       <dt>4</dt><dd>fire a steel ball instead (it hits the walls for real)</dd>
-      <dt>O</dt><dd>settings: collapse energy, debris budget, ball</dd>
+      <dt>O</dt><dd>settings: building, collapse energy, debris budget, ball (scrolls)</dd>
+      <dt>K</dt><dd>run the benchmark (reloads the page, then reports)</dd>
     </dl>
     <div class="warn" id="warn"></div>
     <button id="go" disabled>Loading…</button>
@@ -1977,6 +1978,7 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyF') fly = !fly;
   if (e.code === 'Digit1') setRadius(0.4); if (e.code === 'Digit2') setRadius(0.7); if (e.code === 'Digit3') setRadius(1.2); if (e.code === 'Digit4') setRadius('ball');
   if (e.code === 'KeyB' && !locked) { if (radius === 'ball') fireBall(); else doBlast(); }
+  if (e.code === 'KeyK') { try { localStorage.setItem('sf-bench', '1'); } catch (err) {} location.reload(); }
   if (e.code === 'KeyO' || (e.code === 'Escape' && !$('settings').hidden)) toggleSettings(e.code === 'KeyO' ? undefined : false);
 });
 addEventListener('keyup', (e) => keys.delete(e.code));
