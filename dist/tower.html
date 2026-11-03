@@ -1666,6 +1666,7 @@ function impacts() {
       const dv = Math.hypot(c.vPre[0] - lastVel[vo], c.vPre[1] - lastVel[vo + 1], c.vPre[2] - lastVel[vo + 2]);
       let jk = 0; for (const { e } of keep) jk += e.impulse;
       if (jk > 0) scale = Math.min(50, Math.max(1, M * dv / jk));
+      if (window.__dbg) console.warn(`impact on body ${idx} (piece ${bodyInfo.get(idx).piece}, ${(M / 1000).toFixed(0)} t): ${list.length} events, ${keep.length} kept, approach up to ${Math.max(...keep.map(k => k.e.approach)).toFixed(1)} m/s, dv ${dv.toFixed(2)} m/s, impulse x${scale.toFixed(1)}`);
     }
     for (const { e, sgn, other } of keep) {
       const dw = [sgn * e.n[0], sgn * e.n[1], sgn * e.n[2]];
