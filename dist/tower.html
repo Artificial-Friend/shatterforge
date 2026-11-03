@@ -1757,7 +1757,9 @@ function impacts() {
     // thousands of bricks for a few crumbs every frame would be waste, too)
     if (idx !== 1 && c.vPre && lastVel && bodyInfo.get(idx).n > 100) {
       const vo = (idx - 1) * 3, dv = Math.hypot(c.vPre[0] - lastVel[vo], c.vPre[1] - lastVel[vo + 1], c.vPre[2] - lastVel[vo + 2]);
-      if (dv < 0.5) { if (!c.n) job.ctx.delete(idx); continue; }
+      // ...unless one hit carries enough energy into one spot to crush there (a ball, a falling block): 100 kJ
+      let eMax = 0; for (const { e } of list) eMax = Math.max(eMax, 0.5 * e.impulse * e.approach);
+      if (dv < 0.5 && eMax < 1e5) { if (!c.n) job.ctx.delete(idx); continue; }
     }
     list.sort((x, y) => y.e.impulse * y.e.approach - x.e.impulse * x.e.approach);
     const keep = list.slice(0, cap);
