@@ -43,6 +43,11 @@ button:disabled { opacity: .5; cursor: default; }
 <div class="cross"></div>
 <div class="hud" id="hud">loading…</div>
 <div class="tool" id="tool"><span data-r="0.4">1 · 0.4 m</span><span data-r="0.7">2 · 0.7 m</span><span data-r="1.2">3 · 1.2 m</span><span data-r="ball">4 · steel ball</span><span class="o">O · settings</span></div>
+<div class="settings" id="bench" hidden style="left:max(12px, env(safe-area-inset-left, 0px));right:auto;width:min(560px, calc(100vw - 24px));max-height:calc(100vh - 40px);overflow:auto">
+  <h2 id="bench-title">Benchmark</h2>
+  <pre id="bench-out" style="margin:0;white-space:pre-wrap;font:11px/1.45 var(--mono);color:var(--ink)"></pre>
+  <div style="display:flex;gap:8px"><button id="bench-copy" type="button" style="font-size:13px;padding:8px">Copy report</button><button id="bench-close" type="button" style="font-size:13px;padding:8px;background:#2a2d31;color:var(--ink)">Close</button></div>
+</div>
 <div class="settings" id="settings" hidden>
   <h2>Settings</h2>
   <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
@@ -53,6 +58,9 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Solver colours (max) <b id="v-colors"></b><input type="range" id="s-colors" min="8" max="31" step="1"><span class="hint">contacts beyond go to a parallel pass: fewer = faster, a little softer</span></label>
   <label>Ball speed <b id="v-bspeed"></b><input type="range" id="s-bspeed" min="20" max="300" step="10"></label>
   <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
+  <h2>Benchmark</h2>
+  <span class="hint">the same scripted destruction every run: the ground storey cut by 36 fixed blasts, the tower dropping and crushing down, three steel balls; 12 s of simulated time, then a report</span>
+  <button id="bench-go" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run benchmark (reloads the page)</button>
   <h2>Diagnostics</h2>
   <span class="hint">switch parts off one at a time while debris moves; the one that brings the frame rate back is the cause</span>
   <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-physics" checked> step the physics</label>
@@ -714,6 +722,74 @@ function fireBall() {
 let balls = 0;
 setRadius(0.7);
 
+// ---- benchmark: a scripted, seeded destruction with a report
+const BENCH = { on: false, phase: '', t0: 0, f0: 0, rows: [], frameMs: [], balls: [[180, -4, 9, -30, 0.18, 0.05], [300, 6, 6, -30, -0.15, 0.02], [420, 0, 3, -30, 0, 0.0]], next: 0, end: 720, gpuMax: 0 };
+function seededRandom(seed) { let a = seed >>> 0; return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+$('bench-go').addEventListener('click', () => { try { localStorage.setItem('sf-bench', '1'); } catch (e) {} location.reload(); });
+$('bench-close').addEventListener('click', () => { $('bench').hidden = true; });
+$('bench-copy').addEventListener('click', () => { const t = $('bench-out').textContent; navigator.clipboard.writeText(t).catch(() => { const r = document.createRange(); r.selectNodeContents($('bench-out')); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }); });
+function benchPending() { try { if (localStorage.getItem('sf-bench') === '1') { localStorage.removeItem('sf-bench'); return true; } } catch (e) {} return false; }
+async function benchStart() {
+  if (!gpu) return;
+  Math.random = seededRandom(20261103);
+  BENCH.on = true; BENCH.phase = 'cutting the ground storey';
+  $('bench').hidden = false; $('bench-title').textContent = 'Benchmark: running';
+  physicsPaused = true;
+  // a fixed view from outside, looking at the tower
+  fly = true; E.player_set(-26, 10, -38); yaw = Math.PI + 0.62; pitch = -0.12;
+  const t = performance.now();
+  for (let x = -10; x <= 10.1; x += 4) for (let z = -10; z <= 10.1; z += 4) jobs.blast.push({ op: 'blast', x, y: 1.8, z, r: 2.5, ctx: { d: [0, 0, 1], t0: t } });
+  pump();
+  await new Promise(res => { const c = () => (!busy && !jobs.blast.length) ? res() : setTimeout(c, 30); c(); });
+  BENCH.cutMs = performance.now() - t;
+  BENCH.phase = 'collapse';
+  BENCH.t0 = performance.now(); BENCH.f0 = stepsDone; BENCH.lastRow = stepsDone; BENCH.wall0 = BENCH.t0;
+  lastActive = performance.now();
+  physicsPaused = false;
+}
+function benchTick(now, dt) {
+  if (!BENCH.on || BENCH.phase !== 'collapse') return;
+  BENCH.frameMs.push(dt * 1000);
+  const f = stepsDone - BENCH.f0;
+  const g = gpu.gpuMs ? Object.values(gpu.gpuMs).reduce((a, b) => a + b, 0) : 0; BENCH.gpuMax = Math.max(BENCH.gpuMax, g);
+  // the steel balls, at fixed simulated times
+  while (BENCH.next < BENCH.balls.length && f >= BENCH.balls[BENCH.next][0]) {
+    const [, x, y, z, yw, pt] = BENCH.balls[BENCH.next++];
+    const d = [Math.sin(yw) * Math.cos(pt), Math.sin(pt), Math.cos(yw) * Math.cos(pt)];
+    gpu.addBodies([{ shapes: ballShapes([x, y, z], 0.4), v: [d[0] * 120, d[1] * 120, d[2] * 120], w: [0, 0, 0] }]); lastActive = performance.now();
+  }
+  if (f - BENCH.lastRow >= 60 || f >= BENCH.end) {
+    BENCH.lastRow = f;
+    let roof = 0; if (snapCur) for (let k = 0; k < snapCur.pose.length / 10; k++) roof = Math.max(roof, snapCur.pose[k * 10 + 1] + snapCur.pose[k * 10 + 8]);
+    BENCH.rows.push({ sim: f / 60, wall: (now - BENCH.wall0) / 1000, fps, steps: rate.steps, gpu: g, gpuStages: gpu.gpuMs ? { ...gpu.gpuMs } : null, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, breaks, dust: dustBricks, impacts: impactMs, structure: failedJoints, roof });
+    benchShow();
+  }
+  if (f >= BENCH.end) { BENCH.on = false; BENCH.phase = 'done'; Math.random = mathRandom; benchShow(true); }
+}
+const mathRandom = Math.random;
+function benchShow(done) {
+  const r = BENCH.rows, last = r[r.length - 1] || {};
+  const fm = BENCH.frameMs.slice().sort((a, b) => a - b), pct = (q) => fm.length ? fm[Math.min(fm.length - 1, Math.floor(q * fm.length))] : 0;
+  const lines = [];
+  lines.push(`Shatterforge benchmark · ${['concrete frame', 'masonry', 'mass timber'][KIND]}, ${STOREYS} storeys · ${new Date().toISOString().slice(0, 19)}Z`);
+  lines.push(`${navigator.userAgent}`);
+  lines.push(`settings: crush depth ${setting.crush} m · crumbs ${setting.crumbs} · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
+  lines.push(`cut: 36 blasts in ${(BENCH.cutMs / 1000).toFixed(1)} s`);
+  lines.push('');
+  lines.push('  sim s  wall s   fps  steps/s  GPU ms  bodies  awake  contacts  breaks   dust  roof m');
+  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)}`);
+  if (done) {
+    const simT = last.sim || 0, wallT = last.wall || 1;
+    lines.push('');
+    lines.push(`real-time factor ${(simT / wallT).toFixed(2)} (simulated ${simT.toFixed(1)} s in ${wallT.toFixed(1)} s)`);
+    lines.push(`frame time: median ${pct(0.5).toFixed(1)} ms · 95th ${pct(0.95).toFixed(1)} ms · worst ${pct(1).toFixed(1)} ms`);
+    lines.push(`GPU step: worst ${BENCH.gpuMax.toFixed(1)} ms${last.gpuStages ? ' · last ' + Object.entries(last.gpuStages).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ') : ''}`);
+    lines.push(`peak bodies ${Math.max(...r.map(x => x.bodies))} · peak contacts ${Math.max(...r.map(x => x.contacts))} · breaks ${last.breaks} · bricks to dust ${last.dust} · roof ${r.length ? r[0].roof.toFixed(1) : '?'} -> ${(last.roof || 0).toFixed(1)} m`);
+    $('bench-title').textContent = 'Benchmark: done';
+  }
+  $('bench-out').textContent = lines.join('\n');
+}
+
 // ---- loop
 let last = performance.now(), acc = 0, fps = 60, frames = 0, fpsT = last;
 function frame(now) {
@@ -754,6 +830,7 @@ function frameBody(now, dt) {
       timed('impacts', impacts);
     }
   }
+  benchTick(now, dt);
   if (diag.draw) timed('draw', () => drawDebris(now));
   timed('render', () => renderer.render(scene, cam));
   frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; hud(); }
@@ -807,6 +884,8 @@ function hud() {
   } catch (e) { gpu = null; $('warn').textContent = 'GPU physics unavailable: ' + e.message; }
   $('go').disabled = false; $('go').textContent = 'Enter';
   hud();
+  // a benchmark asked for before the reload starts by itself
+  if (benchPending()) { $('start').hidden = true; benchStart(); }
 })();
 $('go').addEventListener('click', () => {
   $('start').hidden = true; physicsPaused = false;
