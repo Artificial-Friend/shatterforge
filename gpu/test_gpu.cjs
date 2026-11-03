@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -170,6 +170,36 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       for (let f = 1; f <= 600; f++) { w.step(1 / 60); if (f % 60 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); awake.push(w.stats.awake); } }
       w.destroy();
       check('sleep', awake[awake.length - 1] < 300, { awake_per_s: awake });
+    }
+    if (scenes.includes('reuse')) {
+      // bodies retired and new ones made in their slots while everything is in contact (as when pieces break)
+      E.pile_setup(400, 12);
+      const w = await GpuWorld.create(dev, GpuWorld.boxes(grab()), { substeps: 12, sleep: true, maxBodies: 2000, maxShapes: 4000 });
+      let rnd = 7; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      let firstBad = -1, kills = 0;
+      for (let f = 1; f <= 240; f++) {
+        w.step(1 / 60);
+        if (f % 6 === 0) {
+          await dev.queue.onSubmittedWorkDone(); await settle();
+          const r = await w.readPose();
+          if (firstBad < 0) for (let k = 0; k < r.body.length; k++) if (!Number.isFinite(r.body[k])) { firstBad = f; break; }
+          // retire 10 live bodies and put 10 two-box bodies where they were (moving), as a break would
+          const live = []; for (let i = 1; i <= w.n; i++) if (w.bodies[i - 1] && !w.bodies[i - 1].dead) live.push(i);
+          const list = [];
+          for (let q = 0; q < 10 && live.length; q++) {
+            const i = live.splice(Math.floor(rand() * live.length), 1)[0];
+            const o = (i - 1) * 7, p = [r.body[o], r.body[o + 1], r.body[o + 2]];
+            if (!p.every(Number.isFinite)) continue;
+            w.killBody(i); kills++;
+            list.push({ shapes: [{ p: [p[0] - 0.13, p[1], p[2]], q: [0, 0, 0, 1], h: [0.12, 0.12, 0.12], mat: 0 }, { p: [p[0] + 0.13, p[1], p[2]], q: [0, 0, 0, 1], h: [0.12, 0.12, 0.12], mat: 0 }], v: [0, -3, 0], w: [0, 0, 0] });
+          }
+          if (list.length) w.addBodies(list);
+        }
+      }
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      const r = await w.readPose(); let bad = 0; for (let k = 0; k < r.body.length; k++) if (!Number.isFinite(r.body[k])) bad++;
+      w.destroy();
+      check('reuse', bad === 0 && firstBad < 0, { kills, bad, firstBad, bodies: w.n });
     }
     if (scenes.includes('paircount')) {
       // the broad phase must find the same pairs whatever its search order: count them on the first frames

@@ -1130,6 +1130,16 @@ class GpuWorld {
   // ---- incremental edits (debris, a changing static structure)
   // Append bodies (same format as create); returns the index of the first new body (0-based).
   addBodies(list) {
+    // never let a non-finite number in: one NaN body spreads NaN to everything it touches
+    const fin = (a) => a && a.every(Number.isFinite);
+    for (const b of list) {
+      b.shapes = b.shapes.filter(s => fin(s.p) && fin(s.q) && fin(s.h));
+      if (!fin(b.v || [0, 0, 0]) || !fin(b.w || [0, 0, 0])) { b.v = [0, 0, 0]; b.w = [0, 0, 0]; this.rejected = (this.rejected || 0) + 1; }
+    }
+    const keepIdx = []; list.forEach((b, k) => { if (b.shapes.length) keepIdx.push(k); });
+    const all = list.length;
+    list = keepIdx.map(k => list[k]);
+    if (!list.length) return new Array(all).fill(0);
     const { bodies, shapes } = buildBodies(list);
     this.freeBodies = this.freeBodies || []; this.freeShapes = this.freeShapes || [];
     const nb = Math.max(0, bodies.length - this.freeBodies.length), nsh = Math.max(0, shapes.length - this.freeShapes.length);
@@ -1154,7 +1164,9 @@ class GpuWorld {
       if (!this.bodyShapes.has(body)) this.bodyShapes.set(body, []);
       this.bodyShapes.get(body).push(slot);
     }
-    return bslot;
+    // slots in the order given (0 for a body that had nothing valid)
+    const out = new Array(all).fill(0); keepIdx.forEach((k, q) => { out[k] = bslot[q]; });
+    return out;
   }
   // Static shapes of fixed body `body` (1-based body index): set (create when slot is null) or kill.
   // centre and half extents in metres, axis-aligned; returns the slot (1-based shape index).
@@ -1191,6 +1203,7 @@ class GpuWorld {
   roomShapes() { return this.capS - this.ns + (this.freeShapes ? this.freeShapes.length : 0); }
   // Set a body's velocity and wake it (p, q: its current pose, which a wake records as its rest pose)
   setVelocity(body, v, w, p, q) {
+    if (![...v, ...w, ...p, ...q].every(Number.isFinite)) { this.rejected = (this.rejected || 0) + 1; return; }
     const qd = this.device.queue;
     qd.writeBuffer(this.solBuf, body * 96, new Float32Array([...v, 1, ...w, 0]));
     qd.writeBuffer(this.bodBuf, body * 80 + 48, new Float32Array([0, ...p, ...q]));

@@ -200,7 +200,7 @@ function pullDebris() {
     r.t = performance.now();
     r.index = new Map(); for (let k = 0; k < r.slots.length; k++) r.index.set(r.slots[k], k);
     snapPrev = snapCur; snapCur = r;
-    velHist.unshift({ v: r.vel, frame: r.frame }); if (velHist.length > 4) velHist.pop(); lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
+    velHist.unshift({ v: r.vel, frame: r.frame }); if (velHist.length > 4) velHist.pop(); lastReadFrame = r.frame; lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
     const n = Math.min(MAXD, r.pose.length / 10);
     for (let k = 0; k < n; k++) dMesh.setColorAt(k, debrisColour(r.cols[k], r.slots[k]));
     if (dMesh.instanceColor) { dMesh.instanceColor.updateRange.count = n * 3; dMesh.instanceColor.needsUpdate = true; }
@@ -238,12 +238,17 @@ function drawDebris(now) {
 // the map from the tower frame to the world at the body's creation (C, qs, P) and the body's pose then (p0, q0):
 //   world(x) = p(t) + R(q(t)) R(q0)^T (P + R(qs) (x - C) - p0)
 const bodyInfo = new Map();   // GPU body (1-based) -> { piece, C, qs, P, p0, q0, cool }
-let lastBodies = null, lastVel = null, lastAng = null, velHist = [];
+let lastBodies = null, lastVel = null, lastAng = null, velHist = [], lastReadFrame = -1;
+// A body's state from the latest read-back, when that read-back saw it: a body made since (a piece just cut
+// free, or one in a reused slot) is not in it, and reading it there gave NaN or another body's state
+function seen(idx) { const inf = bodyInfo.get(idx); return lastVel && (idx - 1) * 3 + 2 < lastVel.length && (!inf || lastReadFrame > inf.f0); }
+function velOf(idx) { if (seen(idx)) { const o = (idx - 1) * 3; return [lastVel[o], lastVel[o + 1], lastVel[o + 2]]; } const inf = bodyInfo.get(idx); return inf && inf.v0 ? inf.v0.slice() : [0, 0, 0]; }
+function angOf(idx) { if (seen(idx) && lastAng) { const o = (idx - 1) * 3; return [lastAng[o], lastAng[o + 1], lastAng[o + 2]]; } return [0, 0, 0]; }
 const mm = (A, B) => A.map((r, i) => [0, 1, 2].map(j => r[0] * B[0][j] + r[1] * B[1][j] + r[2] * B[2][j]));
 const mt = (A) => [0, 1, 2].map(i => [A[0][i], A[1][i], A[2][i]]);
 function bodyPose(idx) {
   const b = gpu.bodies[idx - 1];
-  if (lastBodies && (idx - 1) * 7 + 7 <= lastBodies.length) { const o = (idx - 1) * 7; return { p: [lastBodies[o], lastBodies[o + 1], lastBodies[o + 2]], q: [lastBodies[o + 3], lastBodies[o + 4], lastBodies[o + 5], lastBodies[o + 6]] }; }
+  if (lastBodies && (idx - 1) * 7 + 7 <= lastBodies.length && seen(idx)) { const o = (idx - 1) * 7; return { p: [lastBodies[o], lastBodies[o + 1], lastBodies[o + 2]], q: [lastBodies[o + 3], lastBodies[o + 4], lastBodies[o + 5], lastBodies[o + 6]] }; }
   return { p: b.p, q: b.q };
 }
 function frameOf(idx) {
@@ -303,7 +308,8 @@ function addPieces(list, xf, vel, cool) {
   const idxs = gpu.addBodies(bodies);
   list.forEach((b, k) => {
     if (b.id < 0) return;
-    const idx = idxs[k], gb = gpu.bodies[idx - 1];
+    const idx = idxs[k], gb = idx ? gpu.bodies[idx - 1] : null;
+    if (!gb) return;
     bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, v0: bodies[k].v, f0: gpu.frame, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: performance.now() + (cool || 0) });
   });
 }
@@ -437,7 +443,7 @@ function blastWave(c, r) {
     const dx = p[0] - c[0], dy = p[1] - c[1], dz = p[2] - c[2], dist = Math.hypot(dx, dy, dz);
     if (dist > reach || dist < 1e-6) continue;
     const s = 6 * (1 - dist / reach) * r;   // m/s
-    const vo = (i - 1) * 3, v = lastVel ? [lastVel[vo] + dx / dist * s, lastVel[vo + 1] + dy / dist * s + 0.3 * s, lastVel[vo + 2] + dz / dist * s] : [dx / dist * s, dy / dist * s, dz / dist * s];
+    const v0 = velOf(i), v = [v0[0] + dx / dist * s, v0[1] + dy / dist * s + 0.3 * s, v0[2] + dz / dist * s];
     gpu.setVelocity(i, v, [0, 1, 2].map(() => (Math.random() - 0.5) * 2), p, [lastBodies[o + 3], lastBodies[o + 4], lastBodies[o + 5], lastBodies[o + 6]]);
   }
   lastActive = performance.now();
@@ -454,7 +460,7 @@ function doBlast() {
     if (bodyInfo.has(idx)) {
       const xf = frameOf(idx), Rt = mt(xf.R);
       const sp = mv(Rt, [c[0] - xf.T[0], c[1] - xf.T[1], c[2] - xf.T[2]]).map((v, k) => v + xf.C[k]);
-      const vo = (idx - 1) * 3, v = lastVel ? [lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]] : [0, 0, 0], w = lastAng ? [lastAng[vo], lastAng[vo + 1], lastAng[vo + 2]] : [0, 0, 0];
+      const v = velOf(idx), w = angOf(idx);
       const ctx = new Map([[idx, { J: [0, 0, 0], vPre: v, vPost: v, w0: w }]]);
       jobs.blast.push({ op: 'pblast', piece: bodyInfo.get(idx).piece, x: sp[0], y: sp[1], z: sp[2], r: radius, blastC: c, ctx });
     }
@@ -534,7 +540,7 @@ function impacts() {
         for (const { v, frame } of velHist) if (vo + 2 < v.length && frame > inf.f0) { const sp = Math.hypot(v[vo], v[vo + 1], v[vo + 2]); if (sp > best) { best = sp; pre = [v[vo], v[vo + 1], v[vo + 2]]; } }
         // a body made a few steps ago (a piece cut free) has little history: its starting velocity counts too
         if (inf.v0 && gpu.frame - inf.f0 <= 8) { const sp = Math.hypot(...inf.v0); if (sp > best) { best = sp; pre = inf.v0.slice(); } }
-        c = { J: [0, 0, 0], n: 0, vPre: pre, vPost: lastVel ? [lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]] : [0, 0, 0], w0: lastAng ? [lastAng[vo], lastAng[vo + 1], lastAng[vo + 2]] : [0, 0, 0] };
+        c = { J: [0, 0, 0], n: 0, vPre: pre, vPost: velOf(idx), w0: angOf(idx) };
       } else c = { n: 0 };
       job.ctx.set(idx, c);
     }
@@ -543,7 +549,7 @@ function impacts() {
     // rubble pelting a big piece barely changes its motion and does not break it (re-making a body of
     // thousands of bricks for a few crumbs every frame would be waste, too)
     if (idx !== 1 && c.vPre && lastVel && bodyInfo.get(idx).n > 100) {
-      const vo = (idx - 1) * 3, dv = Math.hypot(c.vPre[0] - lastVel[vo], c.vPre[1] - lastVel[vo + 1], c.vPre[2] - lastVel[vo + 2]);
+      const vn = velOf(idx), dv = Math.hypot(c.vPre[0] - vn[0], c.vPre[1] - vn[1], c.vPre[2] - vn[2]);
       // ...unless one hit carries enough energy into one spot to crush there (a ball, a falling block): 100 kJ
       let eMax = 0; for (const { e } of list) eMax = Math.max(eMax, 0.5 * e.impulse * e.approach);
       if (dv < 0.5 && eMax < 1e5) { if (!c.n) job.ctx.delete(idx); continue; }
@@ -558,7 +564,7 @@ function impacts() {
     let scale = 1;
     if (idx !== 1 && c.vPre && lastVel) {
       const vo = (idx - 1) * 3, M = gpu.bodies[idx - 1].mass || 0;
-      const dv = Math.hypot(c.vPre[0] - lastVel[vo], c.vPre[1] - lastVel[vo + 1], c.vPre[2] - lastVel[vo + 2]);
+      const vn = velOf(idx), dv = Math.hypot(c.vPre[0] - vn[0], c.vPre[1] - vn[1], c.vPre[2] - vn[2]);
       let jk = 0; for (const { e } of keep) jk += e.impulse;
       if (jk > 0) scale = Math.min(50, Math.max(1, M * dv / jk));
       if (window.__dbg) console.warn(`impact on body ${idx} (piece ${bodyInfo.get(idx).piece}, ${(M / 1000).toFixed(0)} t): ${list.length} events, ${keep.length} kept, approach up to ${Math.max(...keep.map(k => k.e.approach)).toFixed(1)} m/s, dv ${dv.toFixed(2)} m/s, impulse x${scale.toFixed(1)}`);
@@ -618,7 +624,7 @@ function onImpacts(job, r) {
     const vFree = [0, 1, 2].map(k => vPre[k] + D[k] * (speed - after));
     if (window.__dbg) console.warn(`break piece ${parent} (body ${idx}, ${M.toFixed(0)} kg): crumbs ${kids.filter(k => k.id < 0).length}, parts ${kids.filter(k => k.id >= 0 && k.boxes.length > 20).map(k => (k.hit ? 'H' : 'F') + k.boxes.length).join(' ')} · vPre ${vPre.map(v => v.toFixed(2))} (${c.vPre ? 'history' : 'impulse'}) vPost ${c.vPost.map(v => v.toFixed(2))} · D ${D.map(v => v.toFixed(2))} · E ${(cap / 1e6).toFixed(2)} MJ mFree ${mFree.toFixed(0)} · speed ${speed.toFixed(2)} -> ${after.toFixed(2)}`);
     // the hit parts move on as the body does now
-    const vo = (idx - 1) * 3, vNow = lastVel ? [lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]] : c.vPost, w0 = c.w0;
+    const vNow = velOf(idx), w0 = c.w0;
     gpu.killBody(idx); bodyInfo.delete(idx);
     addPieces(kids, xf, (cc, b) => {
       const rr = [cc[0] - xf.p[0], cc[1] - xf.p[1], cc[2] - xf.p[2]];
@@ -764,6 +770,8 @@ function benchTick(now, dt) {
     BENCH.lastRow = f;
     let roof = 0, bad = 0;
     if (snapCur) for (let k = 0; k < snapCur.pose.length / 10; k++) { const y = snapCur.pose[k * 10 + 1] + snapCur.pose[k * 10 + 8]; if (Number.isFinite(y)) roof = Math.max(roof, y); else bad++; }
+    // and the standing building: a ray down through the middle
+    const ts = E.raycast(0.3, 200, 0.3, 0, -1, 0, 300); if (ts >= 0) roof = Math.max(roof, 200 - ts);
     BENCH.rows.push({ sim: f / 60, wall: (now - BENCH.wall0) / 1000, fps, steps: rate.steps, gpu: g, gpuStages: gpu.gpuMs ? { ...gpu.gpuMs } : null, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, breaks, dust: dustBricks, impacts: impactMs, structure: failedJoints, roof, bad });
     benchShow();
   }
@@ -787,6 +795,7 @@ function benchShow(done) {
     lines.push(`real-time factor ${(simT / wallT).toFixed(2)} (simulated ${simT.toFixed(1)} s in ${wallT.toFixed(1)} s)`);
     lines.push(`frame time: median ${pct(0.5).toFixed(1)} ms · 95th ${pct(0.95).toFixed(1)} ms · worst ${pct(1).toFixed(1)} ms`);
     lines.push(`GPU step: worst ${BENCH.gpuMax.toFixed(1)} ms${last.gpuStages ? ' · last ' + Object.entries(last.gpuStages).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ') : ''}`);
+    lines.push(`invalid inputs refused: ${gpu.rejected || 0} · bad poses at the end: ${last.bad || 0}`);
     lines.push(`peak bodies ${Math.max(...r.map(x => x.bodies))} · peak contacts ${Math.max(...r.map(x => x.contacts))} · breaks ${last.breaks} · bricks to dust ${last.dust} · roof ${r.length ? r[0].roof.toFixed(1) : '?'} -> ${(last.roof || 0).toFixed(1)} m`);
     $('bench-title').textContent = 'Benchmark: done';
   }
@@ -852,7 +861,7 @@ function hud() {
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'}` : '',
     gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
-    `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}`,
+    `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
     lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,
   ].filter(Boolean).join('<br>');
 }
