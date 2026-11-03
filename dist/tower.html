@@ -1490,7 +1490,7 @@ function addPieces(list, xf, vel, cool) {
   list.forEach((b, k) => {
     if (b.id < 0) return;
     const idx = first + k + 1, gb = gpu.bodies[idx - 1];
-    bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: performance.now() + (cool || 0) });
+    bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, v0: bodies[k].v, f0: gpu.frame, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: performance.now() + (cool || 0) });
   });
 }
 function remeshDirty() {
@@ -1647,6 +1647,9 @@ function impacts() {
         // few read-backs (the hit only slows the body)
         let pre = null, best = -1;
         for (const v of velHist) if (vo + 2 < v.length) { const sp = Math.hypot(v[vo], v[vo + 1], v[vo + 2]); if (sp > best) { best = sp; pre = [v[vo], v[vo + 1], v[vo + 2]]; } }
+        // a body made a few steps ago (a piece cut free) has little history: its starting velocity counts too
+        const inf = bodyInfo.get(idx);
+        if (inf.v0 && gpu.frame - inf.f0 <= 8) { const sp = Math.hypot(...inf.v0); if (sp > best) { best = sp; pre = inf.v0.slice(); } }
         c = { J: [0, 0, 0], n: 0, vPre: pre, vPost: lastVel ? [lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]] : [0, 0, 0], w0: lastAng ? [lastAng[vo], lastAng[vo + 1], lastAng[vo + 2]] : [0, 0, 0] };
       } else c = { n: 0 };
       job.ctx.set(idx, c);
