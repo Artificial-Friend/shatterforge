@@ -397,6 +397,7 @@ function rayDebris(o, d, maxT) {
   const n = r.pose.length / 10;
   for (let k = 0; k < n; k++) {
     const b = k * 10, p = [r.pose[b], r.pose[b + 1], r.pose[b + 2]], h = [r.pose[b + 7], r.pose[b + 8], r.pose[b + 9]];
+    if (!(Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2]) && Number.isFinite(r.pose[b + 6]))) continue;
     // quick reject: the ray against the bounding sphere
     const ox = o[0] - p[0], oy = o[1] - p[1], oz = o[2] - p[2], rad = Math.hypot(h[0], h[1], h[2]);
     const bq = ox * d[0] + oy * d[1] + oz * d[2], cq = ox * ox + oy * oy + oz * oz - rad * rad;
@@ -412,7 +413,7 @@ function rayDebris(o, d, maxT) {
       if (ta > tb) [ta, tb] = [tb, ta];
       t0 = Math.max(t0, ta); t1 = Math.min(t1, tb); if (t0 > t1) ok = false;
     }
-    if (ok) best = { t: t0, slot: r.slots[k] };
+    if (ok && Number.isFinite(t0)) best = { t: t0, slot: r.slots[k] };
   }
   return best;
 }

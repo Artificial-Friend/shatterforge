@@ -1278,10 +1278,12 @@ class GpuWorld {
   // materials in `mats`; dead shapes are skipped.
   async readPose(minBody = 0) {
     const frame = this.frame;   // the step this read-back shows
-    const bod = await this.read(this.bodBuf, this.n1 * 80), sol = await this.read(this.solBuf, this.n1 * 96);
+    // bodies as of now: shapes of bodies added while the read is in flight are not in it
+    const n1 = this.n1, nb = this.n;
+    const bod = await this.read(this.bodBuf, n1 * 80), sol = await this.read(this.solBuf, n1 * 96);
     const t0 = performance.now();
     const list = [], slots = [];
-    this.shapes.forEach((s, k) => { if (!minBody || (s && !s.dead && s.body >= minBody)) { list.push(s); slots.push(k + 1); } });
+    this.shapes.forEach((s, k) => { if (s && s.body < n1 && (!minBody || (!s.dead && s.body >= minBody))) { list.push(s); slots.push(k + 1); } });
     const pose = new Float32Array(list.length * 10), mats = new Uint8Array(list.length), cols = new Uint16Array(list.length);
     list.forEach((s, k) => {
       if (!s) return;
@@ -1290,8 +1292,8 @@ class GpuWorld {
       pose.set([p[0] + wp[0], p[1] + wp[1], p[2] + wp[2], ...wq, ...s.h], k * 10);
       mats[k] = s.mat; cols[k] = s.col ?? s.mat;
     });
-    const body = new Float32Array(this.n * 7), vel = new Float32Array(this.n * 3), ang = new Float32Array(this.n * 3), sleeping = new Uint8Array(this.n);
-    for (let i = 0; i < this.n; i++) {
+    const body = new Float32Array(nb * 7), vel = new Float32Array(nb * 3), ang = new Float32Array(nb * 3), sleeping = new Uint8Array(nb);
+    for (let i = 0; i < nb; i++) {
       const b = (i + 1) * 20, s = (i + 1) * 24;
       body.set(bod.subarray(b, b + 3), i * 7); body.set(bod.subarray(b + 4, b + 8), i * 7 + 3);
       vel.set(sol.subarray(s, s + 3), i * 3); ang.set(sol.subarray(s + 4, s + 7), i * 3);
