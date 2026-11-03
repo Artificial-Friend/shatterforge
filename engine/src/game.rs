@@ -163,6 +163,9 @@ impl Game {
             if d2 <= rt * rt { crumbs.push(i); }
         }
         for &i in &crumbs { self.b.remove(i); }
+        // the crumb budget holds for blasts too: an even sample of the crumbs fly, the rest is dust
+        let keep = self.crumb_keep;
+        if crumbs.len() > keep { let n = crumbs.len(); let kept: Vec<u32> = (0..keep).map(|k| crumbs[k * n / keep]).collect(); self.dust += n - keep; crumbs = kept; }
         let pieces = self.detach();
         let n = crumbs.len() + pieces.len();
         self.emit(&crumbs, &pieces);
