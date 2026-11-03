@@ -42,7 +42,7 @@ struct Params {
   sleep_time: f32, sleep_lin: f32, sleep_ang: f32, ns1: u32,
   levels: u32, ground_mat: u32, sleep_dist: f32, sleep_rot: f32,
   o_ocount: u32, o_acc: u32, o_events: u32, max_events: u32,
-  ev_speed: f32, ev_energy: f32, pad4: u32, pad5: u32,
+  ev_speed: f32, ev_energy: f32, o_cawake: u32, pad5: u32,
   mat: array<vec4f, 8>,   // friction, restitution, -, -
 }
 struct ColorU { c: u32 }
@@ -156,6 +156,8 @@ fn dead(s: u32) -> bool { return Hs(s, H_ID).z > 0.5; }
   let hc = chash(cellc(wp, L), L);
   st(P.o_cell + s, hc);
   atomicAdd(&ints[P.o_gcount + hc], 1u);
+  // cells holding a moving shape: resting and static shapes only look into these
+  if (dyn_awake(b)) { atomicOr(&ints[P.o_cawake + hc], 1u); }
 }
 
 var<workgroup> wsum: array<u32, 256>;
@@ -190,32 +192,38 @@ fn push_pair(a: u32, b: u32) {
 // non-empty level: its own and coarser levels in the 27 cells around its centre, finer levels over its AABB.
 // Each shape sits in the cell of its centre, so checking that cell visits it once. Two awake shapes report
 // their pair from the lower index.
+// Every shape searches its own grid level and the coarser ones, a 3 x 3 x 3 neighbourhood at each (a shape's
+// level fits its size, so anything it overlaps on those levels sits in a neighbouring cell). A big shape never
+// scans finer levels: the small shapes there find it. A moving shape looks at everything; a resting or static
+// one only into cells that hold a moving shape, and only at moving shapes. Each pair is found once: on one
+// level by the lower index, across levels by the finer shape. The moving shape goes first in the pair.
 @compute @workgroup_size(64) fn pairs(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.ns1 || dead(i)) { return; }
   let bi = sbody(i);
-  if (!dyn_awake(bi)) { return; }
+  let ai = dyn_awake(bi);
   let lo = Hs(i, H_LO).xyz; let hi = Hs(i, H_HI).xyz;
   let wp = Hs(i, H_WP); let Li = u32(wp.w);
-  if (lo.y < 0.0) { push_pair(i, 0u); }
-  for (var L = 0u; L < P.levels; L++) {
+  if (ai && lo.y < 0.0) { push_pair(i, 0u); }
+  for (var L = Li; L < P.levels; L++) {
     if (ld(C_LEVEL + L) == 0u) { continue; }
-    var c0: vec3i; var c1: vec3i;
-    if (L >= Li) { let c = cellc(wp.xyz, L); c0 = c - vec3i(1); c1 = c + vec3i(1); }
-    else { let e = vec3f(lcell(L)); c0 = cellc(lo - e, L); c1 = cellc(hi + e, L); }
-    for (var cz = c0.z; cz <= c1.z; cz++) { for (var cy = c0.y; cy <= c1.y; cy++) { for (var cx = c0.x; cx <= c1.x; cx++) {
+    let c = cellc(wp.xyz, L);
+    for (var cz = c.z - 1; cz <= c.z + 1; cz++) { for (var cy = c.y - 1; cy <= c.y + 1; cy++) { for (var cx = c.x - 1; cx <= c.x + 1; cx++) {
       let cell = vec3i(cx, cy, cz);
       let hc = chash(cell, L);
+      if (!ai && ld(P.o_cawake + hc) == 0u) { continue; }
       let s0 = ld(P.o_gstart + hc); let s1 = s0 + ld(P.o_gcount + hc);
       for (var s = s0; s < s1; s++) {
         let j = ld(P.o_sorted + s);
         let wj = Hs(j, H_WP);
         if (u32(wj.w) != L || any(cellc(wj.xyz, L) != cell)) { continue; }
+        if (L == Li && j <= i) { continue; }
         let bj = sbody(j);
         if (bj == bi) { continue; }
-        if (dyn_awake(bj) && j <= i) { continue; }
+        let aj = dyn_awake(bj);
+        if (!ai && !aj) { continue; }
         let lj = Hs(j, H_LO).xyz; let hj = Hs(j, H_HI).xyz;
         if (any(lo > hj) || any(lj > hi)) { continue; }
-        push_pair(i, j);
+        if (ai) { push_pair(i, j); } else { push_pair(j, i); }
       }
     } } }
   }
@@ -936,7 +944,7 @@ class GpuWorld {
     let o = 16;
     const L = {};
     const take = (k, len) => { L[k] = o; o += len; };
-    take('gcount', G); take('gstart', G); take('gfill', G);
+    take('gcount', G); take('gstart', G); take('gfill', G); take('cawake', G);
     take('sorted', cs1); take('cell', cs1); take('mask', cb1);
     take('ccount', 33); take('cstart', 33); take('cfill', 33);
     take('order', this.maxMan); take('mcolor', this.maxMan);
@@ -1032,7 +1040,7 @@ class GpuWorld {
     u[40] = L.blist; u[41] = L.par; u[42] = L.mint; u[43] = this.sleep ? 1 : 0;
     f[44] = 0.5; f[45] = 0.05; f[46] = 0.08; u[47] = this.ns1;
     u[48] = this.levels; u[49] = GROUND_MAT; f[50] = 0.01; f[51] = 0.02;
-    u[52] = L.ocount; u[53] = L.acc; u[54] = L.events; u[55] = this.maxEvents;
+    u[52] = L.ocount; u[53] = L.acc; u[54] = L.events; u[55] = this.maxEvents; u[58] = L.cawake;
     f[56] = this.evSpeed; f[57] = this.evEnergy;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 60 + i * 4));
     return f;
@@ -1046,7 +1054,7 @@ class GpuWorld {
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
     // counters; impact events keep accumulating until a step copies them out (a pending read-back skips the copy)
     if (this.statCopied === false) { clr(0, 7); clr(8, 8); } else clr(0, 16);
-    clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
+    clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (!this.n) { this.frame++; return; }
     const nb = Math.ceil(this.n / 64) || 1, nsh = Math.ceil(this.ns / 64) || 1;
@@ -1065,19 +1073,13 @@ class GpuWorld {
     // for the once-per-step kernels, by the recent contact count (with margin) in the solver loops; the
     // kernels skip work past their real counts.
     const wgCap = (n) => Math.max(1, Math.ceil(n / 64));
-    const recent = Math.max(this.stats.manifolds || 0, this.recentMan || 0);
-    this.recentMan = Math.max(this.stats.manifolds || 0, (this.recentMan || 0) * 0.9);
-    const estMan = Math.min(this.maxMan, Math.ceil(recent * 2 + 2048));
-    // a colour's contacts this step: twice its recent count plus room for new contacts (new debris)
-    // (and at least a geometric share of the expected total, colour c getting 1/2^(c+1) of it)
-    const colEst = (c) => Math.min(estMan, Math.max(Math.ceil(this.colCounts[c] * 2 + 512), Math.ceil(estMan / (2 << c))));
-    const recentP = Math.max(this.stats.pairs || 0, this.recentPairs || 0);
-    this.recentPairs = Math.max(this.stats.pairs || 0, (this.recentPairs || 0) * 0.9);
-    const estPairs = Math.min(this.maxPairs, Math.ceil(recentP * 2 + 8192));
-    const dirWg = { 396: wgCap(estPairs), 384: wgCap(estMan) };   // narrow (args 99), per-manifold (args 96)
+    // Sizes that can never be too small (stats arrive late, so estimates from them could drop work): a body is
+    // in at most one contact per colour, so a colour holds at most n contacts; everything else by capacity
+    const perColour = wgCap(this.n + 1), perMan = wgCap(this.maxMan);
+    const dirWg = { 396: wgCap(this.maxPairs), 384: perMan };   // narrow (args 99), per-manifold (args 96)
     const ind = this.indirect
       ? (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); }
-      : (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(k === 'restitute_ovf' ? 1 : dirWg[off] ?? wgCap(Math.min(estMan, this.colCounts[this.colorLimit] * 2 + 2048))); };
+      : (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(k === 'restitute_ovf' ? 1 : dirWg[off] ?? perMan); };
     let p;
     if (this.wakeReq) { this.wakeReq = false; p = pass(null); run(p, 'wake_all', nb); p.end(); }
     p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'pairs', nsh); p.end();
@@ -1091,7 +1093,7 @@ class GpuWorld {
     const C = this.colorLimit;
     const colors = (k) => {
       p.setPipeline(this.pl[k]);
-      for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); if (this.indirect) p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); else p.dispatchWorkgroups(wgCap(colEst(c))); }
+      for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); if (this.indirect) p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); else p.dispatchWorkgroups(perColour); }
       p.setBindGroup(1, this.bg1, [0]);
       if (k === 'restitute') { ind(p, 'restitute_ovf', C * 12); return; }
       // overflow contacts: two Jacobi rounds with mass splitting
@@ -1138,8 +1140,6 @@ class GpuWorld {
     q.writeBuffer(this.bodBuf, this.n1 * 80, bod); q.writeBuffer(this.solBuf, this.n1 * 96, sol); q.writeBuffer(this.shpBuf, this.ns1 * 128, shp);
     for (const s of shapes) this.shapes.push({ ...s, body: s.body + first });
     for (const b of bodies) this.bodies.push(b);
-    this.recentMan = (this.recentMan || 0) + 4 * shapes.length;   // new bodies bring new contacts before the stats show them
-    this.recentPairs = (this.recentPairs || 0) + 8 * shapes.length;
     this.n += bodies.length; this.n1 += bodies.length; this.ns += shapes.length; this.ns1 += shapes.length;
     return first;
   }

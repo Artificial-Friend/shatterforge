@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -160,7 +160,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       let ys = []; for (let k = 0; k < 144; k++) ys.push(r.pose[k * 10 + 1]);
       const lo = Math.min(...ys), hi = Math.max(...ys);
       // resting on the blocks: block top 0.5 m + half the plate 0.125
-      check('plate', lo > 0.6 && hi < 0.65 && speed(r.vel, 0) < 0.02, { plate_y: [+lo.toFixed(4), +hi.toFixed(4)], expected: 0.625, speed: speed(r.vel, 0), stats: r.stats });
+      check('plate', lo > 0.6 && hi < 0.65 && speed(r.vel, 0) < 0.02, { plate_y: [+lo.toFixed(4), +hi.toFixed(4)], expected: 0.625, speed: speed(r.vel, 0), stages: r.gpu, stats: r.stats });
       done(r);
     }
     if (scenes.includes('sleep')) {
@@ -170,6 +170,15 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       for (let f = 1; f <= 600; f++) { w.step(1 / 60); if (f % 60 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); awake.push(w.stats.awake); } }
       w.destroy();
       check('sleep', awake[awake.length - 1] < 300, { awake_per_s: awake });
+    }
+    if (scenes.includes('paircount')) {
+      // the broad phase must find the same pairs whatever its search order: count them on the first frames
+      E.pile_setup(2000, 4);
+      const w = await GpuWorld.create(dev, GpuWorld.boxes(grab()), { substeps: 4, sleep: false });
+      const counts = [];
+      for (let f = 1; f <= 3; f++) { w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle(); await settle(); counts.push(w.stats.candidates); }
+      w.destroy();
+      check('paircount', true, { candidates: counts });
     }
     if (scenes.includes('pile')) {
       E.pile_setup(2000, 4);
