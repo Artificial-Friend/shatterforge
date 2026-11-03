@@ -106,11 +106,18 @@ Every frame, the page sends the engine the GPU's hard contacts, from both sides 
 - **Crush-down.**
   - **Required force.** The force needed to stop the piece is (ΣJ + |ΣJ·d|) / 2 / dt. For a piece hit from one side this is the net impulse; for a piece squeezed between two sides it is the larger side.
   - **Weakest section.** The engine finds the weakest section within a storey of the contacts: the compressive strength times the area of the structural bricks and joints it cuts.
-  - **Cut and carry on.** If the required force exceeds that capacity, the piece is cut at that section. The parts beyond the cut keep their pre-impact velocity, minus what the section could absorb (capacity·dt / mass). They meet the crushed zone again on the next frame, so the collapse goes storey by storey.
+  - **Cut.** If the required force exceeds that capacity, the piece is cut at that section.
+  - **Rubble.** The contact side of the cut is the crushed material. It falls apart into rubble, as single bricks within the debris budget; the rest becomes dust. It does not stay a solid block for the floors above to land on.
+  - **Slowing.** The part beyond the cut keeps its velocity from before the hit. Its speed into the contacts drops to √(v² − 2E/m), where E is the crush energy of the section's area over 0.5 m of crushing.
+  - **Result.** The floors above carry on, meet what is below again and crush the next section, storey by storey. A failed section stops resisting once it is crushed: it is not charged its peak force on every frame.
+- **Contact data (page).**
+  - **Velocity before the hit.** This is the fastest of the last four read-backs, because events arrive a read-back or two late. A body cut free in the last few steps also counts its starting velocity.
+  - **Scaling.** The page sends only a piece's 32 strongest contacts, so their impulses are scaled to its actual change of momentum, M·|v_before − v_now|.
+  - **Big pieces and light rubble.** A piece of more than 100 bricks whose velocity changes by under 0.5 m/s is not broken: rubble pelting it does no damage.
 - **Infill holds nothing together.** Glass, cladding and partitions carry no load. Where the structure behind them has come apart, their joints are cut, and each infill brick stays with the structural part it rests on.
-- **Budgets.**
-  - Fragments under 16 bricks count as rubble, and at most 48 per piece stay as bodies.
-  - At most 256 crumbs per call stay as bodies, and 128 per piece.
+- **Budgets per call.**
+  - Fragments under 48 bricks count as rubble, and at most 64 stay as bodies.
+  - At most 256 crumbs and rubble bricks stay as bodies, half of them for the standing structure.
   - The rest of the crushed material is removed as dust and counted.
 
 The engine test drops the tower 1.4 m at 5.2 m/s onto 285 stumps:
