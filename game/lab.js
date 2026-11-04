@@ -24,6 +24,16 @@ function labInstall() {
   };
   const setV = gpu.setVelocity.bind(gpu);
   gpu.setVelocity = (b, v, ...rest) => { const gb = gpu.bodies[b - 1]; if (gb) gb.labSetV = { f: L.f, v: v.map(x => +x.toFixed(2)) }; return setV(b, v, ...rest); };
+  const takeE = gpu.takeEvents.bind(gpu);
+  gpu.takeEvents = () => {
+    const evs = takeE(), tr = L.traceWin;
+    if (tr && L.f >= tr[0] && L.f <= tr[1]) for (const e of evs) {
+      const ga = gpu.bodies[e.a - 1], gb = gpu.bodies[e.b - 1];
+      const inWin = (g) => g && g.labF >= tr[0] - 15;
+      if ((inWin(ga) || inWin(gb)) && L.traceEv.length < 3000) L.traceEv.push({ f: L.f, a: e.a, b: e.b, ma: e.a === 1 ? 'static' : (ga && ga.labH), mb: e.b === 1 ? 'static' : (gb && gb.labH), J: Math.round(e.impulse || 0), approach: +(e.approach || 0).toFixed(2), n: e.n && e.n.map(x => +x.toFixed(2)), p: e.p && e.p.map(x => +x.toFixed(2)) });
+    }
+    return evs;
+  };
   gpu.breakBody = (parent, ...rest) => { const v = L.bodyVol.get(parent) || 0; L.gpuVol -= v; L.bodyVol.delete(parent); return brk(parent, ...rest); };
   gpu.addParticles = (list) => { const s = addP(list); L.pendingParts = (L.pendingParts || []).concat(s); return s; };
   gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); return killP(i); };
@@ -184,7 +194,7 @@ function labReport(wallS) {
       peak: { bodies: Math.max(0, ...se.map(x => x.bodies)), awake: Math.max(0, ...se.map(x => x.awake)), contacts: Math.max(0, ...se.map(x => x.contacts)), particles: Math.max(0, ...se.map(x => x.parts)), particles_moving: Math.max(0, ...se.map(x => x.pAwake)), drawn: Math.max(0, ...se.map(x => x.drawn)) },
       work: { contact_substeps: L.work.cs, particle_substeps: L.work.ps },
     },
-    events: L.events, timeline: L.timeline, trace: L.trace.length ? L.trace : undefined,
+    events: L.events, timeline: L.timeline, trace: L.trace.length ? L.trace : undefined, traceEvents: L.traceEv.length ? L.traceEv : undefined,
     series: se,
   };
 }
@@ -206,7 +216,7 @@ async function labRun() {
     draw: { n: 0, vol: 0, keys: new Float64Array(4096), pos: new Float32Array(4096 * 3), bound: new Float32Array(4096) },
     Thist: [], holeFrames: 0, holeMax: 0, inHole: false, holesRecovered: 0, dupFrames: 0, dupMax: 0, flickers: 0, teleports: 0, goneAt: new Map(), prevDraw: null,
     bad: 0, below: 0, bounces: 0, bounceMax: 0, launches: 0, launchMax: 0, energyGains: 0, energyGainMax: 0, prevBodies: null, quietFrom: -1,
-    injectedAt: -1000, settledAt: null, timeline: [], trace: [], traceWin: st.trace || null, events: {}, series: [], jsMs: [], work: { cs: 0, ps: 0 }, peakStages: null, peakGpu: 0, volTol: 0.05,
+    injectedAt: -1000, settledAt: null, timeline: [], trace: [], traceEv: [], traceWin: st.trace || null, events: {}, series: [], jsMs: [], work: { cs: 0, ps: 0 }, peakStages: null, peakGpu: 0, volTol: 0.05,
   });
   // the defaults, whatever this browser has saved (the report lists them)
   for (const [k, d] of Object.entries(SETTINGS)) { setting[k] = d.def; d.apply(d.def); }

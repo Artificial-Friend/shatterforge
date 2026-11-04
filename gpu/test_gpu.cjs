@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -16,8 +16,8 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
   fs.writeFileSync('/tmp/sf_blank.html', '<html><body></body></html>');
   await p.goto('file:///tmp/sf_blank.html');
   await p.addScriptTag({ path: path.join(__dirname, 'gpu_world.js') });
-  const res = await p.evaluate(async ({ wasm, scenes, SUB, SAND_PUSH, SAND_MAT, SAND_SUB, SAND_COL }) => {
-    if (SAND_PUSH) globalThis.SAND_PUSH = SAND_PUSH; if (SAND_MAT) globalThis.SAND_MAT = SAND_MAT; if (SAND_SUB) globalThis.SAND_SUB = SAND_SUB; if (SAND_COL) globalThis.SAND_COL = SAND_COL;
+  const res = await p.evaluate(async ({ wasm, scenes, SUB, SAND_PUSH, SAND_MAT, SAND_SUB, SAND_COL, SAND_FALL, COMP_N, COMP_FLOOR, RELAX }) => {
+    if (SAND_PUSH) globalThis.SAND_PUSH = SAND_PUSH; if (SAND_MAT) globalThis.SAND_MAT = SAND_MAT; if (SAND_SUB) globalThis.SAND_SUB = SAND_SUB; if (SAND_COL) globalThis.SAND_COL = SAND_COL; if (SAND_FALL) globalThis.SAND_FALL = 1; if (COMP_N) globalThis.COMP_N = COMP_N; if (COMP_FLOOR) globalThis.COMP_FLOOR = 1; if (RELAX) globalThis.RELAX = RELAX;
     // SF_SUB=n forces n sub-steps everywhere (to see what fewer cost in accuracy)
     if (SUB) { const c0 = GpuWorld.create; GpuWorld.create = (d, l, o = {}) => c0.call(GpuWorld, d, l, { ...o, substeps: SUB }); }
     const bytes = Uint8Array.from(atob(wasm), c => c.charCodeAt(0));
@@ -258,9 +258,11 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       // a heavy block (a building's upper part, ~1,900 t) lands at 5.7 m/s on light rubble pieces (~5 t each)
       // lying on the ground: it must not rebound (concrete restitution 0.1: at most 0.6 m/s) nor throw them up
       const pieces = [];
-      for (let i = 0; i < 6; i++) for (let k = 0; k < 4; k++) pieces.push({ shapes: [{ p: [-7.5 + i * 3, 0.6, -6 + k * 4], q: [0, 0, 0, 1], h: [1.0, 0.6, 1.0], mat: globalThis.SAND_MAT != null ? +globalThis.SAND_MAT : MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
+      // (SAND_FALL: the pieces fall with the block, just under it, as pieces cut from its base do)
+      const fall = !!globalThis.SAND_FALL, y0 = fall ? 0.65 : 0.6, v0 = fall ? -5.7 : 0;
+      for (let i = 0; i < 6; i++) for (let k = 0; k < 4; k++) pieces.push({ shapes: [{ p: [-7.5 + i * 3, y0, -6 + k * 4], q: [0, 0, 0, 1], h: [1.0, 0.6, 1.0], mat: globalThis.SAND_MAT != null ? +globalThis.SAND_MAT : MAT.concrete }], v: [0, v0, 0], w: [0, 0, 0] });
       const SM = globalThis.SAND_MAT != null ? +globalThis.SAND_MAT : MAT.concrete;
-      const block = { shapes: [{ p: [0, 1.2 + 0.05 + 4, 0], q: [0, 0, 0, 1], h: [10, 4, 10], mat: SM }], v: [0, -5.7, 0], w: [0, 0, 0] };
+      const block = { shapes: [{ p: [0, y0 + 0.6 + 0.001 + 4, 0], q: [0, 0, 0, 1], h: [10, 4, 10], mat: SM }], v: [0, -5.7, 0], w: [0, 0, 0] };
       // (the block weighs 2400 kg/m^3 x 3200 m^3 = 7,700 t; scaled to the case seen, 1,900 t, by its density)
       const w = await GpuWorld.create(dev, [...pieces, block], { substeps: +(globalThis.SAND_SUB || 12), sleep: false });
       if (globalThis.SAND_PUSH) w.maxPush = +globalThis.SAND_PUSH;
@@ -281,6 +283,29 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       }
       w.destroy();
       check('sandwich', vmax < 0.6 && pmax < 2, { hitAt: hit, blockMaxUp_ms: +vmax.toFixed(2), piecesMaxUp_ms: +pmax.toFixed(2), blockY: yBlock, stats: statsAt });
+    }
+    if (scenes.includes('compound')) {
+      // a big compound body (the upper building: 20 x 20 x 2 bricks of 0.5 m, one body, 400 contacts with the
+      // floor) lands at 5.9 m/s on a static floor of bricks: concrete (e 0.1) gives 0.59 m/s of rebound, < 0.8 passes
+      const N = +(globalThis.COMP_N || 20), sh = [], fl = [];
+      for (let i = 0; i < N; i++) for (let k = 0; k < N; k++) for (let j = 0; j < 2; j++) sh.push({ p: [-N / 2 * 0.5 + i * 0.5 + 0.25, 0.75 + j * 0.5, -N / 2 * 0.5 + k * 0.5 + 0.25], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: globalThis.SAND_MAT != null ? +globalThis.SAND_MAT : MAT.concrete });
+      if (globalThis.COMP_FLOOR) fl.push({ p: [0, 0.25, 0], q: [0, 0, 0, 1], h: [N / 4 + 1, 0.25, N / 4 + 1], mat: MAT.concrete });
+      else for (let i = 0; i < N / 2 + 2; i++) for (let k = 0; k < N / 2 + 2; k++) fl.push({ p: [-(N / 2 + 2) / 2 + i + 0.5, 0.25, -(N / 2 + 2) / 2 + k + 0.5], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.5], mat: globalThis.SAND_MAT != null ? +globalThis.SAND_MAT : MAT.concrete });
+      const w = await GpuWorld.create(dev, [{ fixed: true, shapes: fl }, { shapes: sh, v: [0, -5.9, 0], w: [0, 0, 0] }], { substeps: 12, sleep: false, maxShapes: 2000 });
+      if (globalThis.SAND_COL) { w.maxColors = +globalThis.SAND_COL; w.colorLimit = +globalThis.SAND_COL; }
+      if (globalThis.RELAX) w.relaxRounds = +globalThis.RELAX;
+      const bi = w.n; let vmax = -1e9, hit = -1; const vs = [];
+      for (let f = 1; f <= 60; f++) {
+        w.step(1 / 60);
+        await dev.queue.onSubmittedWorkDone(); await settle();
+        const r = await w.readPose(); const vy = r.vel[(bi - 1) * 3 + 1];
+        if (hit < 0 && vy > -5.5) hit = f;
+        if (hit > 0) vmax = Math.max(vmax, vy);
+        if (f <= 12) vs.push(+vy.toFixed(2));
+      }
+      const st = { ...w.stats, colorLimit: w.colorLimit };
+      w.destroy();
+      check('compound', vmax < 0.8, { hitAt: hit, maxUp_ms: +vmax.toFixed(2), vy: vs, stats: st });
     }
     if (scenes.includes('particles')) {
       // granular crumbs poured on a fixed table: they pile up on it and around it on the ground, never inside it
@@ -361,7 +386,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   await b.close();
