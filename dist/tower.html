@@ -51,6 +51,7 @@ button:disabled { opacity: .5; cursor: default; }
 <div class="settings" id="settings" hidden>
   <h2>Settings</h2>
   <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
+  <label>Quality <select id="s-preset"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">sets the debris budgets, physics sub-steps, solver colours and shadows; the sliders below fine-tune</span></label>
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
   <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
@@ -2119,6 +2120,27 @@ function initSettings() {
     el.addEventListener('input', () => { setting[k] = +el.value; $('v-' + k).textContent = d.fmt(el.value); d.apply(setting[k]); try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} });
   }
 }
+const PRESETS = {
+  low: { crumbs: 64, rubble: 16, substeps: 6, colors: 10, shadows: false },
+  medium: { crumbs: 128, rubble: 32, substeps: 8, colors: 12, shadows: true },
+  high: { crumbs: 256, rubble: 64, substeps: 12, colors: 16, shadows: true },
+  ultra: { crumbs: 768, rubble: 192, substeps: 12, colors: 24, shadows: true },
+};
+function applyPreset(name) {
+  const pr = PRESETS[name]; if (!pr) return;
+  for (const k of ['crumbs', 'rubble', 'substeps', 'colors']) { const el = $(SETTINGS[k].el); el.value = pr[k]; el.dispatchEvent(new Event('input')); }
+  const sh = $('d-shadows'); if (sh.checked !== pr.shadows) { sh.checked = pr.shadows; sh.dispatchEvent(new Event('change')); }
+  setting.preset = name; try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {}
+}
+function initPreset() {
+  const el = $('s-preset');
+  let saved = {}; try { saved = JSON.parse(localStorage.getItem('sf-settings') || '{}'); } catch (e) {}
+  el.value = saved.preset || 'high';
+  if (saved.preset === 'low') applyPreset('low');   // shadows are not a slider: re-apply them
+  el.addEventListener('change', () => { if (el.value) applyPreset(el.value); });
+  // a slider moved by hand makes it a custom setting
+  for (const k of ['crumbs', 'rubble', 'substeps', 'colors']) $(SETTINGS[k].el).addEventListener('input', (e) => { if (e.isTrusted) { el.value = ''; setting.preset = ''; try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (er) {} } });
+}
 function toggleSettings(on) {
   const p = $('settings'); p.hidden = on === undefined ? !p.hidden : !on;
   if (!p.hidden && document.exitPointerLock) document.exitPointerLock();
@@ -2198,7 +2220,7 @@ function benchShow(done) {
   const lines = [];
   lines.push(`Shatterforge benchmark · ${['concrete frame', 'masonry', 'mass timber'][KIND]}, ${STOREYS} storeys · ${new Date().toISOString().slice(0, 19)}Z`);
   lines.push(`${navigator.userAgent}`);
-  lines.push(`settings: crush depth ${setting.crush} m · crumbs ${setting.crumbs} · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
+  lines.push(`settings: quality ${setting.preset || 'custom'} · crush depth ${setting.crush} m · crumbs ${setting.crumbs} · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
   lines.push(`cut: 36 blasts in ${(BENCH.cutMs / 1000).toFixed(1)} s`);
   lines.push('');
   lines.push('  sim s  wall s   fps  steps/s  GPU ms  bodies  awake  contacts  breaks   dust  roof m  bad poses');
@@ -2289,7 +2311,7 @@ function hud() {
     $('title').textContent = ['A 12-storey concrete-frame tower at real scale', 'A 5-storey masonry building at real scale', 'A 6-storey mass-timber building at real scale'][KIND];
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
     await startWorker(bytes);
-    initSettings(); initDiag();
+    initSettings(); initDiag(); initPreset();
     E.player_set(0, 0.0, -16);
   } catch (e) { $('warn').textContent = 'Could not start the engine: ' + e.message; return; }
   try {
