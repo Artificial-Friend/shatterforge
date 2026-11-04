@@ -49,6 +49,7 @@ struct Params {
   p_h: f32, n_blast: u32, p_cap: u32, pad9: u32,
   blast: array<vec4f, 6>,   // particle blasts: (centre, reach), (speed, -, -, -)
   o_ptab: u32, ptab_mask: u32, o_big: u32, o_mslot: u32,   // contact reduction (see red_count)
+  o_crushed: u32, o_crush: u32, crush_ratio: f32, crush_dv: f32,   // crushing (see crush)
 }
 struct ColorU { c: u32 }
 
@@ -382,7 +383,11 @@ fn insert_new(sa: u32, sb: u32, idx: u32) {
   }
 }
 
+fn crushed(i: u32) -> bool { return i != 0u && ld(P.o_crushed + i) != 0u; }
+fn moving(i: u32) -> bool { return i != 0u && B(i, F_P).w > 0.0; }
 fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
+  // a crushed body (see crush) touches only the static world until the page turns it into rubble
+  if ((crushed(a) && moving(b)) || (crushed(b) && moving(a))) { return; }
   var c = c0;
   reduce4(&c);
   let slot = atomicAdd(&ints[C_MAN], 1u);
@@ -903,6 +908,33 @@ fn ovf_item(g: u32) -> u32 { let r = ovf_range(); if (r.x + g >= r.y) { return 0
   st(o + 10u, bitcast<u32>(out.y)); st(o + 11u, bitcast<u32>(out.z));
 }
 
+// Crushing: a light piece pressed by a body many times heavier (a building's upper part landing on rubble cut
+// from its own base) is crushed, as concrete is. The sign: the impulse it took this step is far more than its own
+// momentum could need (it is squeezed against something), with a real approach speed. It then collides only with
+// the static world (the heavy body goes through it, no rubble shot out sideways at 5-9 m/s) and is listed for
+// the page, which turns it into rubble particles where it is.
+const C_NCRUSH = 15u; const MAX_CRUSH = 256u;
+@compute @workgroup_size(64) fn crush(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let m = P.cur_base + mi; let base = m * MS;
+  let hd = man[base]; if (u32(hd.z) >= 8u) { return; }
+  let a = u32(hd.x); let b = u32(hd.y);
+  if (!moving(a) || !moving(b)) { return; }
+  let out = man[base + M_OUT];
+  if (out.z < 1.0) { return; }
+  let ia = B(a, F_P).w; let ib = B(b, F_P).w;
+  let light = select(b, a, ia > ib); let il = max(ia, ib); let ih = min(ia, ib);
+  if (il < P.crush_ratio * ih) { return; }
+  if (out.y * il < max(3.0 * out.z, P.crush_dv)) { return; }
+  if (atomicExchange(&ints[P.o_crushed + light], 1u) != 0u) { return; }
+  let k = atomicAdd(&ints[C_NCRUSH], 1u); if (k >= MAX_CRUSH) { return; }
+  let o = P.o_crush + k * 12u; let p = B(light, F_P).xyz; let q = B(light, F_Q); let v = S(light, S_V).xyz;
+  st(o, light); st(o + 1u, select(a, b, light == a));
+  st(o + 2u, bitcast<u32>(p.x)); st(o + 3u, bitcast<u32>(p.y)); st(o + 4u, bitcast<u32>(p.z));
+  st(o + 5u, bitcast<u32>(q.x)); st(o + 6u, bitcast<u32>(q.y)); st(o + 7u, bitcast<u32>(q.z)); st(o + 8u, bitcast<u32>(q.w));
+  st(o + 9u, bitcast<u32>(v.x)); st(o + 10u, bitcast<u32>(v.y)); st(o + 11u, bitcast<u32>(v.z));
+}
+
 @compute @workgroup_size(64) fn finish(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.n1) { return; }
   let v4 = S(i, S_V); if (v4.w == 0.0) { return; }
@@ -1345,6 +1377,7 @@ class GpuWorld {
     // contact's pair slot
     let TP = 1024; while (TP < 2 * this.maxMan) TP *= 2; this.TP = TP;
     take('ptab', 3 * TP); take('big', 64 * 4096); take('mslot', this.maxMan);
+    take('crushed', cb1); take('crush', 12 * 256);
     this.maxEvents = 512; take('events', 12 * this.maxEvents);
     this.maxInherit = 4096; take('inherit', 12 * this.maxInherit);
     this.L = L; this.nInts = o;
@@ -1374,7 +1407,8 @@ class GpuWorld {
     this.evSpeed = opt.eventSpeed ?? 2.0; this.evEnergy = opt.eventEnergy ?? 0;   // events off unless asked for
     // a ring of stats read-back buffers: the browser delivers mappings late, so one pending read must not hold
     // back the next step's stats and impact events
-    this.statBufs = [0, 1, 2].map(() => ({ buf: buf(64 + 48 * this.maxEvents + 33 * 4, U.COPY_DST | U.MAP_READ), busy: false }));
+    this.statBufs = [0, 1, 2].map(() => ({ buf: buf(64 + 48 * this.maxEvents + 33 * 4 + 48 * 256, U.COPY_DST | U.MAP_READ), busy: false }));
+    this.crushes = [];
     this.colCounts = new Array(33).fill(0);
     this.statBuf = this.statBufs[0].buf; this.statSeq = 0; this.statLatest = 0; this.inputs = 0;
     this.events = [];
@@ -1413,7 +1447,7 @@ class GpuWorld {
     const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_score', 'red_pick', 'red_apply'];
+                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_score', 'red_pick', 'red_apply', 'crush'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
@@ -1454,6 +1488,7 @@ class GpuWorld {
     // the pair table sized by the contacts there were (as the grid), up to its capacity
     let tp = 1024; while (tp < 2 * ((this.stats.manifolds || 0) * 1.5 + 2048) && tp < this.TP) tp *= 2; this.TPeff = tp;
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
+    u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 4;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
       let pgE = 256; while (pgE < 2 * this.np && pgE < this.PG) pgE *= 2; this.PGeff = pgE;
@@ -1485,7 +1520,7 @@ class GpuWorld {
     const L = this.L, cur = this.frame & 1;
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
     // counters; impact events keep accumulating until a step copies them out (a pending read-back skips the copy)
-    if (this.statCopied === false) { clr(0, 7); clr(8, 8); } else clr(0, 16);
+    if (this.statCopied === false) { clr(0, 7); clr(8, 7); } else clr(0, 16);   // (events and crushes gather until copied)
     clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (this.reduce !== false) { clr(L.ptab, 3 * this.TPeff); clr(L.big, 64 * 4096); }
@@ -1552,6 +1587,7 @@ class GpuWorld {
     colors('restitute');
     run(p, 'finish', nb);
     if (this.evEnergy > 0) ind(p, 'events', 96 * 4);
+    if (this.crushing !== false) ind(p, 'crush', 96 * 4);
     p.end();
     // particles, after the bodies moved (they see this step's shapes and body velocities)
     p = pass('particles');
@@ -1581,6 +1617,7 @@ class GpuWorld {
       enc.copyBufferToBuffer(this.intBuf, 0, sb.buf, 0, 64);
       if (this.evEnergy > 0) enc.copyBufferToBuffer(this.intBuf, L.events * 4, sb.buf, 64, 48 * this.maxEvents);
       enc.copyBufferToBuffer(this.intBuf, L.ccount * 4, sb.buf, 64 + 48 * this.maxEvents, 33 * 4);
+      enc.copyBufferToBuffer(this.intBuf, L.crush * 4, sb.buf, 64 + 48 * this.maxEvents + 33 * 4, 48 * 256);
       this.statCopied = true;
     } else this.statCopied = false;
     if (this.inheritCount) {
@@ -1617,6 +1654,7 @@ class GpuWorld {
     for (let k = 0; k < bodies.length; k++) {
       const b = bodies[k], i = bslot[k];
       this.bodyShapes.set(i, []);
+      q.writeBuffer(this.intBuf, (this.L.crushed + i) * 4, new Uint32Array([0]));
       q.writeBuffer(this.bodBuf, i * 80, new Float32Array([...b.p, b.im, ...b.q, ...b.il, 0, 0, ...b.p, ...b.q]));
       q.writeBuffer(this.solBuf, i * 96, new Float32Array([...b.v, 0, ...b.w, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
       this.bodies[i - 1] = b;
@@ -1745,6 +1783,9 @@ class GpuWorld {
     return { data: await this.read(this.prtBuf, n * 48, Math.max(1, this.capP) * 112), n, frame };
   }
   takeEvents() { const e = this.events; this.events = []; return e; }
+  // bodies crushed by much heavier ones (see the crush kernel): [{ body, by, p, q, v }] at the step it happened;
+  // they collide only with the static world until the caller breaks them (into particles, say)
+  takeCrushed() { const c = this.crushes; this.crushes = []; return c; }
   killShape(slot) {
     this.inputs++;
     const s = this.shapes[slot - 1]; if (!s || s.dead) return;
@@ -1790,6 +1831,9 @@ class GpuWorld {
           this.events.push({ a: u[o], b: u[o + 1], sa: u[o + 2], sb: u[o + 3], p: [f[o + 4], f[o + 5], f[o + 6]], n: [f[o + 7], f[o + 8], f[o + 9]], impulse: f[o + 10], approach: f[o + 11] });
         }
       }
+      // crushed bodies, never lost either
+      { const n = Math.min(u[15], 256), o0 = (64 + 48 * this.maxEvents + 33 * 4) / 4;
+        for (let k = 0; k < n; k++) { const o = o0 + k * 12; this.crushes.push({ body: u[o], by: u[o + 1], p: [f[o + 2], f[o + 3], f[o + 4]], q: [f[o + 5], f[o + 6], f[o + 7], f[o + 8]], v: [f[o + 9], f[o + 10], f[o + 11]] }); } }
       if (seq < this.statLatest) return;
       this.statLatest = seq; this.statsInputs = sb.inputs;
       this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7], pActive: u[12], pLive: u[13] };

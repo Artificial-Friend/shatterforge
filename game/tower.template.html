@@ -639,7 +639,37 @@ function onStructure(r) {
 // takes more than its weakest section near the contacts can carry, that section gives way and what lies
 // beyond keeps falling (a crush-down, storey by storey). Events gather while the engine is busy.
 const PER_BODY = 32, STATIC_HITS = 96;
+// Pieces crushed on the GPU (pressed by a body many times heavier, see the crush kernel) become rubble
+// particles where they are: each brick split into cubes of at most 0.4 m (what does not fit is dust).
+let crushedBodies = 0;
+const qmul = (a, b) => [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0], a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]];
+const qrot = (q, v) => qmul(qmul(q, [...v, 0]), [-q[0], -q[1], -q[2], q[3]]).slice(0, 3);
+const vadd = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+function crushBodies() {
+  if (!gpu.takeCrushed) return;
+  for (const c of gpu.takeCrushed()) {
+    const idx = c.body, gb = gpu.bodies[idx - 1];
+    if (!gb || gb.dead) continue;
+    const list = [], info = [];
+    for (const slot of gpu.bodyShapes.get(idx) || []) {
+      const sh = gpu.shapes[slot - 1]; if (!sh || sh.dead) continue;
+      const qs = qmul(c.q, sh.lq || [0, 0, 0, 1]), cen = vadd(c.p, qrot(c.q, sh.lp));
+      const n = sh.h.map(h => Math.max(1, Math.ceil(2 * h / 0.4))), hs = sh.h.map((h, k) => h / n[k]);
+      for (let i = 0; i < n[0]; i++) for (let j = 0; j < n[1]; j++) for (let k = 0; k < n[2]; k++) {
+        const lp = [(2 * i + 1 - n[0]) * hs[0], (2 * j + 1 - n[1]) * hs[1], (2 * k + 1 - n[2]) * hs[2]];
+        list.push({ p: vadd(cen, qrot(qs, lp)), v: [0, 0, 0], q: qs, r: Math.cbrt(6 * hs[0] * hs[1] * hs[2] / Math.PI), mat: sh.mat, wait: true });
+        info.push({ h: hs, col: sh.col ?? sh.mat });
+      }
+    }
+    const room = gpu.roomParticles(), keep = list.slice(0, room);
+    const parts = gpu.addParticles(keep);
+    parts.forEach((slot, k) => { if (slot < 0) return; const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: info[k].h, col: info[k].col, gen: g, dead: false }; partsMade++; });
+    gpu.breakBody(idx, [], c.p, c.q, [], parts, parts.map(() => [0, 0, 0]));
+    bodyInfo.delete(idx); crushedBodies++;
+  }
+}
 function impacts() {
+  crushBodies();
   const evs = gpu.takeEvents();
   if (!evs.length) return;
   const now = clock();
@@ -1039,7 +1069,7 @@ function hud() {
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'} · ${gpu.substeps} sub-steps${gpu.skipped ? ` · ${gpu.skipped.toLocaleString()} steps skipped at rest` : ''}` : '',
     gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">flicker check</span> ${flick.vanished} vanished, ${flick.jumps} jumps · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
-    `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
+    `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact · ${crushedBodies} crushed · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
     lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,
   ].filter(Boolean).join('<br>');
 }

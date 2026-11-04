@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -283,6 +283,28 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       }
       w.destroy();
       check('sandwich', vmax < 0.6 && pmax < 2, { hitAt: hit, blockMaxUp_ms: +vmax.toFixed(2), piecesMaxUp_ms: +pmax.toFixed(2), blockY: yBlock, stats: statsAt });
+    }
+    if (scenes.includes('crush')) {
+      // the sandwich again, with crushing: the light pieces under the heavy block are crushed (listed, then
+      // colliding with the static world only), the block comes down on the ground, nothing is thrown up; a light
+      // piece merely hit from the side by a heavy one is not crushed
+      const pieces = [];
+      for (let i = 0; i < 6; i++) for (let k = 0; k < 4; k++) pieces.push({ shapes: [{ p: [-7.5 + i * 3, 0.6, -6 + k * 4], q: [0, 0, 0, 1], h: [1.0, 0.6, 1.0], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
+      const side = { shapes: [{ p: [30, 0.6, 0], q: [0, 0, 0, 1], h: [1.0, 0.6, 1.0], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] };
+      const ram = { shapes: [{ p: [36.05, 3.0, 0], q: [0, 0, 0, 1], h: [5, 3, 5], mat: MAT.concrete }], v: [-6, 0, 0], w: [0, 0, 0] };
+      const block = { shapes: [{ p: [0, 1.2 + 0.001 + 4, 0], q: [0, 0, 0, 1], h: [10, 4, 10], mat: MAT.concrete }], v: [0, -5.7, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [...pieces, side, ram, block], { substeps: 12, sleep: false });
+      const bi = w.n, sideI = 25;
+      let crushed = new Set(), pmax = -1e9;
+      for (let f = 1; f <= 60; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        for (const c of w.takeCrushed()) crushed.add(c.body);
+        const r = await w.readPose();
+        for (let b = 1; b < 25; b++) pmax = Math.max(pmax, r.vel[(b - 1) * 3 + 1]);
+        if (f === 60) { var yB = r.body[(bi - 1) * 7 + 1], vB = r.vel[(bi - 1) * 3 + 1]; }
+      }
+      w.destroy();
+      check('crush', crushed.size >= 20 && !crushed.has(sideI) && yB < 4.2 && pmax < 1, { crushed: crushed.size, sideCrushed: crushed.has(sideI), blockY: +yB.toFixed(2), blockVy: +vB.toFixed(2), piecesMaxUp_ms: +pmax.toFixed(2) });
     }
     if (scenes.includes('compound')) {
       // a big compound body (the upper building: 20 x 20 x 2 bricks of 0.5 m, one body, 400 contacts with the

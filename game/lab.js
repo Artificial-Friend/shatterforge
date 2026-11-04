@@ -185,7 +185,7 @@ function labReport(wallS) {
     scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: ['concrete frame', 'masonry', 'mass timber'][S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
     pass: checks.every(c => c.pass), checks,
-    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_made: partsMade, particles_crushed: partsCrushed, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3) },
+    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3) },
     perf: {
       wall_s: +wallS.toFixed(1), steps: stepsDone, steps_skipped: gpu.skipped || 0,
       gpu_ms: { median: +med(gpuMs).toFixed(2), p95: +p95(gpuMs).toFixed(2), max: +Math.max(0, ...gpuMs).toFixed(2) },
@@ -202,7 +202,7 @@ function labSummary(rep) {
   const lines = [`${rep.pass ? 'PASS' : 'FAIL'} ${rep.scenario}: ${rep.title}`];
   for (const c of rep.checks) lines.push(`  ${c.pass ? 'ok  ' : 'FAIL'} ${c.name}: ${c.value} (limit ${c.limit})${!c.pass && rep.events ? '' : ''}`);
   const p = rep.physics, q = rep.perf;
-  lines.push(`  physics: roof ${p.roof_m[0]} -> ${p.roof_m[1]} m · dust ${(p.dust_of_building * 100).toFixed(1)}% · breaks ${p.breaks} · particles ${p.particles_made} (${p.particles_crushed} crushed) · settled ${p.settled_s ?? 'no'} s`);
+  lines.push(`  physics: roof ${p.roof_m[0]} -> ${p.roof_m[1]} m · dust ${(p.dust_of_building * 100).toFixed(1)}% · breaks ${p.breaks} · crushed ${p.bodies_crushed} · particles ${p.particles_made} (${p.particles_crushed} crushed) · settled ${p.settled_s ?? 'no'} s`);
   lines.push(`  perf: ${q.steps} steps (${q.steps_skipped} skipped) in ${q.wall_s} s · GPU ms median ${q.gpu_ms.median} / p95 ${q.gpu_ms.p95} / max ${q.gpu_ms.max} · JS ms median ${q.js_ms.median} / p95 ${q.js_ms.p95} · peak awake ${q.peak.awake}, contacts ${q.peak.contacts}, particles ${q.peak.particles}`);
   if (q.gpu_stages_ms_at_peak) lines.push(`  GPU stages at the slowest step (ms): ${Object.entries(q.gpu_stages_ms_at_peak).map(([k, v]) => `${k} ${v}`).join(' · ')}`);
   for (const [k, e] of Object.entries(rep.events)) lines.push(`  events ${k}: ${e.n} · first ${JSON.stringify(e.first.slice(0, 3))}`);
