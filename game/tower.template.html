@@ -54,8 +54,10 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Quality <select id="s-preset"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">sets the debris budgets, physics sub-steps, solver colours and shadows; the sliders below fine-tune</span></label>
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
+  <label>Crumbs as particles <b id="v-particles"></b><input type="range" id="s-particles" min="0" max="1" step="1"><span class="hint">on: loose bricks up to 0.5 m are granular particles (pile and slide, much cheaper; they do not push larger pieces); off: every crumb is a rigid body</span></label>
   <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
   <label>Physics sub-steps <b id="v-substeps"></b><input type="range" id="s-substeps" min="4" max="16" step="1"><span class="hint">per 1/60 s step: more = stiffer, more accurate stacks, slower</span></label>
+  <label>Adaptive sub-steps <b id="v-adaptive"></b><input type="range" id="s-adaptive" min="0" max="1" step="1"><span class="hint">on: when physics falls behind real time, sub-steps drop (to 8 at least) and come back when the GPU has room</span></label>
   <label>Solver colours (max) <b id="v-colors"></b><input type="range" id="s-colors" min="8" max="31" step="1"><span class="hint">contacts beyond go to a parallel pass: fewer = faster, a little softer</span></label>
   <label>Ball speed <b id="v-bspeed"></b><input type="range" id="s-bspeed" min="20" max="300" step="10"></label>
   <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
@@ -155,7 +157,8 @@ function chunkMesh(k) {
 // ---- debris (GPU bodies), drawn as instanced boxes
 // every debris shape the GPU can hold is drawn: with fewer instances than shapes, which ones were left out
 // changed from frame to frame (flicker, half the building gone)
-const MAXD = 140000;
+const MAXP = 65536;   // particles the GPU holds (crumbs)
+const MAXD = 140000 + MAXP;
 const dMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshLambertMaterial(), MAXD);
 dMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); dMesh.count = 0;
 // debris moves every frame: never cull it by a bounding sphere computed once (it was computed while empty, so
@@ -176,6 +179,7 @@ function debrisColour(code, k) {
   return colTmp.setRGB(c[0] * s, c[1] * s, c[2] * s);
 }
 const M4 = new THREE.Matrix4(), QQ = new THREE.Quaternion(), PP = new THREE.Vector3(), SS = new THREE.Vector3();
+let particlesDrawn = 0;
 let reading = 0, debrisShapes = 0, pendingChunks = [], readGen = 0;
 // Debris poses come back from the GPU a frame or more late, and not every frame: they are drawn blended
 // between the last two read-backs (matched shape by shape), so motion stays smooth.
@@ -196,7 +200,8 @@ function pullDebris() {
   reading++;
   const seq = ++readSeq, issuedAt = stepsDone;
   const tr = performance.now();
-  gpu.readPose(debrisFrom).then(r => {
+  Promise.all([gpu.readPose(debrisFrom), gpu.readParticles ? gpu.readParticles() : null]).then(([r, pr]) => {
+    r.parts = pr;
     perfAdd('read wait', performance.now() - tr);
     reading--;
     if (seq < readLatest) return;
@@ -230,10 +235,24 @@ function pullDebris() {
         if (Math.hypot(dx, dy, dz) > 1 + 3 * (sp + 10) * dt) flick.jumps++;
       }
     }
+    // particles: crushed ones go (as dust); the draw list is the live ones with their colours
+    if (pr) {
+      const d = pr.data, list = [];
+      for (let i = 0; i < pr.n; i++) {
+        const st = d[i * 12 + 10], inf = pInfo[i];
+        if (!inf || inf.dead || st === 0 || st === 4) continue;
+        if (st === 3) { inf.dead = true; gpu.killParticle(i); partsCrushed++; continue; }
+        list.push(i);
+      }
+      pr.list = list; pr.gens = list.map(i => pInfo[i].gen);
+      pr.index = new Map(); list.forEach((i, k) => pr.index.set(pInfo[i].gen * 1048576 + i, k));
+    }
     velHist.unshift({ v: r.vel, frame: r.frame }); if (velHist.length > 4) velHist.pop(); lastReadFrame = r.frame; lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
     const n = Math.min(MAXD, r.pose.length / 10);
     for (let k = 0; k < n; k++) dMesh.setColorAt(k, debrisColour(r.cols[k], r.slots[k]));
-    if (dMesh.instanceColor) { dMesh.instanceColor.updateRange.count = n * 3; dMesh.instanceColor.needsUpdate = true; }
+    const np = pr ? Math.min(MAXD - n, pr.list.length) : 0;
+    for (let k = 0; k < np; k++) dMesh.setColorAt(n + k, debrisColour(pInfo[pr.list[k]].col, 7919 * pr.list[k] + 1));
+    if (dMesh.instanceColor) { dMesh.instanceColor.updateRange.count = (n + np) * 3; dMesh.instanceColor.needsUpdate = true; }
     perfAdd('read', performance.now() - t0 + (r.jsMs || 0));
   }, () => { reading = Math.max(0, reading - 1); });
 }
@@ -259,8 +278,27 @@ function drawDebris(now) {
     SS.set(r.pose[o + 7], r.pose[o + 8], r.pose[o + 9]);
     M4.compose(PP, QQ, SS); dMesh.setMatrixAt(k, M4);
   }
-  dMesh.count = n; debrisShapes = n;
-  dMesh.instanceMatrix.updateRange.count = n * 16; dMesh.instanceMatrix.needsUpdate = true;
+  // particles, blended the same way (matched by slot and generation)
+  let np = 0;
+  const pr = r.parts, pp = p && p.parts;
+  if (pr && pr.list) {
+    np = Math.min(MAXD - n, pr.list.length);
+    const d = pr.data, pd = pp && pp.data;
+    for (let k = 0; k < np; k++) {
+      const i = pr.list[k], o = i * 12, inf = pInfo[i];
+      const j = pp && pp.index && a < 1 ? pp.index.get(pr.gens[k] * 1048576 + i) : undefined;
+      if (j !== undefined) {
+        const q = pp.list[j] * 12, b = 1 - a;
+        PP.set(pd[q] * b + d[o] * a, pd[q + 1] * b + d[o + 1] * a, pd[q + 2] * b + d[o + 2] * a);
+        QA.set(pd[q + 6], pd[q + 7], pd[q + 8], pd[q + 9]); QB.set(d[o + 6], d[o + 7], d[o + 8], d[o + 9]);
+        QQ.copy(QA).slerp(QB, a);
+      } else { PP.set(d[o], d[o + 1], d[o + 2]); QQ.set(d[o + 6], d[o + 7], d[o + 8], d[o + 9]); }
+      SS.set(inf.h[0], inf.h[1], inf.h[2]);
+      M4.compose(PP, QQ, SS); dMesh.setMatrixAt(n + k, M4);
+    }
+  }
+  dMesh.count = n + np; debrisShapes = n; particlesDrawn = np;
+  dMesh.instanceMatrix.updateRange.count = (n + np) * 16; dMesh.instanceMatrix.needsUpdate = true;
 }
 
 // ---- the static tower, falling pieces and their breaking
@@ -315,8 +353,23 @@ function applyStatic(updates) {
 }
 // Add bodies whose boxes are in the tower frame. xf: tower frame -> world { R, T, C } (identity when absent);
 // vel(c): the velocity a body starts with at world point c, and its spin.
+// Crumbs (loose single bricks, small enough) become particles when that is on: granular debris that piles and
+// slides at a fraction of a rigid body's cost (they do not push bodies). Returns the GPU bodies for the rest
+// (idxs, aligned with the returned `list`) and the particle slots (parts).
+const PART_R = 0.25;   // largest equal-volume radius (m) made a particle
+const pInfo = [];      // particle slot -> { h, col, gen, dead }
+let partsMade = 0, partsCrushed = 0;
+function asParticle(b) {
+  if (!setting.particles || !gpu.capP || b.id >= 0 || b.boxes.length !== 1) return false;
+  const bx = b.boxes[0], h = [bx[3] * TICK / 2, bx[4] * TICK / 2, bx[5] * TICK / 2];
+  return Math.cbrt(6 * h[0] * h[1] * h[2] / Math.PI) <= PART_R && Math.max(...h) <= 0.35;
+}
 function addPieces(list, xf, vel, cool) {
-  if (!gpu || !list.length) return { idxs: [], list: [] };
+  if (!gpu || !list.length) return { idxs: [], list: [], parts: [], kinds: [] };
+  const pl = [], bl = [];
+  let proom = gpu.roomParticles ? gpu.roomParticles() : 0;
+  for (const b of list) { if (proom > 0 && asParticle(b)) { proom--; pl.push(b); } else bl.push(b); }
+  list = bl;
   // capacity: bodies and shapes (slots of retired bodies are not reused)
   let room = gpu.roomBodies(), sroom = gpu.roomShapes(), k = 0;
   while (k < list.length && room > 0 && sroom >= list[k].boxes.length) { sroom -= list[k].boxes.length; room--; k++; }
@@ -335,6 +388,16 @@ function addPieces(list, xf, vel, cool) {
     const v = vel ? vel(c, b) : { v: [0, 0, 0], w: [0, 0, 0] };
     return { shapes, v: v.v, w: v.w };
   });
+  // particles: equal-volume spheres, drawn as their bricks
+  const pent = pl.map(b => {
+    const s = boxShape(b.boxes[0], 0);
+    const w = mv(R, [s.p[0] - C[0], s.p[1] - C[1], s.p[2] - C[2]]);
+    const c = [T[0] + w[0], T[1] + w[1], T[2] + w[2]];
+    const v = vel ? vel(c, b) : { v: [0, 0, 0], w: [0, 0, 0] };
+    return { e: { p: c, v: v.v, w: v.w, q: qs, r: Math.cbrt(6 * s.h[0] * s.h[1] * s.h[2] / Math.PI), mat: s.mat, wait: !!xf }, s };
+  });
+  const parts = gpu.addParticles ? gpu.addParticles(pent.map(x => x.e)) : [];
+  parts.forEach((slot, k) => { if (slot < 0) return; const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: pent[k].s.h, col: pent[k].s.col, gen: g, dead: false }; partsMade++; });
   const idxs = gpu.addBodies(bodies);
   list.forEach((b, k) => {
     if (b.id < 0) return;
@@ -342,7 +405,8 @@ function addPieces(list, xf, vel, cool) {
     if (!gb) return;
     bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, v0: bodies[k].v, f0: gpu.frame, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: performance.now() + (cool || 0) });
   });
-  return { idxs, list };
+  // (vel was called for the bodies kept, in order, then for the particles)
+  return { idxs, list, parts };
 }
 function remeshDirty() {
   const dirty = []; for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) dirty.push(k);
@@ -465,6 +529,7 @@ function rayDebris(o, d, maxT) {
 }
 // A blast throws the debris near it outward (strongest at the centre, nothing beyond 2.5 radii)
 function blastWave(c, r) {
+  if (gpu && gpu.blastParticles) gpu.blastParticles(c, 2.5 * r, 6 * r);
   if (!gpu || !lastBodies) return;
   const reach = 2.5 * r;
   for (let i = 2; i <= gpu.n; i++) {
@@ -674,7 +739,8 @@ function onImpacts(job, r) {
       extra.push(dv);
       return { v: [rigid[0] + dv[0], rigid[1] + dv[1], rigid[2] + dv[2]], w: w0.slice() };
     }, 0);
-    gpu.breakBody(idx, made.idxs, xf.p, xf.q, extra.slice(0, made.idxs.length));
+    // the velocities were made for the bodies, then for the particles
+    gpu.breakBody(idx, made.idxs, xf.p, xf.q, extra.slice(0, made.idxs.length), made.parts, extra.slice(made.idxs.length));
     breaks++;
   }
   if (window.__dbg && nbr) console.warn(`last cut: contacts at ${f[o].toFixed(0)} ticks, plane ${f[o + 1]}, capacity ${f[o + 2].toFixed(0)} MN, ${f[o + 3].toFixed(1)} MJ/m, needed ${f[o + 4].toFixed(0)} MN, squeezed ${f[o + 5]}`);
@@ -710,7 +776,9 @@ function setRadius(r) { radius = r; document.querySelectorAll('#tool span').forE
 // ---- settings (engine parameters go to both the worker and the page's copy)
 const SETTINGS = {
   crush: { el: 's-crush', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: v => setParam(2, v) },
-  crumbs: { el: 's-crumbs', def: 256, fmt: v => `${v}`, apply: v => setParam(0, v) },
+  adaptive: { el: 's-adaptive', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: v => { if (gpu && !+v) gpu.substeps = setting.substeps || 12; } },
+  particles: { el: 's-particles', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
+  crumbs: { el: 's-crumbs', def: 384, fmt: v => `${v}`, apply: v => setParam(0, v) },
   rubble: { el: 's-rubble', def: 64, fmt: v => `${v}`, apply: v => setParam(1, v) },
   substeps: { el: 's-substeps', def: 12, fmt: v => `${v}`, apply: v => { if (gpu) gpu.substeps = v; } },
   colors: { el: 's-colors', def: 16, fmt: v => `${v}`, apply: v => { if (gpu) { gpu.maxColors = v; gpu.colorLimit = Math.min(gpu.colorLimit, v); } } },
@@ -748,9 +816,9 @@ function initSettings() {
 }
 const PRESETS = {
   low: { crumbs: 64, rubble: 16, substeps: 6, colors: 10, shadows: false },
-  medium: { crumbs: 128, rubble: 32, substeps: 8, colors: 12, shadows: true },
-  high: { crumbs: 256, rubble: 64, substeps: 12, colors: 16, shadows: true },
-  ultra: { crumbs: 768, rubble: 192, substeps: 12, colors: 24, shadows: true },
+  medium: { crumbs: 192, rubble: 32, substeps: 8, colors: 12, shadows: true },
+  high: { crumbs: 384, rubble: 64, substeps: 12, colors: 16, shadows: true },
+  ultra: { crumbs: 1024, rubble: 192, substeps: 12, colors: 24, shadows: true },
 };
 function applyPreset(name) {
   const pr = PRESETS[name]; if (!pr) return;
@@ -834,7 +902,7 @@ function benchTick(now, dt) {
     if (snapCur) for (let k = 0; k < snapCur.pose.length / 10; k++) { const y = snapCur.pose[k * 10 + 1] + snapCur.pose[k * 10 + 8]; if (Number.isFinite(y)) roof = Math.max(roof, y); else bad++; }
     // and the standing building: a ray down through the middle
     const ts = E.raycast(0.3, 200, 0.3, 0, -1, 0, 300); if (ts >= 0) roof = Math.max(roof, 200 - ts);
-    BENCH.rows.push({ sim: f / 60, wall: (now - BENCH.wall0) / 1000, fps, steps: rate.steps, gpu: g, gpuStages: gpu.gpuMs ? { ...gpu.gpuMs } : null, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, breaks, dust: dustBricks, impacts: impactMs, structure: failedJoints, roof, bad, vanished: flick.vanished, jumps: flick.jumps });
+    BENCH.rows.push({ sim: f / 60, wall: (now - BENCH.wall0) / 1000, fps, steps: rate.steps, gpu: g, gpuStages: gpu.gpuMs ? { ...gpu.gpuMs } : null, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, breaks, dust: dustBricks, impacts: impactMs, structure: failedJoints, roof, bad, vanished: flick.vanished, jumps: flick.jumps, parts: gpu.stats.pLive || 0, pAwake: gpu.stats.pActive || 0, skipped: gpu.skipped || 0, sub: gpu.substeps });
     benchShow();
   }
   if (f >= BENCH.end) { BENCH.on = false; BENCH.phase = 'done'; Math.random = mathRandom; benchShow(true); }
@@ -846,11 +914,11 @@ function benchShow(done) {
   const lines = [];
   lines.push(`Shatterforge benchmark · ${['concrete frame', 'masonry', 'mass timber'][KIND]}, ${STOREYS} storeys · ${new Date().toISOString().slice(0, 19)}Z`);
   lines.push(`${navigator.userAgent}`);
-  lines.push(`settings: quality ${setting.preset || 'custom'} · crush depth ${setting.crush} m · crumbs ${setting.crumbs} · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
+  lines.push(`settings: quality ${setting.preset || 'custom'} · crush depth ${setting.crush} m · crumbs ${setting.crumbs} (${setting.particles ? 'particles' : 'rigid'}) · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
   lines.push(`cut: 36 blasts in ${(BENCH.cutMs / 1000).toFixed(1)} s`);
   lines.push('');
-  lines.push('  sim s  wall s   fps  steps/s  GPU ms  bodies  awake  contacts  breaks   dust  roof m  bad poses  vanished  jumps');
-  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)} ${String(x.bad).padStart(10)} ${String(x.vanished).padStart(9)} ${String(x.jumps).padStart(6)}`);
+  lines.push('  sim s  wall s   fps  steps/s  GPU ms  bodies  awake  contacts  particles  p.awake  sub  breaks   dust  roof m  bad poses  vanished  jumps');
+  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.parts).padStart(10)} ${String(x.pAwake).padStart(8)} ${String(x.sub).padStart(4)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)} ${String(x.bad).padStart(10)} ${String(x.vanished).padStart(9)} ${String(x.jumps).padStart(6)}`);
   if (done) {
     const simT = last.sim || 0, wallT = last.wall || 1;
     lines.push('');
@@ -858,6 +926,7 @@ function benchShow(done) {
     lines.push(`frame time: median ${pct(0.5).toFixed(1)} ms · 95th ${pct(0.95).toFixed(1)} ms · worst ${pct(1).toFixed(1)} ms`);
     lines.push(`GPU step: worst ${BENCH.gpuMax.toFixed(1)} ms${last.gpuStages ? ' · last ' + Object.entries(last.gpuStages).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ') : ''}`);
     lines.push(`invalid inputs refused: ${gpu.rejected || 0} · bad poses at the end: ${last.bad || 0} · flicker check: ${flick.vanished} shapes vanished unexplained, ${flick.jumps} jumped`);
+    lines.push(`particles: ${partsMade} made, ${partsCrushed} crushed to dust, peak ${Math.max(0, ...r.map(x => x.parts))} · steps skipped at rest: ${last.skipped || 0}`);
     lines.push(`peak bodies ${Math.max(...r.map(x => x.bodies))} · peak contacts ${Math.max(...r.map(x => x.contacts))} · breaks ${last.breaks} · bricks to dust ${last.dust} · roof ${r.length ? r[0].roof.toFixed(1) : '?'} -> ${(last.roof || 0).toFixed(1)} m`);
     $('bench-title').textContent = 'Benchmark: done';
   }
@@ -887,8 +956,8 @@ function frameBody(now, dt) {
     cam.rotation.set(pitch, yaw, 0);
     pump();
     // physics runs while anything is awake (and briefly after a blast, before the first stats arrive)
-    if (gpu && diag.physics && !physicsPaused && (gpu.stats.awake > 0 || now - lastActive < 2000)) {
-      acc += dt;
+    if (gpu && diag.physics && !physicsPaused && (gpu.stats.awake > 0 || gpu.stats.pActive > 0 || now - lastActive < 2000)) {
+      acc += dt; physFrames++;
       // never queue more GPU work than it finishes: a backlog makes every read-back late
       const ts = performance.now();
       // pace the steps by the GPU's own measured step time (waiting on the browser's completion callbacks
@@ -907,20 +976,33 @@ function frameBody(now, dt) {
   benchTick(now, dt);
   if (diag.draw) timed('draw', () => drawDebris(now));
   timed('render', () => renderer.render(scene, cam));
-  frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; hud(); }
+  frames++; frames0++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; hud(); }
 }
 const rate = { steps: 0, reads: 0, t: performance.now(), s0: 0, r0: 0 };
+// Adaptive sub-steps: while physics falls behind real time (a heavy collapse), fewer sub-steps per step, down
+// to 8 (a 20-box tower still stands there; at 6 it does not); back up to the setting when the GPU has room
+let physFrames = 0, frames0 = 0;
+function adaptSubsteps(busy) {
+  if (!gpu || !setting.adaptive || !busy) return;
+  const target = setting.substeps || 12, lo = Math.min(8, target);
+  const stepMs = gpu.gpuMs ? Object.values(gpu.gpuMs).reduce((a, b) => a + b, 0) : 0;
+  if (rate.steps < 54 && gpu.substeps > lo) gpu.substeps--;
+  else if (rate.steps >= 58 && gpu.substeps < target && (!stepMs || stepMs * (gpu.substeps + 1) / gpu.substeps < 11)) gpu.substeps++;
+}
 function hud() {
   if (!E) return;
   const tn = performance.now(), dt = (tn - rate.t) / 1000;
-  if (dt > 0.4) { rate.steps = (stepsDone - rate.s0) / dt; rate.reads = (readsDone - rate.r0) / dt; rate.t = tn; rate.s0 = stepsDone; rate.r0 = readsDone; }
+  if (dt > 0.4) {
+    rate.steps = (stepsDone - rate.s0) / dt; rate.reads = (readsDone - rate.r0) / dt; rate.t = tn; rate.s0 = stepsDone; rate.r0 = readsDone;
+    adaptSubsteps(physFrames >= frames0 * 0.9 && physFrames > 0); physFrames = 0; frames0 = 0;
+  }
   const y = E.player_get(1), storey = Math.max(0, Math.floor((y + 0.01) / 3.75));
   const g = gpu && gpu.gpuMs ? Object.values(gpu.gpuMs).reduce((a, b) => a + b, 0) : null;
   $('hud').innerHTML = [
     `<b>${fps.toFixed(0)} fps</b> · ${fly ? 'flying' : 'walking'} · storey <b>${storey === 0 ? 'G' : storey}</b>`,
     `<span class="k">bricks</span> ${E.bricks_alive().toLocaleString()} · <span class="k">joints</span> ${E.joints_live().toLocaleString()} · ${E.bytes_per_brick().toFixed(0)} B/brick`,
-    gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake${snapCur && snapCur.pose.length / 10 > MAXD ? ` · <b>${(snapCur.pose.length / 10 - MAXD).toLocaleString()} not drawn</b>` : ''}` : `<span class="k">debris physics</span> off (no WebGPU)`,
-    gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'}` : '',
+    gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake · ${(gpu.stats.pLive || 0).toLocaleString()} particles (${gpu.stats.pActive || 0} moving)${snapCur && snapCur.pose.length / 10 > MAXD ? ` · <b>${(snapCur.pose.length / 10 - MAXD).toLocaleString()} not drawn</b>` : ''}` : `<span class="k">debris physics</span> off (no WebGPU)`,
+    gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'} · ${gpu.substeps} sub-steps${gpu.skipped ? ` · ${gpu.skipped.toLocaleString()} steps skipped at rest` : ''}` : '',
     gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">flicker check</span> ${flick.vanished} vanished, ${flick.jumps} jumps · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
     `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
@@ -949,7 +1031,7 @@ function hud() {
         const f = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
         const n = f[0], shapes = [], idx = [];
         for (let k = 0; k < n; k++) { const o = 1 + k * 8; idx.push(f[o]); shapes.push(boxShape(f, o + 1)); }
-        gpu = await GpuWorld.create(dev, [{ fixed: true, shapes }], { substeps: 12, sleep: true, maxBodies: 30000, maxShapes: n + 120000, maxContacts: 160000, maxPairs: 320000, eventSpeed: 2.0, eventEnergy: 20000 });
+        gpu = await GpuWorld.create(dev, [{ fixed: true, shapes }], { substeps: 12, sleep: true, maxBodies: 30000, maxShapes: n + 120000, maxContacts: 160000, maxPairs: 320000, eventSpeed: 2.0, eventEnergy: 20000, maxParticles: MAXP, particleMaxRadius: PART_R + 0.05 });
         gpu.substeps = setting.substeps || 12; gpu.maxColors = setting.colors || 16; gpu.colorLimit = Math.min(gpu.colorLimit, gpu.maxColors);
         idx.forEach((b, k) => slots.set(b, k + 1));
       }

@@ -16,7 +16,9 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
   fs.writeFileSync('/tmp/sf_blank.html', '<html><body></body></html>');
   await p.goto('file:///tmp/sf_blank.html');
   await p.addScriptTag({ path: path.join(__dirname, 'gpu_world.js') });
-  const res = await p.evaluate(async ({ wasm, scenes }) => {
+  const res = await p.evaluate(async ({ wasm, scenes, SUB }) => {
+    // SF_SUB=n forces n sub-steps everywhere (to see what fewer cost in accuracy)
+    if (SUB) { const c0 = GpuWorld.create; GpuWorld.create = (d, l, o = {}) => c0.call(GpuWorld, d, l, { ...o, substeps: SUB }); }
     const bytes = Uint8Array.from(atob(wasm), c => c.charCodeAt(0));
     const E = (await WebAssembly.instantiate(bytes, {})).instance.exports;
     const a = await navigator.gpu.requestAdapter();
@@ -330,7 +332,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0) });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   await b.close();

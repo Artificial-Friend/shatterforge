@@ -90,8 +90,8 @@ This replaces the previous rule, where only moving shapes searched and a large m
 
 All dispatches are direct, so the browser does not validate them one by one; Chromium validates indirect dispatches individually, and about 800 per step stalled whole frames.
 
-- **Sizes are safe bounds.** A colour holds at most one contact per body, so colour passes are sized by the body count. Every other pass is sized by capacity. The kernels skip work past their real counts.
-- **No estimates.** Sizes estimated from read-back stats arrive late, and they left contacts unsolved in fast-changing scenes.
+- **Colour passes loop.** Each colour pass is sized from the recent per-colour count (×1.5 + 256) and its threads take every stride-th contact, so a colour that grew since the stats were read is still solved in full, only by fewer threads. (Sizing from stats without the loop left contacts unsolved in fast-changing scenes.)
+- **Everything else by capacity.** The kernels skip work past their real counts.
 - **Colour cap.** At most 16 sequential colours are solved per sub-step by default (`maxColors`); contacts beyond them go to the parallel pass.
 - **Read-backs in flight.** Up to three stats read-backs and three debris read-backs are in flight at once. A late, older result is dropped, but impact events are never dropped.
 
@@ -107,7 +107,22 @@ A body counts as at rest when, over the last 0.5 s, both hold:
 
 An island sleeps when all of its bodies are at rest. Testing the pose, not the instantaneous speed, matters. Settled piles carry solver chatter of 2–4 cm/s that goes nowhere, and a speed test kept a 2,000-brick pile awake indefinitely.
 
-A sleeping body is static to the solver and wakes when a moving body touches it.
+A body also sleeps on its own once it has been at rest for 1 s, even when its island is still awake. A pile of rubble with a few creeping pieces would otherwise stay awake as a whole: in the rubble test, 99% of the "awake" bodies were already still. The still ones become static support for the rest.
+
+A sleeping body is static to the solver. It wakes when a body moving faster than 0.25 m/s at the contact touches it (`wakeSpeed`). A body just woken, or creeping, does not wake its neighbours, so a pile wakes only as far as the disturbance really goes.
+
+**A world at rest costs nothing.** When the last stats show nothing awake (bodies and particles) and nothing has changed from JS since (no bodies added or removed, no velocities set, no blast), the step is skipped (`skipped` counts them).
+
+## Particles (granular debris)
+
+Crumbs are particles: spheres of the brick's volume, drawn as the bricks they are (`maxParticles`, `addParticles`, `readParticles`). Each step, after the bodies moved:
+1. **Prepare.** Sleeping particles wake when a moving rigid shape is in a grid cell around them (any level), when a blast reaches them (`blastParticles`) or on `wakeAll`. All live particles go into their own hash grid.
+2. **Four sub-steps of position-based dynamics.** Predict with gravity; push out of other particles (averaged, over-relaxed; a sleeping particle does not give way), then out of the ground and every rigid shape in sequence, each in full, so a particle never ends inside a body. Friction is Coulomb: the slide of the sub-step is taken back up to μ × the push. Velocity is the move over the sub-step.
+3. **Push limits.** A sub-step's own approach is undone in full. Overlap beyond it (from a spawn, or a body driven into a heap) separates at 2 m/s, so nothing is launched from a deep overlap.
+4. **One way.** Particles do not push bodies: a box dropped on a heap sinks to the floor and pushes the particles aside. A particle pressed from opposite sides by two shapes (that box on the floor) is crushed to dust (state 3; the page frees it).
+5. **Rest.** A particle sleeps after 0.5 s touching something and staying within 1 cm of where its timer restarted. A particle wedged among sleeping ones may jitter in place without going anywhere, and a speed test kept such particles awake indefinitely.
+
+Particles cut from a moving body wait (state 4) and are placed at the next step from the parent's pose then, like its pieces (`breakBody(parent, kids, pr, qr, dvs, parts, pdvs)`).
 
 ## Validation (`node gpu/test_gpu.cjs`, headless Chrome with SwiftShader WebGPU)
 
@@ -122,7 +137,11 @@ A sleeping body is static to the solver and wakes when a moving body touches it.
 | 2 × 2.5 m wall section, one body of 45 bricks, tipped 12° | falls flat as one piece | all brick centres at 0.125 m |
 | Steel brick at 80 m/s at a 0.125 m concrete wall | does not pass through | stops at the face and rebounds at 17.7 m/s (e = 0.22) |
 | 8 m steel beam dropped across three blocks | rests on them at 0.65 m (coarse grid level) | 0.650 m |
-| Pile of 300 with sleeping | settles and sleeps | all asleep by 9 s |
+| Pile of 300 with sleeping | settles and sleeps | all asleep by 8 s |
+| Heap of 1,500 mixed rubble bodies | settles and sleeps | all asleep by 5 s (island sleep alone: 8 s) |
+| 2,000 particles poured on a 2 × 2 m table | none under the ground or inside the table; heap on it; all asleep, then steps skipped; a box dropped on it wakes it | 0 / 0; 0.6 m heap on the table, the rest at the angle of repose around; asleep by 5 s, all steps skipped; woken; 34 crushed under the box |
+| Particle cut from a tumbling body, placed from a pose 10 steps old | where the body is now | within 2 mm |
+| Fewer sub-steps (20-box stack drift) | | 12: 7 mm · 8: 16 mm · 6: falls (so adaptive sub-steps stop at 8) |
 
 SwiftShader runs WebGPU on the CPU, so its timings mean nothing. Throughput is measured by the bench page on real GPUs.
 
