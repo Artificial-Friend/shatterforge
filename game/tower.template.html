@@ -189,6 +189,9 @@ function perfAdd(name, d) { perf[name] = perf[name] == null ? d : perf[name] * 0
 const MAX_READS = 3;
 function pullDebris() {
   if (!gpu || !diag.readback || reading >= MAX_READS) return;
+  // pieces of a break wait for the next step to be placed: a read-back before it would show them where the
+  // parent was, then jump
+  if (gpu.placing()) return;
   reading++;
   const seq = ++readSeq, issuedAt = stepsDone;
   const tr = performance.now();
@@ -648,6 +651,8 @@ function onImpacts(job, r) {
       if (b.id < 0) for (let k = 0; k < 3; k++) dv[k] += (Math.random() - 0.5) * 2;   // crushed crumbs scatter
       if (b.id < 0 && job.blastC) { const dd = [cc[0] - job.blastC[0], cc[1] - job.blastC[1], cc[2] - job.blastC[2]], l = Math.hypot(...dd) || 1; for (let k = 0; k < 3; k++) dv[k] += dd[k] / l * (2 + 2 * Math.random()); }
       if (!b.hit) { const v = [vFree[0] + w0[1] * rr[2] - w0[2] * rr[1], vFree[1] + w0[2] * rr[0] - w0[0] * rr[2], vFree[2] + w0[0] * rr[1] - w0[1] * rr[0]]; extra.push({ v }); return { v, w: w0.slice() }; }
+      // a part at the contacts keeps the parent's motion now, minus any rebound away from the contacts (D)
+      if (b.id >= 0) { extra.push({ noRebound: D }); return { v: rigid, w: w0.slice() }; }
       extra.push(dv);
       return { v: [rigid[0] + dv[0], rigid[1] + dv[1], rigid[2] + dv[2]], w: w0.slice() };
     }, 0);
@@ -874,7 +879,7 @@ function frameBody(now, dt) {
       const maxSteps = stepMs * 2 < 12 ? 2 : 1;
       // and never run ahead of the read-backs: at most a few steps queued past the newest one that came back,
       // or work piles up in the GPU queue and everything (debris, breaking) shows seconds late
-      let n = 0; while (acc >= 1 / 60 && n < maxSteps && (!diag.readback || stepsDone - stepsAtRead < 3)) { gpu.step(1 / 60); acc -= 1 / 60; n++; stepsDone++; }
+      let n = 0; while (acc >= 1 / 60 && n < maxSteps && (!diag.readback || stepsDone - stepsAtRead < 3 || (n === 0 && gpu.placing()))) { gpu.step(1 / 60); acc -= 1 / 60; n++; stepsDone++; }
       perfAdd('step', performance.now() - ts);
       if (acc > 0.1) acc = 0;
       pullDebris();

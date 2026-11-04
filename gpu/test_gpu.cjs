@@ -186,18 +186,21 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       const truth = [0, 1].map(k => Array.from(rNow.pose.subarray(k * 10, k * 10 + 3)));
       const vTruth = Array.from(rNow.vel.subarray(0, 3));
       const kids = w.addBodies(halves);
-      w.breakBody(1, kids, p0, q0, [[0, 0, 0], [0, 0, 0]]);
+      // the second half: no motion away from a contact pushing down (n = -y): its downward velocity goes
+      w.breakBody(1, kids, p0, q0, [[0, 0, 0], { noRebound: [0, -1, 0] }]);
       w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
       const r1 = await w.readPose(2);
       // one more step happened: compare with the truth moved by that step (about v dt)
-      let err = 0; for (let k = 0; k < 2; k++) for (let a = 0; a < 3; a++) err = Math.max(err, Math.abs(r1.pose[k * 10 + a] - truth[k][a] - vTruth[a] / 60));
+      let err = 0; for (let a = 0; a < 3; a++) err = Math.max(err, Math.abs(r1.pose[a] - truth[0][a] - vTruth[a] / 60));
       const vk = Array.from(r1.vel.subarray((kids[0] - 1) * 3, (kids[0] - 1) * 3 + 3));
       // the half's velocity is the parent's at its place: v + w x r (and one more step of gravity)
       const wp = Array.from(rNow.ang.subarray(0, 3)), pc = Array.from(rNow.body.subarray(0, 3)), rr = [0, 1, 2].map(a => truth[0][a] - pc[a]);
       const vExp = [vTruth[0] + wp[1] * rr[2] - wp[2] * rr[1], vTruth[1] + wp[2] * rr[0] - wp[0] * rr[2] - 9.81 / 60, vTruth[2] + wp[0] * rr[1] - wp[1] * rr[0]];
       const verr = Math.max(...[0, 1, 2].map(a => Math.abs(vk[a] - vExp[a])));
+      const v2 = Array.from(r1.vel.subarray((kids[1] - 1) * 3, (kids[1] - 1) * 3 + 3));
       w.destroy();
-      check('inherit', err < 0.05 && verr < 0.2, { maxError_m: err, velocityError: verr, vKid: vk, vExpected: vExp, kids });
+      // (one step of gravity after the placing: about -0.16 m/s)
+      check('inherit', err < 0.05 && verr < 0.2 && v2[1] > -0.3 && Math.abs(v2[0]) > 1, { maxError_m: err, velocityError: verr, vKid: vk, vExpected: vExp, vNoRebound: v2, kids });
     }
     if (scenes.includes('reuse')) {
       // bodies retired and new ones made in their slots while everything is in contact (as when pieces break)

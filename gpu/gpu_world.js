@@ -469,8 +469,10 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
 @compute @workgroup_size(64) fn inherit(@builtin(global_invocation_id) g: vec3u) {
   let k = g.x; if (k >= P.n_inherit) { return; }
   let kid = ld(P.o_inherit + k * 12u); let praw = ld(P.o_inherit + k * 12u + 1u);
-  // the high bit: dv is the piece's own velocity (a part cut free keeps falling while the parent was stopped)
-  let absolute = (praw & 0x80000000u) != 0u; let par = praw & 0x7fffffffu;
+  // the high bit: dv is the piece's own velocity (a part cut free keeps falling while the parent was stopped);
+  // the next: dv is the direction the contacts pushed, and the piece keeps none of a rebound along it (a crushing
+  // impact absorbs the energy, it does not bounce)
+  let absolute = (praw & 0x80000000u) != 0u; let noRebound = (praw & 0x40000000u) != 0u; let par = praw & 0x3fffffffu;
   if (kid == 0u || par == 0u) { return; }
   let pr = vec3f(inh(k, 2u), inh(k, 3u), inh(k, 4u));
   let qr = vec4f(inh(k, 5u), inh(k, 6u), inh(k, 7u), inh(k, 8u));
@@ -484,12 +486,14 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
   setB(kid, F_P, vec4f(p, pk.w)); setB(kid, F_Q, q);
   setB(kid, F_FL, vec4f(0.0, p)); setB(kid, F_RQ, q);
   if (absolute) { setS(kid, S_V, vec4f(dv, S(kid, S_V).w)); return; }
-  let v = vn + cross(wn, p - pn) + qrot(rd, dv);
+  var v = vn + cross(wn, p - pn);
+  if (noRebound) { let n = dv; let a = dot(v, n); if (a > 0.0) { v -= a * n; } }
+  else { v += qrot(rd, dv); }
   setS(kid, S_V, vec4f(v, S(kid, S_V).w)); setS(kid, S_W, vec4f(wn, 0.0));
 }
 @compute @workgroup_size(64) fn retire(@builtin(global_invocation_id) g: vec3u) {
   let k = g.x; if (k >= P.n_inherit) { return; }
-  let kid = ld(P.o_inherit + k * 12u); let par = ld(P.o_inherit + k * 12u + 1u) & 0x7fffffffu;
+  let kid = ld(P.o_inherit + k * 12u); let par = ld(P.o_inherit + k * 12u + 1u) & 0x3fffffffu;
   if (kid != 0u || par == 0u) { return; }
   setB(par, F_P, vec4f(0.0, -1000.0, 0.0, 0.0)); setB(par, F_FL, vec4f(1.0, 0.0, -1000.0, 0.0));
   setS(par, S_V, vec4f(0.0)); setS(par, S_W, vec4f(0.0));
@@ -1252,6 +1256,8 @@ class GpuWorld {
     this.device.queue.writeBuffer(this.bodBuf, body * 80 + 48, new Float32Array([1, 0, -1000, 0]));
   }
   // Take the impact events collected since the last call.
+  // pieces made by breakBody that the next step still has to place (a read-back now would show them wrong)
+  placing() { return !!(this.pendingInherit && this.pendingInherit.length); }
   // Break a moving body into new ones (see the `inherit` kernel): `kids` are slots from addBodies, made from
   // the parent's pose (pr, qr) of an older read-back; dv[k] is extra velocity for kid k (world frame then).
   // The parent stops colliding now and is retired at the next step, after its pieces have been placed.
@@ -1261,11 +1267,14 @@ class GpuWorld {
     const own = this.bodyShapes && this.bodyShapes.get(parent);
     if (own) { for (const k of own) if (this.shapes[k - 1] && this.shapes[k - 1].body === parent) this.killShape(k); this.bodyShapes.delete(parent); }
     this.pendingInherit = this.pendingInherit || []; this.retiring = this.retiring || [];
-    // dvs[k]: [dx, dy, dz] beyond the parent's motion, or { v: [..] } for a velocity of its own
     kids.forEach((kid, k) => {
       if (!kid) return;
-      const d = dvs[k] || [0, 0, 0], own = !Array.isArray(d);
-      this.pendingInherit.push([kid, own ? (parent | 0x80000000) >>> 0 : parent, ...pr, ...qr, ...(own ? d.v : d)]);
+      // dvs[k]: [dx, dy, dz] beyond the parent's motion, { v } for a velocity of its own, { noRebound: n } to
+      // move on with the parent but without a rebound along the unit direction n
+      const d = dvs[k] || [0, 0, 0];
+      if (!Array.isArray(d) && d.v) this.pendingInherit.push([kid, (parent | 0x80000000) >>> 0, ...pr, ...qr, ...d.v]);
+      else if (!Array.isArray(d) && d.noRebound) this.pendingInherit.push([kid, (parent | 0x40000000) >>> 0, ...pr, ...qr, ...d.noRebound]);
+      else this.pendingInherit.push([kid, parent, ...pr, ...qr, ...d]);
     });
     this.pendingInherit.push([0, parent, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
     this.retiring.push(parent);
