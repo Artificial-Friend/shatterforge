@@ -43,7 +43,7 @@ struct Params {
   levels: u32, ground_mat: u32, sleep_dist: f32, sleep_rot: f32,
   o_ocount: u32, o_acc: u32, o_events: u32, max_events: u32,
   ev_speed: f32, ev_energy: f32, o_cawake: u32, pad5: u32,
-  n_inherit: u32, o_inherit: u32, pad6: u32, pad7: u32,
+  n_inherit: u32, o_inherit: u32, wake_speed: f32, pad7: u32,
   mat: array<vec4f, 8>,   // friction, restitution, -, -
 }
 struct ColorU { c: u32 }
@@ -523,9 +523,12 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
   let rel = length(S(bj, S_V).xyz - vi) + length(S(bi, S_W).xyz) * ri + length(S(bj, S_W).xyz) * rj;
   let c = box_box(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), hi_, Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), hj_, P.spec + rel * P.dt);
   if (c.cnt > 0u) {
-    // a moving body wakes a sleeping one it touches (it joins the solver next step)
-    if (dyn_awake(bi) && B(bi, F_IL).w == 0.0) { wake(bj); }
-    if (dyn_awake(bj) && B(bj, F_IL).w == 0.0) { wake(bi); }
+    // a moving body wakes a sleeping one it touches (it joins the solver next step) when it moves enough to
+    // matter: a piece just woken (at rest) or creeping does not wake its neighbours, so a pile wakes only as far
+    // as the disturbance really goes
+    let spi = length(vi) + length(S(bi, S_W).xyz) * ri; let spj = length(S(bj, S_V).xyz) + length(S(bj, S_W).xyz) * rj;
+    if (dyn_awake(bi) && spi > P.wake_speed) { wake(bj); }
+    if (dyn_awake(bj) && spj > P.wake_speed) { wake(bi); }
     emit(si, sj, bi, bj, c);
   }
 }
@@ -755,9 +758,17 @@ fn color_item(g: u32) -> u32 {
   if (g >= ld(P.o_ccount + c)) { return 0xffffffffu; }
   return ld(P.o_order + ld(P.o_cstart + c) + g);
 }
-@compute @workgroup_size(64) fn solve(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { solve_man(m, true, false); } }
-@compute @workgroup_size(64) fn relax(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { solve_man(m, false, false); } }
-@compute @workgroup_size(64) fn restitute(@builtin(global_invocation_id) g: vec3u) { let m = color_item(g.x); if (m != 0xffffffffu) { restitute_man(m); } }
+// grid-stride loops: the dispatch is sized from recent counts, and a colour that grew since is still solved
+// in full (each thread takes every stride-th contact; contacts of one colour never share a body)
+@compute @workgroup_size(64) fn solve(@builtin(global_invocation_id) g: vec3u, @builtin(num_workgroups) nw: vec3u) {
+  var k = g.x; loop { let m = color_item(k); if (m == 0xffffffffu) { break; } solve_man(m, true, false); k += nw.x * 64u; }
+}
+@compute @workgroup_size(64) fn relax(@builtin(global_invocation_id) g: vec3u, @builtin(num_workgroups) nw: vec3u) {
+  var k = g.x; loop { let m = color_item(k); if (m == 0xffffffffu) { break; } solve_man(m, false, false); k += nw.x * 64u; }
+}
+@compute @workgroup_size(64) fn restitute(@builtin(global_invocation_id) g: vec3u, @builtin(num_workgroups) nw: vec3u) {
+  var k = g.x; loop { let m = color_item(k); if (m == 0xffffffffu) { break; } restitute_man(m); k += nw.x * 64u; }
+}
 // overflow contacts (no free colour): one thread, in sequence
 fn ovf_range() -> vec2u { let c = P.color_limit; let s = ld(P.o_cstart + c); return vec2u(s, s + ld(P.o_ccount + c)); }
 // overflow contacts (a body with more contacts than colours, e.g. a big falling piece): all in parallel,
@@ -834,7 +845,9 @@ fn find(x0: u32) -> u32 {
 }
 @compute @workgroup_size(64) fn uf_sleep(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.n1 || !dyn_awake(i)) { return; }
-  if (bitcast<f32>(ld(P.o_mint + find(i))) >= P.sleep_time) {
+  // the whole island at rest, or this body itself at rest for twice as long (a pile with a few creeping pieces
+  // must not stay awake as a whole: the still ones sleep and act as static support for the rest)
+  if (bitcast<f32>(ld(P.o_mint + find(i))) >= P.sleep_time || B(i, F_IL).w >= 2.0 * P.sleep_time) {
     let fl = B(i, F_FL); setB(i, F_FL, vec4f(1.0, fl.yzw));
     setS(i, S_V, vec4f(0.0, 0.0, 0.0, S(i, S_V).w)); setS(i, S_W, vec4f(0.0));
   }
@@ -972,6 +985,7 @@ class GpuWorld {
     this.indirect = !!opt.indirect;   // the old indirect-dispatch path (for comparison)
     this.anchor = opt.anchor ?? true;
     this.sleep = opt.sleep ?? true;
+    this.wakeSpeed = opt.wakeSpeed ?? 0.25;   // m/s at the contact: slower bodies do not wake what they touch
     this.levels = 4;
     this.maxMan = opt.maxContacts || Math.max(64, Math.ceil((opt.manPerShape || 4) * this.capS));
     this.maxPairs = opt.maxPairs || Math.max(128, Math.ceil((opt.pairsPerShape || 8) * this.capS));
@@ -1021,7 +1035,7 @@ class GpuWorld {
     // back the next step's stats and impact events
     this.statBufs = [0, 1, 2].map(() => ({ buf: buf(64 + 48 * this.maxEvents + 33 * 4, U.COPY_DST | U.MAP_READ), busy: false }));
     this.colCounts = new Array(33).fill(0);
-    this.statBuf = this.statBufs[0].buf; this.statSeq = 0; this.statLatest = 0;
+    this.statBuf = this.statBufs[0].buf; this.statSeq = 0; this.statLatest = 0; this.inputs = 0;
     this.events = [];
     this.stats = { manifolds: 0, overflow: 0, colors: 0, pairs: 0, dropped: 0, candidates: 0, awake: n };
     this.statPending = false;
@@ -1082,7 +1096,7 @@ class GpuWorld {
     u[48] = this.levels; u[49] = GROUND_MAT; f[50] = 0.01; f[51] = 0.02;
     u[52] = L.ocount; u[53] = L.acc; u[54] = L.events; u[55] = this.maxEvents; u[58] = L.cawake;
     f[56] = this.evSpeed; f[57] = this.evEnergy;
-    u[60] = this.inheritCount || 0; u[61] = this.L.inherit;
+    u[60] = this.inheritCount || 0; u[61] = this.L.inherit; f[62] = this.wakeSpeed;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     return f;
   }
@@ -1090,6 +1104,11 @@ class GpuWorld {
   // Encode one 60 Hz step into `enc` (several compute passes; one timestamp pair per stage).
   encode(enc, dt = 1 / 60) {
     const d = this.device;
+    // Nothing awake at the start of a step whose stats we have, and nothing changed from JS since: the world is
+    // at rest and stays so; the step costs nothing (a settled city of rubble is free)
+    if (this.sleep && this.stats.awake === 0 && this.statsInputs === this.inputs && !this.wakeReq && !(this.pendingInherit && this.pendingInherit.length)) {
+      this.frame++; this.skipped = (this.skipped || 0) + 1; return;
+    }
     if (this.pendingInherit && this.pendingInherit.length) {
       const list = this.pendingInherit.splice(0, this.maxInherit);
       const u = new Uint32Array(list.length * 12), f = new Float32Array(u.buffer);
@@ -1124,6 +1143,9 @@ class GpuWorld {
     // Sizes that can never be too small (stats arrive late, so estimates from them could drop work): a body is
     // in at most one contact per colour, so a colour holds at most n contacts; everything else by capacity
     const perColour = wgCap(this.n + 1), perMan = wgCap(this.maxMan);
+    // colour passes loop over their contacts (grid stride), so they can be sized by the recent count with margin:
+    // a colour that grew is still solved in full, only by fewer threads
+    const colWg = this.colCounts.map(c => Math.min(perColour, wgCap(c * 1.5 + 256)));
     const dirWg = { 396: wgCap(this.maxPairs), 384: perMan };   // narrow (args 99), per-manifold (args 96)
     const ind = this.indirect
       ? (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); }
@@ -1144,7 +1166,7 @@ class GpuWorld {
     const C = this.colorLimit;
     const colors = (k) => {
       p.setPipeline(this.pl[k]);
-      for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); if (this.indirect) p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); else p.dispatchWorkgroups(perColour); }
+      for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); if (this.indirect) p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); else p.dispatchWorkgroups(colWg[c]); }
       p.setBindGroup(1, this.bg1, [0]);
       if (k === 'restitute') { ind(p, 'restitute_ovf', C * 12); return; }
       // overflow contacts: two Jacobi rounds with mass splitting
@@ -1169,7 +1191,7 @@ class GpuWorld {
     } else this.qCopied = 0;
     const sb = this.statBufs.find(b => !b.busy);
     if (sb) {
-      sb.busy = true; this.statNext = sb;
+      sb.busy = true; this.statNext = sb; sb.inputs = this.inputs;
       enc.copyBufferToBuffer(this.intBuf, 0, sb.buf, 0, 64);
       if (this.evEnergy > 0) enc.copyBufferToBuffer(this.intBuf, L.events * 4, sb.buf, 64, 48 * this.maxEvents);
       enc.copyBufferToBuffer(this.intBuf, L.ccount * 4, sb.buf, 64 + 48 * this.maxEvents, 33 * 4);
@@ -1187,6 +1209,7 @@ class GpuWorld {
   // ---- incremental edits (debris, a changing static structure)
   // Append bodies (same format as create); returns the index of the first new body (0-based).
   addBodies(list) {
+    this.inputs++;
     // never let a non-finite number in: one NaN body spreads NaN to everything it touches
     const fin = (a) => a && a.every(Number.isFinite);
     for (const b of list) {
@@ -1229,6 +1252,7 @@ class GpuWorld {
   // Static shapes of fixed body `body` (1-based body index): set (create when slot is null) or kill.
   // centre and half extents in metres, axis-aligned; returns the slot (1-based shape index).
   setStaticShape(slot, body, centre, half, mat) {
+    this.inputs++;
     const b = this.bodies[body - 1];
     if (slot == null) {
       if (this.freeShapes && this.freeShapes.length) slot = this.freeShapes.pop();
@@ -1248,6 +1272,7 @@ class GpuWorld {
   }
   // Retire a body: it stops moving and colliding (its slot is not reused).
   killBody(body) {
+    this.inputs++;
     const b = this.bodies[body - 1]; if (!b || b.dead) return;
     b.dead = true;
     const own = this.bodyShapes && this.bodyShapes.get(body);
@@ -1264,6 +1289,7 @@ class GpuWorld {
   // the parent's pose (pr, qr) of an older read-back; dv[k] is extra velocity for kid k (world frame then).
   // The parent stops colliding now and is retired at the next step, after its pieces have been placed.
   breakBody(parent, kids, pr, qr, dvs) {
+    this.inputs++;
     const b = this.bodies[parent - 1]; if (!b || b.dead) return;
     b.dead = true;
     const own = this.bodyShapes && this.bodyShapes.get(parent);
@@ -1286,15 +1312,17 @@ class GpuWorld {
   roomShapes() { return this.capS - this.ns + (this.freeShapes ? this.freeShapes.length : 0); }
   // Set a body's velocity and wake it (p, q: its current pose, which a wake records as its rest pose)
   setVelocity(body, v, w, p, q) {
+    this.inputs++;
     if (![...v, ...w, ...p, ...q].every(Number.isFinite)) { this.rejected = (this.rejected || 0) + 1; return; }
     const qd = this.device.queue;
     qd.writeBuffer(this.solBuf, body * 96, new Float32Array([...v, 1, ...w, 0]));
     qd.writeBuffer(this.bodBuf, body * 80 + 48, new Float32Array([0, ...p, ...q]));
   }
   // Wake all sleeping bodies at the next step (call when static shapes under them were removed).
-  wakeAll() { this.wakeReq = true; }
+  wakeAll() { this.wakeReq = true; this.inputs++; }
   takeEvents() { const e = this.events; this.events = []; return e; }
   killShape(slot) {
+    this.inputs++;
     const s = this.shapes[slot - 1]; if (!s || s.dead) return;
     s.dead = true;
     (this.freeShapes = this.freeShapes || []).push(slot);
@@ -1339,7 +1367,7 @@ class GpuWorld {
         }
       }
       if (seq < this.statLatest) return;
-      this.statLatest = seq;
+      this.statLatest = seq; this.statsInputs = sb.inputs;
       this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7] };
       this.colorLimit = Math.min(this.maxColors, 31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
       // per-colour contact counts (they size the direct dispatches): keep a slowly decaying maximum
@@ -1389,14 +1417,14 @@ class GpuWorld {
       pose.set([p[0] + wp[0], p[1] + wp[1], p[2] + wp[2], ...wq, ...s.h], k * 10);
       mats[k] = s.mat; cols[k] = s.col ?? s.mat;
     });
-    const body = new Float32Array(nb * 7), vel = new Float32Array(nb * 3), ang = new Float32Array(nb * 3), sleeping = new Uint8Array(nb);
+    const body = new Float32Array(nb * 7), vel = new Float32Array(nb * 3), ang = new Float32Array(nb * 3), sleeping = new Uint8Array(nb), timer = new Float32Array(nb);
     for (let i = 0; i < nb; i++) {
       const b = (i + 1) * 20, s = (i + 1) * 24;
       body.set(bod.subarray(b, b + 3), i * 7); body.set(bod.subarray(b + 4, b + 8), i * 7 + 3);
       vel.set(sol.subarray(s, s + 3), i * 3); ang.set(sol.subarray(s + 4, s + 7), i * 3);
-      sleeping[i] = bod[b + 12] > 0.5 ? 1 : 0;
+      sleeping[i] = bod[b + 12] > 0.5 ? 1 : 0; timer[i] = bod[b + 11];
     }
-    return { pose, mats, cols, slots: Uint32Array.from(slots), gens: Uint32Array.from(gens), body, vel, ang, sleeping, frame, n1, jsMs: performance.now() - t0 };
+    return { pose, mats, cols, slots: Uint32Array.from(slots), gens: Uint32Array.from(gens), body, vel, ang, sleeping, timer, frame, n1, jsMs: performance.now() - t0 };
   }
 
   // This step's contacts: bodies, restitution, normal impulse total (N s) and approach speed (m/s) per contact,

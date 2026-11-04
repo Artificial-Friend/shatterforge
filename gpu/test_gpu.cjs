@@ -241,6 +241,31 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       check('paircount', true, { candidates: counts });
     }
+    if (scenes.includes('rubble')) {
+      // a heap of mixed rubble falls and must come to rest: awake bodies per second, and of those how many are
+      // still because they themselves are at rest (kept awake by others in their island) or moving
+      let rnd = 11; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const N = +(globalThis.RUBBLE_N || 1500), list = [];
+      for (let i = 0; i < N; i++) {
+        const h = [0.05 + 0.25 * rand() ** 2, 0.05 + 0.15 * rand() ** 2, 0.05 + 0.25 * rand() ** 2];
+        list.push({ shapes: [{ p: [(rand() - 0.5) * 6, 0.5 + rand() * 12, (rand() - 0.5) * 6], q: qa([rand() - 0.5, rand() - 0.5, rand() - 0.5], rand() * 6), h, mat: i % 3 }], v: [(rand() - 0.5) * 2, -2, (rand() - 0.5) * 2], w: [0, 0, 0] });
+      }
+      const w = await GpuWorld.create(dev, list, { substeps: +(globalThis.RUBBLE_SUB || 12), sleep: true });
+      const rows = [];
+      for (let f = 1; f <= 600; f++) {
+        w.step(1 / 60);
+        if (f % 60 === 0) {
+          await dev.queue.onSubmittedWorkDone(); await settle();
+          const r = await w.readPose();
+          let awake = 0, still = 0, slow = 0, fast = 0;
+          for (let i = 0; i < N; i++) { if (r.sleeping[i]) continue; awake++; const v = speed(r.vel, i); if (r.timer[i] >= 0.5) still++; else if (v < 0.5) slow++; else fast++; }
+          rows.push({ t: f / 60, awake, stillInIsland: still, slowCreep: slow, fast, stages: w.gpuMs ? Object.fromEntries(Object.entries(w.gpuMs).map(([k, v]) => [k, +v.toFixed(1)])) : null });
+        }
+      }
+      w.destroy();
+      const last = rows[rows.length - 1];
+      check('rubble', last.awake < N * 0.05, { rows });
+    }
     if (scenes.includes('pile')) {
       E.pile_setup(2000, 4);
       const r = await run(GpuWorld.boxes(grab()), 120, { substeps: 4 });
