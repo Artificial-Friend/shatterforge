@@ -1238,6 +1238,8 @@ class GpuWorld {
         this.shapes.push(null);
       }
     }
+    // a new shape in this slot gets a new generation, so read-backs never take it for the slot's old shape
+    if (!this.shapes[slot - 1] || this.shapes[slot - 1].dead) { this.shapeGen = this.shapeGen || []; this.shapeGen[slot - 1] = (this.shapeGen[slot - 1] || 0) + 1; }
     const lp = [centre[0] - b.p[0], centre[1] - b.p[1], centre[2] - b.p[2]];
     const rec = { body, mat, lp, lq: [0, 0, 0, 1], h: half };
     this.shapes[slot - 1] = rec;
