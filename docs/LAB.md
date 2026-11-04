@@ -1,0 +1,107 @@
+# Lab: scenario checks as data
+
+The lab runs scripted destruction scenarios and reports what happened as numbers and pass/fail checks, not as screenshots. It runs the same way in a browser on a real GPU and headless on a software GPU.
+
+## How it works
+
+The lab drives the page's own frames on a **virtual clock** of 60 frames per second, however long each frame really takes. Each lab frame runs the page's real logic:
+- engine jobs
+- physics steps
+- read-backs
+- interpolation
+- the instance lists handed to the renderer
+
+Two kinds of work reach the page after a fixed number of frames, as they would on a real machine:
+- read-backs, `readLag` frames after they were issued (default 2)
+- engine jobs, `jobLag` frames after they were sent (default 4)
+
+The engine runs inline, and the worker's time is simulated by `jobLag`.
+
+The sub-steps are fixed at the default of 12, because adaptive sub-steps would make the runs depend on the machine. Settings are reset to their defaults for the run. The report lists them.
+
+A software GPU and a fast one therefore go through the same sequence of frames. The only differences are the wall time and the small nondeterminism of GPU atomics. Each scenario starts from a fresh page load.
+
+## Checks
+
+Every frame, against what would be drawn:
+
+| Check | What it catches |
+| --- | --- |
+| **Drawn volume below what exists.** The building mesh, debris and particles drawn add up to less than the static bricks and GPU bodies at any moment over the last few frames. | holes, missing parts, flicker |
+| **Drawn volume above what exists.** | a part drawn twice (still in the building mesh and already as debris) |
+| **Pieces that disappear and come back** within 30 frames | flicker of single pieces |
+| **Pieces that move further than their speed allows** between two frames | jumps, wrong matching of pieces between read-backs |
+
+At every read-back, against the physics:
+
+| Check | Limit |
+| --- | --- |
+| Invalid poses (NaN) | 0 |
+| Pieces below the ground (centre under −1 m) | 0 |
+| Rebounds over half the impact speed. A piece falling faster than 2 m/s moves up at more than half that speed at the next read-back. | 0 (concrete restitution is 0.1) |
+| Launches: pieces thrown up faster than 5 m/s | 0 |
+| Energy gains: the kinetic plus height energy of the bodies present at both read-backs rises by more than 5% (+2 kJ) | 0 |
+| Roof fall, for cut scenarios | at least one storey |
+| Settled: everything asleep before the end | yes |
+
+Pushes from outside are exempt for a while:
+- after a cut or blast: 30 frames
+- after a ball is fired: 120 frames
+
+The rebound, launch and energy checks do not count during those windows.
+
+## Report
+
+Each scenario gives:
+- the checks
+- physics:
+  - roof heights
+  - dust as a share of the building
+  - breaks
+  - particles made and crushed
+  - settle time
+- performance:
+  - GPU ms: median, 95th percentile and maximum, plus the stages of the slowest step
+  - JS ms per frame
+  - peak counts of bodies, awake bodies, contacts, particles and drawn instances
+  - work counters (contacts × sub-steps, particles × sub-steps)
+- the first 12 **events** of each kind, with frame numbers and details, for example a bounce event:
+  - the body and its size
+  - when the body was made
+  - its vertical speed before and after
+  - whether the page pushed it
+- a **timeline** of the engine jobs: frame, operation, new bodies, breaks and static updates
+- a **time series** every 10 frames
+- with `--trace a:b`: the position, velocity and spin, at every read-back, of the bodies made in that window, plus the biggest body
+
+## Scenarios
+
+| Name | What |
+| --- | --- |
+| `collapse` | concrete frame, 4 storeys: the ground storey cut (36 blasts), collapse, settle (600 frames) |
+| `ball` | concrete frame, 3 storeys: two steel balls into the facade (360) |
+| `masonry` | masonry, 3 storeys: ground storey cut (600) |
+| `timber` | mass timber, 3 storeys: ground storey cut (600) |
+| `rubble` | concrete frame, 3 storeys: cut, then a blast into the rubble (720) |
+
+Suites: `quick` (collapse, ball) and `full` (all five).
+
+## Running it
+
+**In the browser (real GPU).** Open the settings panel (O) and press **Run lab checks, quick** or **full**. The page reloads once per scenario. At the end the panel shows the summary, and **Copy** gives the full JSON.
+
+**Headless (software GPU).** From the repository root:
+
+```
+node game/lab.cjs quick                      # or full, or scenario names
+node game/lab.cjs collapse --frames 150      # a shortened run
+node game/lab.cjs collapse --trace 36:58     # trace the bodies made in frames 36-58
+node game/lab.cjs ball --read-lag 3 --job-lag 6
+```
+
+The runner prints the summaries and writes `lab-results/<scenario>.json` and `all.json`. It exits with 1 when a check fails. It needs Playwright and `three` (set `SF_NODE_MODULES` to a `node_modules` folder that has `three`). On the software GPU a 4-storey collapse step takes about 4 s, so 150 frames take about 10 minutes.
+
+## What it found first
+
+- **Particles flying across the scene.** A particle slot freed and reused while a read-back was in flight was matched by its new generation, so the old particle's position was blended into the new one: two crumbs moved 6 m and 15 m in one frame. The page now matches particles by their generation at the time the read-back was issued.
+- **The building bouncing.** The upper part of the building (about 1,900 t) landed on rubble crushed off its own base and rebounded at up to 2.5 m/s, throwing the rubble up at 4 m/s. Light pieces wedged between a body hundreds of times heavier and the ground do not converge in a few solver iterations. Restitution, push limits, more sub-steps and more colours did not change it. Contacts now limit the mass ratio to 20: the heavier body responds as if at most 20 times heavier. The GPU test `sandwich` (a 7,700 t block landing at 5.7 m/s on 24 pieces of 11 t) went from a 2.52 m/s rebound to 0.34 m/s, and the 20-box stack is unchanged.

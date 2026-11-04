@@ -1348,7 +1348,7 @@ class GpuWorld {
     const a1 = 2 * zeta + h * omega, a2 = h * omega * a1, a3 = 1 / (1 + a2);
     const f = new Float32Array(128), u = new Uint32Array(f.buffer);
     const cur = this.frame & 1, L = this.L;
-    f.set([0, -9.81, 0, h, invH, omega / a1, a2 * a3, a3, this.maxPush ?? 3.0, 1.0, 0.02, dt, this.cell]);
+    f.set([0, -9.81, 0, h, invH, omega / a1, a2 * a3, a3, this.maxPush ?? 1.0, 1.0, 0.02, dt, this.cell]);
     // the grid is sized by the shapes there are, not by capacity (it is cleared and scanned every step)
     let g = 256; while (g < 2 * this.ns1 && g < this.G) g *= 2; this.Geff = g;
     u[13] = this.n1; u[14] = g - 1; u[15] = this.maxMan;

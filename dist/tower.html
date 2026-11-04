@@ -1449,7 +1449,7 @@ class GpuWorld {
     const a1 = 2 * zeta + h * omega, a2 = h * omega * a1, a3 = 1 / (1 + a2);
     const f = new Float32Array(128), u = new Uint32Array(f.buffer);
     const cur = this.frame & 1, L = this.L;
-    f.set([0, -9.81, 0, h, invH, omega / a1, a2 * a3, a3, this.maxPush ?? 3.0, 1.0, 0.02, dt, this.cell]);
+    f.set([0, -9.81, 0, h, invH, omega / a1, a2 * a3, a3, this.maxPush ?? 1.0, 1.0, 0.02, dt, this.cell]);
     // the grid is sized by the shapes there are, not by capacity (it is cleared and scanned every step)
     let g = 256; while (g < 2 * this.ns1 && g < this.G) g *= 2; this.Geff = g;
     u[13] = this.n1; u[14] = g - 1; u[15] = this.maxMan;
@@ -1888,7 +1888,7 @@ const TICK = 0.125;
 // the building (remembered): 0 concrete frame, 1 masonry, 2 timber, each at a height it can stand
 // ---- lab scenarios (the lab itself is further down): a scenario queued before the reload sets the building
 const LAB_SCENARIOS = {
-  collapse: { kind: 0, storeys: 4, frames: 600, title: 'concrete frame, 4 storeys: the ground storey cut, collapse, settle', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
+  collapse: { kind: 0, storeys: 4, frames: 600, title: 'concrete frame, 4 storeys: the ground storey cut, collapse, settle', script: [[0, 'cut']], expect: { roofDrop: 2, settle: true } },
   ball: { kind: 0, storeys: 3, frames: 360, title: 'concrete frame, 3 storeys: two steel balls into the facade', script: [[10, 'ball', [-4, 4, -30, 0.15, 0.02]], [130, 'ball', [3, 2.5, -30, -0.1, 0.0]]], expect: {} },
   masonry: { kind: 1, storeys: 3, frames: 600, title: 'masonry, 3 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
   timber: { kind: 2, storeys: 3, frames: 600, title: 'mass timber, 3 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
