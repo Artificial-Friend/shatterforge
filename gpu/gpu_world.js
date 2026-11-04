@@ -48,6 +48,7 @@ struct Params {
   np1: u32, pcell: f32, pg_mask: u32, p_wake: u32,
   p_h: f32, n_blast: u32, p_cap: u32, pad9: u32,
   blast: array<vec4f, 6>,   // particle blasts: (centre, reach), (speed, -, -, -)
+  o_ptab: u32, ptab_mask: u32, o_big: u32, o_mslot: u32,   // contact reduction (see red_count)
 }
 struct ColorU { c: u32 }
 
@@ -411,7 +412,7 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   var ojn = vec4f(0.0); var ocnt = 0u;
   if (old != 0xffffffffu) {
     let ob = old * MS; let oc = old * CS;
-    let ohd = man[ob]; ocnt = u32(ohd.z); ojn = man[ob + M_JN];
+    let ohd = man[ob]; ocnt = u32(ohd.z) & 7u; ojn = man[ob + M_JN];
     let olaf = cold[oc + 4u].xyz; let olbf = cold[oc + 5u].xyz;
     if (ohd.w > 0.5) {
       let wa_ = pa + Ra * olaf;
@@ -536,10 +537,90 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
   }
 }
 
+// ---------------------------------------------------------------- contact reduction
+// Two bodies touching through many shape pairs (the upper part of a building on a floor: hundreds of brick
+// contacts) keep only representative ones: per body pair, the contacts furthest out in 26 directions (the
+// corners, edges and faces of a cube) and the deepest. That supports the body at its extremes with a small set the solver can handle
+// one by one; with all of them, most went to the parallel overflow pass, which did not take back the push-out
+// (a large body landing on a brick floor rebounded at 1.1 m/s where concrete gives 0.59). A dropped contact
+// that starts to sink becomes the deepest and is kept the next step.
+const RED_K = 32u;   // pairs with more contacts than this are reduced; slots: 26 directions + the deepest
+const RED_D = 26u;
+const C_NBIG = 14u; const RED_NBIG = 4096u;
+fn f2o(x: f32) -> u32 { let b = bitcast<u32>(x); return select(b | 0x80000000u, ~b, (b & 0x80000000u) != 0u); }
+// the 26 directions to the neighbours of a cube cell (corners, edges, faces)
+fn red_dir(k: u32) -> vec3f {
+  let j = select(k, k + 1u, k >= 13u);   // skip the centre (13)
+  return vec3f(f32(j % 3u) - 1.0, f32((j / 3u) % 3u) - 1.0, f32(j / 9u) - 1.0);
+}
+// (the pair's slot in the table, or none)
+fn red_slot(mi: u32) -> u32 { return ld(P.o_mslot + mi); }
+@compute @workgroup_size(64) fn red_count(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let hd = man[(P.cur_base + mi) * MS]; let a = u32(hd.x); let b = u32(hd.y);
+  st(P.o_mslot + mi, 0xffffffffu);
+  if (u32(hd.z) == 0u) { return; }
+  let key = (min(a, b) | (max(a, b) << 16u)) + 1u;
+  var h = (key * 2654435761u) & P.ptab_mask;
+  for (var t = 0u; t < 64u; t++) {
+    let o = P.o_ptab + 3u * h;
+    let r = atomicCompareExchangeWeak(&ints[o], 0u, key);
+    if (r.exchanged || r.old_value == key) { atomicAdd(&ints[o + 1u], 1u); st(P.o_mslot + mi, h); return; }
+    if (r.old_value != 0u) { h = (h + 1u) & P.ptab_mask; }
+  }
+}
+fn man_centre(mi: u32) -> vec4f {
+  let base = (P.cur_base + mi) * MS; let hd = man[base]; let cnt = u32(hd.z);
+  let pa = B(u32(hd.x), F_P).xyz;
+  var c = vec3f(0.0); var smin = 1e9;
+  for (var k = 0u; k < cnt; k++) { let q = man[base + M_PT + 2u * k]; c += q.xyz; smin = min(smin, q.w); }
+  return vec4f(pa + c / f32(max(cnt, 1u)), smin);
+}
+@compute @workgroup_size(64) fn red_score(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let h = red_slot(mi); if (h == 0xffffffffu) { return; }
+  let o = P.o_ptab + 3u * h;
+  if (ld(o + 1u) <= RED_K) { return; }
+  // this pair's place among the reduced ones
+  var big = ld(o + 2u);
+  if (big == 0u) {
+    let n = atomicAdd(&ints[C_NBIG], 1u) + 1u;
+    for (var t = 0u; t < 16u; t++) {
+      let r = atomicCompareExchangeWeak(&ints[o + 2u], 0u, n);
+      if (r.exchanged) { big = n; break; }
+      if (r.old_value != 0u) { big = r.old_value; break; }
+    }
+  }
+  if (big == 0u || big > RED_NBIG) { return; }
+  let c = man_centre(mi); let bo = P.o_big + (big - 1u) * 64u;
+  for (var k = 0u; k < RED_D; k++) { atomicMax(&ints[bo + k], f2o(dot(c.xyz, red_dir(k)))); }
+  atomicMax(&ints[bo + RED_D], f2o(-c.w));
+}
+@compute @workgroup_size(64) fn red_pick(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let h = red_slot(mi); if (h == 0xffffffffu) { return; }
+  let big = ld(P.o_ptab + 3u * h + 2u); if (big == 0u || big > RED_NBIG) { return; }
+  let c = man_centre(mi); let bo = P.o_big + (big - 1u) * 64u;
+  for (var k = 0u; k < RED_D; k++) { if (f2o(dot(c.xyz, red_dir(k))) == ld(bo + k)) { atomicMax(&ints[bo + 32u + k], mi + 1u); } }
+  if (f2o(-c.w) == ld(bo + RED_D)) { atomicMax(&ints[bo + 32u + RED_D], mi + 1u); }
+}
+@compute @workgroup_size(64) fn red_apply(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let h = red_slot(mi); if (h == 0xffffffffu) { return; }
+  let big = ld(P.o_ptab + 3u * h + 2u); if (big == 0u || big > RED_NBIG) { return; }
+  let bo = P.o_big + (big - 1u) * 64u;
+  for (var k = 32u; k <= 32u + RED_D; k++) { if (ld(bo + k) == mi + 1u) { return; } }
+  // not kept: marked (+8 on the point count) so the colouring and the solver skip it, while its points and
+  // impulses stay for the warm start of the next step (where it may be kept again)
+  let base = (P.cur_base + mi) * MS; let hd = man[base];
+  man[base] = vec4f(hd.x, hd.y, hd.z + 8.0, hd.w);
+}
+
 // ---------------------------------------------------------------- colouring
 fn mhdr(m: u32) -> vec2u { let h = man[m * MS]; return vec2u(u32(h.x), u32(h.y)); }
 @compute @workgroup_size(64) fn color(@builtin(global_invocation_id) g: vec3u) {
   let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  if (u32(man[(P.cur_base + mi) * MS].z) >= 8u) { st(P.o_mcolor + mi, 0xffffffffu); return; }   // (reduced away)
   let ab = mhdr(P.cur_base + mi); let a = ab.x; let b = ab.y;
   let da = dyn_awake(a); let db = dyn_awake(b);
   var col = P.color_limit;
@@ -564,7 +645,7 @@ fn mhdr(m: u32) -> vec2u { let h = man[m * MS]; return vec2u(u32(h.x), u32(h.y))
 }
 @compute @workgroup_size(64) fn color_scatter(@builtin(global_invocation_id) g: vec3u) {
   let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
-  let c = ld(P.o_mcolor + mi);
+  let c = ld(P.o_mcolor + mi); if (c == 0xffffffffu) { return; }
   let m = P.cur_base + mi;
   st(P.o_order + ld(P.o_cstart + c) + atomicAdd(&ints[P.o_cfill + c], 1u), m);
   let ab = mhdr(m);
@@ -592,7 +673,7 @@ fn mhdr(m: u32) -> vec2u { let h = man[m * MS]; return vec2u(u32(h.x), u32(h.y))
   for (var k = s0; k < s1; k++) {
     let e = ld(P.o_blist + k); let m = e >> 1u; let side_b = (e & 1u) != 0u;
     let base = m * MS;
-    let cnt = u32(man[base].z);
+    let cnt = u32(man[base].z) & 7u;
     let n = man[base + M_N].xyz; let tt = tangents(n);
     let jn = man[base + M_JN]; let jt = man[base + M_JT];
     let off = select(0u, 1u, side_b);
@@ -811,7 +892,7 @@ fn ovf_item(g: u32) -> u32 { let r = ovf_range(); if (r.x + g >= r.y) { return 0
   let out = man[base + M_OUT];
   if (out.z < P.ev_speed || 0.5 * out.y * out.z < P.ev_energy) { return; }
   let k = atomicAdd(&ints[C_EVENTS], 1u); if (k >= P.max_events) { return; }
-  let hd = man[base]; let a = u32(hd.x); let cnt = u32(hd.z);
+  let hd = man[base]; let a = u32(hd.x); let cnt = u32(hd.z) & 7u;
   var pt = vec3f(0.0); for (var q = 0u; q < cnt; q++) { pt += man[base + M_PT + 2u * q].xyz; }
   pt = pt / f32(max(cnt, 1u)) + B(a, F_P).xyz;
   let n = man[base + M_N].xyz;
@@ -1260,6 +1341,10 @@ class GpuWorld {
     take('t0', T); take('t1', T);
     take('pairs', 2 * this.maxPairs); take('bcount', cb1); take('bstart', cb1); take('bfill', cb1);
     take('blist', 2 * this.maxMan); take('par', cb1); take('mint', cb1); take('ocount', cb1); take('acc', 6 * cb1);
+    // contact reduction: a table of body pairs (key, count, reduced index), the reduced pairs' picks, each
+    // contact's pair slot
+    let TP = 1024; while (TP < 2 * this.maxMan) TP *= 2; this.TP = TP;
+    take('ptab', 3 * TP); take('big', 64 * 4096); take('mslot', this.maxMan);
     this.maxEvents = 512; take('events', 12 * this.maxEvents);
     this.maxInherit = 4096; take('inherit', 12 * this.maxInherit);
     this.L = L; this.nInts = o;
@@ -1282,7 +1367,7 @@ class GpuWorld {
     this.intBuf = buf(this.nInts * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC);
     this.manBuf = buf(2 * this.maxMan * 17 * 16, U.STORAGE | U.COPY_SRC);
     this.coldBuf = buf(2 * this.maxMan * 6 * 16, U.STORAGE);
-    this.parBuf = buf(512, U.UNIFORM | U.COPY_DST);
+    this.parBuf = buf(1024, U.UNIFORM | U.COPY_DST);
     const cu = new Uint32Array(64 * 33); for (let c = 0; c < 33; c++) cu[c * 64] = c;
     this.colBuf = buf(256 * 33, U.UNIFORM | U.COPY_DST, cu);
     this.argBuf = buf(128 * 4, U.STORAGE | U.INDIRECT);
@@ -1328,7 +1413,7 @@ class GpuWorld {
     const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire'];
+                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_score', 'red_pick', 'red_apply'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
@@ -1348,7 +1433,7 @@ class GpuWorld {
     const sub = this.substeps, h = dt / sub, invH = 1 / h;
     const hz = invH / 6, omega = 2 * Math.PI * hz, zeta = 10;
     const a1 = 2 * zeta + h * omega, a2 = h * omega * a1, a3 = 1 / (1 + a2);
-    const f = new Float32Array(128), u = new Uint32Array(f.buffer);
+    const f = new Float32Array(256), u = new Uint32Array(f.buffer);
     const cur = this.frame & 1, L = this.L;
     f.set([0, -9.81, 0, h, invH, omega / a1, a2 * a3, a3, this.maxPush ?? 1.0, 1.0, 0.02, dt, this.cell]);
     // the grid is sized by the shapes there are, not by capacity (it is cleared and scanned every step)
@@ -1366,6 +1451,9 @@ class GpuWorld {
     u[52] = L.ocount; u[53] = L.acc; u[54] = L.events; u[55] = this.maxEvents; u[58] = L.cawake;
     f[56] = this.evSpeed; f[57] = this.evEnergy;
     u[60] = this.inheritCount || 0; u[61] = this.L.inherit; f[62] = this.wakeSpeed;
+    // the pair table sized by the contacts there were (as the grid), up to its capacity
+    let tp = 1024; while (tp < 2 * ((this.stats.manifolds || 0) * 1.5 + 2048) && tp < this.TP) tp *= 2; this.TPeff = tp;
+    u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
       let pgE = 256; while (pgE < 2 * this.np && pgE < this.PG) pgE *= 2; this.PGeff = pgE;
@@ -1400,6 +1488,7 @@ class GpuWorld {
     if (this.statCopied === false) { clr(0, 7); clr(8, 8); } else clr(0, 16);
     clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
+    if (this.reduce !== false) { clr(L.ptab, 3 * this.TPeff); clr(L.big, 64 * 4096); }
     if (this.capP && this.np) { enc.clearBuffer(this.pintBuf, 0, this.PGeff * 4); enc.clearBuffer(this.pintBuf, 2 * this.PGeff * 4, this.PGeff * 4); }
     if (!this.n) { this.frame++; return; }
     const nb = Math.ceil(this.n / 64) || 1, nsh = Math.ceil(this.ns / 64) || 1;
@@ -1439,7 +1528,9 @@ class GpuWorld {
     p = pass(null, true); run(p, 'pair_args', 1); p.end();
     p = pass('narrow'); ind(p, 'narrow', 99 * 4); p.end();
     p = pass(null, true); run(p, 'man_args', 1); p.end();
-    p = pass('colour'); ind(p, 'color', 96 * 4); run(p, 'adj_scan', 1); p.end();
+    p = pass('colour');
+    if (this.reduce !== false) for (const k of ['red_count', 'red_score', 'red_pick', 'red_apply']) ind(p, k, 96 * 4);
+    ind(p, 'color', 96 * 4); run(p, 'adj_scan', 1); p.end();
     p = pass(null, true); run(p, 'color_scan', 1); p.end();
     p = pass('sub-steps');
     ind(p, 'color_scatter', 96 * 4);
