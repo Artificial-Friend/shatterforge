@@ -468,7 +468,9 @@ fn wake(i: u32) {
 fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o)); }
 @compute @workgroup_size(64) fn inherit(@builtin(global_invocation_id) g: vec3u) {
   let k = g.x; if (k >= P.n_inherit) { return; }
-  let kid = ld(P.o_inherit + k * 12u); let par = ld(P.o_inherit + k * 12u + 1u);
+  let kid = ld(P.o_inherit + k * 12u); let praw = ld(P.o_inherit + k * 12u + 1u);
+  // the high bit: dv is the piece's own velocity (a part cut free keeps falling while the parent was stopped)
+  let absolute = (praw & 0x80000000u) != 0u; let par = praw & 0x7fffffffu;
   if (kid == 0u || par == 0u) { return; }
   let pr = vec3f(inh(k, 2u), inh(k, 3u), inh(k, 4u));
   let qr = vec4f(inh(k, 5u), inh(k, 6u), inh(k, 7u), inh(k, 8u));
@@ -481,12 +483,13 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
   let q = normalize(qmul(rd, qk));
   setB(kid, F_P, vec4f(p, pk.w)); setB(kid, F_Q, q);
   setB(kid, F_FL, vec4f(0.0, p)); setB(kid, F_RQ, q);
+  if (absolute) { setS(kid, S_V, vec4f(dv, S(kid, S_V).w)); return; }
   let v = vn + cross(wn, p - pn) + qrot(rd, dv);
   setS(kid, S_V, vec4f(v, S(kid, S_V).w)); setS(kid, S_W, vec4f(wn, 0.0));
 }
 @compute @workgroup_size(64) fn retire(@builtin(global_invocation_id) g: vec3u) {
   let k = g.x; if (k >= P.n_inherit) { return; }
-  let kid = ld(P.o_inherit + k * 12u); let par = ld(P.o_inherit + k * 12u + 1u);
+  let kid = ld(P.o_inherit + k * 12u); let par = ld(P.o_inherit + k * 12u + 1u) & 0x7fffffffu;
   if (kid != 0u || par == 0u) { return; }
   setB(par, F_P, vec4f(0.0, -1000.0, 0.0, 0.0)); setB(par, F_FL, vec4f(1.0, 0.0, -1000.0, 0.0));
   setS(par, S_V, vec4f(0.0)); setS(par, S_W, vec4f(0.0));
@@ -1258,7 +1261,12 @@ class GpuWorld {
     const own = this.bodyShapes && this.bodyShapes.get(parent);
     if (own) { for (const k of own) if (this.shapes[k - 1] && this.shapes[k - 1].body === parent) this.killShape(k); this.bodyShapes.delete(parent); }
     this.pendingInherit = this.pendingInherit || []; this.retiring = this.retiring || [];
-    kids.forEach((kid, k) => { if (kid) this.pendingInherit.push([kid, parent, ...pr, ...qr, ...(dvs[k] || [0, 0, 0])]); });
+    // dvs[k]: [dx, dy, dz] beyond the parent's motion, or { v: [..] } for a velocity of its own
+    kids.forEach((kid, k) => {
+      if (!kid) return;
+      const d = dvs[k] || [0, 0, 0], own = !Array.isArray(d);
+      this.pendingInherit.push([kid, own ? (parent | 0x80000000) >>> 0 : parent, ...pr, ...qr, ...(own ? d.v : d)]);
+    });
     this.pendingInherit.push([0, parent, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
     this.retiring.push(parent);
   }

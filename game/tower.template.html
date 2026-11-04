@@ -153,7 +153,9 @@ function chunkMesh(k) {
 }
 
 // ---- debris (GPU bodies), drawn as instanced boxes
-const MAXD = 40000;
+// every debris shape the GPU can hold is drawn: with fewer instances than shapes, which ones were left out
+// changed from frame to frame (flicker, half the building gone)
+const MAXD = 140000;
 const dMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(2, 2, 2), new THREE.MeshLambertMaterial(), MAXD);
 dMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); dMesh.count = 0;
 // debris moves every frame: never cull it by a bounding sphere computed once (it was computed while empty, so
@@ -640,9 +642,12 @@ function onImpacts(job, r) {
     const made = addPieces(kids, xf, (cc, b) => {
       const rr = [cc[0] - xf.p[0], cc[1] - xf.p[1], cc[2] - xf.p[2]];
       const rigid = [vNow[0] + w0[1] * rr[2] - w0[2] * rr[1], vNow[1] + w0[2] * rr[0] - w0[0] * rr[2], vNow[2] + w0[0] * rr[1] - w0[1] * rr[0]];
-      const dv = b.hit ? [0, 0, 0] : [vFree[0] - vNow[0], vFree[1] - vNow[1], vFree[2] - vNow[2]];
+      // parts at the contacts move on with the parent as it is now (stopped by the hit); parts cut free keep
+      // the velocity they had before it, of their own
+      const dv = [0, 0, 0];
       if (b.id < 0) for (let k = 0; k < 3; k++) dv[k] += (Math.random() - 0.5) * 2;   // crushed crumbs scatter
       if (b.id < 0 && job.blastC) { const dd = [cc[0] - job.blastC[0], cc[1] - job.blastC[1], cc[2] - job.blastC[2]], l = Math.hypot(...dd) || 1; for (let k = 0; k < 3; k++) dv[k] += dd[k] / l * (2 + 2 * Math.random()); }
+      if (!b.hit) { const v = [vFree[0] + w0[1] * rr[2] - w0[2] * rr[1], vFree[1] + w0[2] * rr[0] - w0[0] * rr[2], vFree[2] + w0[0] * rr[1] - w0[1] * rr[0]]; extra.push({ v }); return { v, w: w0.slice() }; }
       extra.push(dv);
       return { v: [rigid[0] + dv[0], rigid[1] + dv[1], rigid[2] + dv[2]], w: w0.slice() };
     }, 0);
@@ -891,7 +896,7 @@ function hud() {
   $('hud').innerHTML = [
     `<b>${fps.toFixed(0)} fps</b> · ${fly ? 'flying' : 'walking'} · storey <b>${storey === 0 ? 'G' : storey}</b>`,
     `<span class="k">bricks</span> ${E.bricks_alive().toLocaleString()} · <span class="k">joints</span> ${E.joints_live().toLocaleString()} · ${E.bytes_per_brick().toFixed(0)} B/brick`,
-    gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake` : `<span class="k">debris physics</span> off (no WebGPU)`,
+    gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake${snapCur && snapCur.pose.length / 10 > MAXD ? ` · <b>${(snapCur.pose.length / 10 - MAXD).toLocaleString()} not drawn</b>` : ''}` : `<span class="k">debris physics</span> off (no WebGPU)`,
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'}` : '',
     gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
