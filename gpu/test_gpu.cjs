@@ -389,6 +389,12 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
   }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
+  // the results for docs/STATUS.md (tools/status.py)
+  try {
+    const out = process.env.SF_GPU_OUT || require('path').join(__dirname, '..', 'lab-results', 'gpu.json');
+    require('fs').mkdirSync(require('path').dirname(out), { recursive: true });
+    require('fs').writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), scenes: process.argv.slice(2), results: res }));
+  } catch (e) {}
   await b.close();
   process.exit(fail ? 1 : 0);
 })();
