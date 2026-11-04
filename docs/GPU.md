@@ -122,6 +122,8 @@ Crumbs are particles: spheres of the brick's volume, drawn as the bricks they ar
 4. **One way.** Particles do not push bodies: a box dropped on a heap sinks to the floor and pushes the particles aside. A particle pressed from opposite sides by two shapes (that box on the floor) is crushed to dust (state 3; the page frees it).
 5. **Rest.** A particle sleeps after 0.5 s touching something and staying within 1 cm of where its timer restarted. A particle wedged among sleeping ones may jitter in place without going anywhere, and a speed test kept such particles awake indefinitely.
 
+**Candidates once per step.** Each particle gathers the particles (up to 24) and shapes (up to 12) it can reach this step, from its speed, and the sub-steps test only those. In the tower benchmark (12,600 crumbs in the air) this cut the particle stage from 18 s to 0.8 s per step on the software GPU, below the rigid sub-steps; the poured heap comes out the same.
+
 Particles cut from a moving body wait (state 4) and are placed at the next step from the parent's pose then, like its pieces (`breakBody(parent, kids, pr, qr, dvs, parts, pdvs)`).
 
 ## Validation (`node gpu/test_gpu.cjs`, headless Chrome with SwiftShader WebGPU)
