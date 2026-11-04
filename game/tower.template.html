@@ -173,7 +173,7 @@ function debrisColour(code, k) {
   return colTmp.setRGB(c[0] * s, c[1] * s, c[2] * s);
 }
 const M4 = new THREE.Matrix4(), QQ = new THREE.Quaternion(), PP = new THREE.Vector3(), SS = new THREE.Vector3();
-let reading = 0, debrisShapes = 0, pendingChunks = null, readGen = 0, blastGen = 0;
+let reading = 0, debrisShapes = 0, pendingChunks = [], readGen = 0;
 // Debris poses come back from the GPU a frame or more late, and not every frame: they are drawn blended
 // between the last two read-backs (matched shape by shape), so motion stays smooth.
 let snapPrev = null, snapCur = null, stepsDone = 0, readsDone = 0, readSeq = 0, readLatest = 0, stepsAtRead = 0;
@@ -187,7 +187,7 @@ const MAX_READS = 3;
 function pullDebris() {
   if (!gpu || !diag.readback || reading >= MAX_READS) return;
   reading++;
-  const gen = blastGen, seq = ++readSeq, issuedAt = stepsDone;
+  const seq = ++readSeq, issuedAt = stepsDone;
   const tr = performance.now();
   gpu.readPose(debrisFrom).then(r => {
     perfAdd('read wait', performance.now() - tr);
@@ -195,10 +195,16 @@ function pullDebris() {
     if (seq < readLatest) return;
     readLatest = seq; readsDone++; stepsAtRead = Math.max(stepsAtRead, issuedAt);
     const t0 = performance.now();
-    // the tower mesh changes in the same frame as the debris that replaces it appears (no gap)
-    if (pendingChunks && gen === blastGen) { for (const k of pendingChunks) chunkMesh(k); pendingChunks = null; }
+    // the building's mesh changes in the frame the debris that replaces it first shows: with the first
+    // read-back issued after that debris was made
+    if (pendingChunks.length) {
+      const due = new Set(), keep = [];
+      for (const e of pendingChunks) { if (e.need <= seq) due.add(e.k); else keep.push(e); }
+      pendingChunks = keep; for (const k of due) chunkMesh(k);
+    }
     r.t = performance.now();
-    r.index = new Map(); for (let k = 0; k < r.slots.length; k++) r.index.set(r.slots[k], k);
+    // shapes are matched between read-backs by slot and generation (a reused slot holds another body)
+    r.index = new Map(); for (let k = 0; k < r.slots.length; k++) r.index.set(r.gens[k] * 1048576 + r.slots[k], k);
     snapPrev = snapCur; snapCur = r;
     velHist.unshift({ v: r.vel, frame: r.frame }); if (velHist.length > 4) velHist.pop(); lastReadFrame = r.frame; lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
     const n = Math.min(MAXD, r.pose.length / 10);
@@ -217,7 +223,7 @@ function drawDebris(now) {
   const n = Math.min(MAXD, r.pose.length / 10);
   for (let k = 0; k < n; k++) {
     const o = k * 10;
-    const j = p && a < 1 ? p.index.get(r.slots[k]) : undefined;
+    const j = p && a < 1 ? p.index.get(r.gens[k] * 1048576 + r.slots[k]) : undefined;
     if (j !== undefined) {
       const q = j * 10, b = 1 - a;
       PP.set(p.pose[q] * b + r.pose[o] * a, p.pose[q + 1] * b + r.pose[o + 1] * a, p.pose[q + 2] * b + r.pose[o + 2] * a);
@@ -286,7 +292,7 @@ function applyStatic(updates) {
 // Add bodies whose boxes are in the tower frame. xf: tower frame -> world { R, T, C } (identity when absent);
 // vel(c): the velocity a body starts with at world point c, and its spin.
 function addPieces(list, xf, vel, cool) {
-  if (!gpu || !list.length) return;
+  if (!gpu || !list.length) return { idxs: [], list: [] };
   // capacity: bodies and shapes (slots of retired bodies are not reused)
   let room = gpu.roomBodies(), sroom = gpu.roomShapes(), k = 0;
   while (k < list.length && room > 0 && sroom >= list[k].boxes.length) { sroom -= list[k].boxes.length; room--; k++; }
@@ -312,10 +318,11 @@ function addPieces(list, xf, vel, cool) {
     if (!gb) return;
     bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, v0: bodies[k].v, f0: gpu.frame, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: performance.now() + (cool || 0) });
   });
+  return { idxs, list };
 }
 function remeshDirty() {
   const dirty = []; for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) dirty.push(k);
-  if (gpu) { pendingChunks = (pendingChunks || []).concat(dirty); blastGen++; } else dirty.forEach(chunkMesh);
+  if (gpu) { for (const k of dirty) pendingChunks.push({ k, need: readSeq + 1 }); } else dirty.forEach(chunkMesh);
 }
 let lastBlast = '', structPending = false, structRounds = 0, failedJoints = 0, breaks = 0, structRatio = 0;
 let dustBricks = 0, impactMs = 0, dropped = 0, workerMs = 0;
@@ -625,15 +632,20 @@ function onImpacts(job, r) {
     if (window.__dbg) console.warn(`break piece ${parent} (body ${idx}, ${M.toFixed(0)} kg): crumbs ${kids.filter(k => k.id < 0).length}, parts ${kids.filter(k => k.id >= 0 && k.boxes.length > 20).map(k => (k.hit ? 'H' : 'F') + k.boxes.length).join(' ')} · vPre ${vPre.map(v => v.toFixed(2))} (${c.vPre ? 'history' : 'impulse'}) vPost ${c.vPost.map(v => v.toFixed(2))} · D ${D.map(v => v.toFixed(2))} · E ${(cap / 1e6).toFixed(2)} MJ mFree ${mFree.toFixed(0)} · speed ${speed.toFixed(2)} -> ${after.toFixed(2)}`);
     // the hit parts move on as the body does now
     const vNow = velOf(idx), w0 = c.w0;
-    gpu.killBody(idx); bodyInfo.delete(idx);
-    addPieces(kids, xf, (cc, b) => {
+    bodyInfo.delete(idx);
+    // the pieces are made where the parent was in the read-back (xf); the GPU carries them along by the parent's
+    // motion since then at the step they appear, so each one only needs its velocity beyond the parent's own
+    const extra = [];
+    const made = addPieces(kids, xf, (cc, b) => {
       const rr = [cc[0] - xf.p[0], cc[1] - xf.p[1], cc[2] - xf.p[2]];
-      const base = b.hit ? vNow : vFree;
-      const v = [base[0] + w0[1] * rr[2] - w0[2] * rr[1], base[1] + w0[2] * rr[0] - w0[0] * rr[2], base[2] + w0[0] * rr[1] - w0[1] * rr[0]];
-      if (b.id < 0) for (let k = 0; k < 3; k++) v[k] += (Math.random() - 0.5) * 2;   // crushed crumbs scatter
-      if (b.id < 0 && job.blastC) { const dd = [cc[0] - job.blastC[0], cc[1] - job.blastC[1], cc[2] - job.blastC[2]], l = Math.hypot(...dd) || 1; for (let k = 0; k < 3; k++) v[k] += dd[k] / l * (2 + 2 * Math.random()); }
-      return { v, w: w0.slice() };
+      const rigid = [vNow[0] + w0[1] * rr[2] - w0[2] * rr[1], vNow[1] + w0[2] * rr[0] - w0[0] * rr[2], vNow[2] + w0[0] * rr[1] - w0[1] * rr[0]];
+      const dv = b.hit ? [0, 0, 0] : [vFree[0] - vNow[0], vFree[1] - vNow[1], vFree[2] - vNow[2]];
+      if (b.id < 0) for (let k = 0; k < 3; k++) dv[k] += (Math.random() - 0.5) * 2;   // crushed crumbs scatter
+      if (b.id < 0 && job.blastC) { const dd = [cc[0] - job.blastC[0], cc[1] - job.blastC[1], cc[2] - job.blastC[2]], l = Math.hypot(...dd) || 1; for (let k = 0; k < 3; k++) dv[k] += dd[k] / l * (2 + 2 * Math.random()); }
+      extra.push(dv);
+      return { v: [rigid[0] + dv[0], rigid[1] + dv[1], rigid[2] + dv[2]], w: w0.slice() };
     }, 0);
+    gpu.breakBody(idx, made.idxs, xf.p, xf.q, extra.slice(0, made.idxs.length));
     breaks++;
   }
   if (window.__dbg && nbr) console.warn(`last cut: contacts at ${f[o].toFixed(0)} ticks, plane ${f[o + 1]}, capacity ${f[o + 2].toFixed(0)} MN, ${f[o + 3].toFixed(1)} MJ/m, needed ${f[o + 4].toFixed(0)} MN, squeezed ${f[o + 5]}`);

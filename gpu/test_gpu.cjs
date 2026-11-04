@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -170,6 +170,34 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       for (let f = 1; f <= 600; f++) { w.step(1 / 60); if (f % 60 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); awake.push(w.stats.awake); } }
       w.destroy();
       check('sleep', awake[awake.length - 1] < 300, { awake_per_s: awake });
+    }
+    if (scenes.includes('inherit')) {
+      // a tumbling falling body is broken from a read-back 10 steps old: its two halves must appear where the body
+      // is now, moving as it moves (not where it was)
+      const w = await GpuWorld.create(dev, [{ shapes: [{ p: [-0.5, 20, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.25], mat: 0 }, { p: [0.5, 20, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.25], mat: 0 }], v: [3, 0, 1], w: [0, 0, 2] }], { substeps: 12, sleep: false, maxBodies: 8, maxShapes: 16 });
+      for (let f = 0; f < 10; f++) w.step(1 / 60);
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      const r0 = await w.readPose();
+      const p0 = Array.from(r0.body.subarray(0, 3)), q0 = Array.from(r0.body.subarray(3, 7));
+      const halves = [0, 1].map(k => ({ shapes: [{ p: Array.from(r0.pose.subarray(k * 10, k * 10 + 3)), q: Array.from(r0.pose.subarray(k * 10 + 3, k * 10 + 7)), h: [0.5, 0.25, 0.25], mat: 0 }], v: [0, 0, 0], w: [0, 0, 0] }));
+      for (let f = 0; f < 10; f++) w.step(1 / 60);
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      const rNow = await w.readPose();
+      const truth = [0, 1].map(k => Array.from(rNow.pose.subarray(k * 10, k * 10 + 3)));
+      const vTruth = Array.from(rNow.vel.subarray(0, 3));
+      const kids = w.addBodies(halves);
+      w.breakBody(1, kids, p0, q0, [[0, 0, 0], [0, 0, 0]]);
+      w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+      const r1 = await w.readPose(2);
+      // one more step happened: compare with the truth moved by that step (about v dt)
+      let err = 0; for (let k = 0; k < 2; k++) for (let a = 0; a < 3; a++) err = Math.max(err, Math.abs(r1.pose[k * 10 + a] - truth[k][a] - vTruth[a] / 60));
+      const vk = Array.from(r1.vel.subarray((kids[0] - 1) * 3, (kids[0] - 1) * 3 + 3));
+      // the half's velocity is the parent's at its place: v + w x r (and one more step of gravity)
+      const wp = Array.from(rNow.ang.subarray(0, 3)), pc = Array.from(rNow.body.subarray(0, 3)), rr = [0, 1, 2].map(a => truth[0][a] - pc[a]);
+      const vExp = [vTruth[0] + wp[1] * rr[2] - wp[2] * rr[1], vTruth[1] + wp[2] * rr[0] - wp[0] * rr[2] - 9.81 / 60, vTruth[2] + wp[0] * rr[1] - wp[1] * rr[0]];
+      const verr = Math.max(...[0, 1, 2].map(a => Math.abs(vk[a] - vExp[a])));
+      w.destroy();
+      check('inherit', err < 0.05 && verr < 0.2, { maxError_m: err, velocityError: verr, vKid: vk, vExpected: vExp, kids });
     }
     if (scenes.includes('reuse')) {
       // bodies retired and new ones made in their slots while everything is in contact (as when pieces break)

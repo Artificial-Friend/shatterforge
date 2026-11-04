@@ -43,6 +43,7 @@ struct Params {
   levels: u32, ground_mat: u32, sleep_dist: f32, sleep_rot: f32,
   o_ocount: u32, o_acc: u32, o_events: u32, max_events: u32,
   ev_speed: f32, ev_energy: f32, o_cawake: u32, pad5: u32,
+  n_inherit: u32, o_inherit: u32, pad6: u32, pad7: u32,
   mat: array<vec4f, 8>,   // friction, restitution, -, -
 }
 struct ColorU { c: u32 }
@@ -458,6 +459,37 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
 
 fn wake(i: u32) {
   if (i != 0u && asleep(i)) { setB(i, F_FL, vec4f(0.0, B(i, F_P).xyz)); setB(i, F_RQ, B(i, F_Q)); let il = B(i, F_IL); setB(i, F_IL, vec4f(il.xyz, 0.0)); }
+}
+
+// New bodies cut from a body that moves on the GPU: JS made them where the parent was in an older read-back
+// (Pr, Qr); at the step they appear they are carried along by the parent's motion since then, and take its
+// current velocity (plus a given extra dv). Entries: [kid, parent, Pr xyz, Qr xyzw, dv xyz]; kid 0 retires the
+// parent after all its pieces have been placed.
+fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o)); }
+@compute @workgroup_size(64) fn inherit(@builtin(global_invocation_id) g: vec3u) {
+  let k = g.x; if (k >= P.n_inherit) { return; }
+  let kid = ld(P.o_inherit + k * 12u); let par = ld(P.o_inherit + k * 12u + 1u);
+  if (kid == 0u || par == 0u) { return; }
+  let pr = vec3f(inh(k, 2u), inh(k, 3u), inh(k, 4u));
+  let qr = vec4f(inh(k, 5u), inh(k, 6u), inh(k, 7u), inh(k, 8u));
+  let dv = vec3f(inh(k, 9u), inh(k, 10u), inh(k, 11u));
+  let pn = B(par, F_P).xyz; let qn = B(par, F_Q);
+  let vn = S(par, S_V).xyz; let wn = S(par, S_W).xyz;
+  let rd = normalize(qmul(qn, vec4f(-qr.xyz, qr.w)));
+  let pk = B(kid, F_P); let qk = B(kid, F_Q);
+  let p = pn + qrot(rd, pk.xyz - pr);
+  let q = normalize(qmul(rd, qk));
+  setB(kid, F_P, vec4f(p, pk.w)); setB(kid, F_Q, q);
+  setB(kid, F_FL, vec4f(0.0, p)); setB(kid, F_RQ, q);
+  let v = vn + cross(wn, p - pn) + qrot(rd, dv);
+  setS(kid, S_V, vec4f(v, S(kid, S_V).w)); setS(kid, S_W, vec4f(wn, 0.0));
+}
+@compute @workgroup_size(64) fn retire(@builtin(global_invocation_id) g: vec3u) {
+  let k = g.x; if (k >= P.n_inherit) { return; }
+  let kid = ld(P.o_inherit + k * 12u); let par = ld(P.o_inherit + k * 12u + 1u);
+  if (kid != 0u || par == 0u) { return; }
+  setB(par, F_P, vec4f(0.0, -1000.0, 0.0, 0.0)); setB(par, F_FL, vec4f(1.0, 0.0, -1000.0, 0.0));
+  setS(par, S_V, vec4f(0.0)); setS(par, S_W, vec4f(0.0));
 }
 
 // wake every sleeping body (the static structure under them changed)
@@ -952,6 +984,7 @@ class GpuWorld {
     take('pairs', 2 * this.maxPairs); take('bcount', cb1); take('bstart', cb1); take('bfill', cb1);
     take('blist', 2 * this.maxMan); take('par', cb1); take('mint', cb1); take('ocount', cb1); take('acc', 6 * cb1);
     this.maxEvents = 512; take('events', 12 * this.maxEvents);
+    this.maxInherit = 4096; take('inherit', 12 * this.maxInherit);
     this.L = L; this.nInts = o;
 
     const bod = new Float32Array(cb1 * 20), sol = new Float32Array(cb1 * 24), shp = new Float32Array(cs1 * 32);
@@ -1006,7 +1039,7 @@ class GpuWorld {
     const mod = await compile(WGSL, 'WGSL'), modA = await compile(WGSL_ARGS, 'WGSL args');
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all'];
+                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); })]);
@@ -1042,13 +1075,21 @@ class GpuWorld {
     u[48] = this.levels; u[49] = GROUND_MAT; f[50] = 0.01; f[51] = 0.02;
     u[52] = L.ocount; u[53] = L.acc; u[54] = L.events; u[55] = this.maxEvents; u[58] = L.cawake;
     f[56] = this.evSpeed; f[57] = this.evEnergy;
-    MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 60 + i * 4));
+    u[60] = this.inheritCount || 0; u[61] = this.L.inherit;
+    MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     return f;
   }
 
   // Encode one 60 Hz step into `enc` (several compute passes; one timestamp pair per stage).
   encode(enc, dt = 1 / 60) {
     const d = this.device;
+    if (this.pendingInherit && this.pendingInherit.length) {
+      const list = this.pendingInherit.splice(0, this.maxInherit);
+      const u = new Uint32Array(list.length * 12), f = new Float32Array(u.buffer);
+      list.forEach((e, k) => { u[k * 12] = e[0]; u[k * 12 + 1] = e[1]; for (let q = 2; q < 12; q++) f[k * 12 + q] = e[q]; });
+      d.queue.writeBuffer(this.intBuf, this.L.inherit * 4, u);
+      this.inheritCount = list.length;
+    }
     d.queue.writeBuffer(this.parBuf, 0, this.params(dt));
     const L = this.L, cur = this.frame & 1;
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
@@ -1082,6 +1123,9 @@ class GpuWorld {
       : (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(k === 'restitute_ovf' ? 1 : dirWg[off] ?? perMan); };
     let p;
     if (this.wakeReq) { this.wakeReq = false; p = pass(null); run(p, 'wake_all', nb); p.end(); }
+    if (this.inheritCount) {
+      p = pass(null); run(p, 'inherit', Math.ceil(this.inheritCount / 64)); run(p, 'retire', Math.ceil(this.inheritCount / 64)); p.end();
+    }
     p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'pairs', nsh); p.end();
     p = pass(null, true); run(p, 'pair_args', 1); p.end();
     p = pass('narrow'); ind(p, 'narrow', 99 * 4); p.end();
@@ -1124,6 +1168,12 @@ class GpuWorld {
       enc.copyBufferToBuffer(this.intBuf, L.ccount * 4, sb.buf, 64 + 48 * this.maxEvents, 33 * 4);
       this.statCopied = true;
     } else this.statCopied = false;
+    if (this.inheritCount) {
+      this.inheritCount = 0;
+      // the retired parents' slots are free from now on (their pieces have been placed from them)
+      for (const b of this.retiring) (this.freeBodies = this.freeBodies || []).push(b);
+      this.retiring = [];
+    }
     this.frame++;
   }
 
@@ -1157,6 +1207,7 @@ class GpuWorld {
     }
     for (const s of shapes) {
       const slot = this.freeShapes.length ? this.freeShapes.pop() : (this.ns++, this.ns1++, this.ns1 - 1);
+      this.shapeGen = this.shapeGen || []; this.shapeGen[slot - 1] = (this.shapeGen[slot - 1] || 0) + 1;
       const body = bslot[s.body - 1];
       q.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, s.mat, 0, 0, ...s.lp, 0, ...s.lq, ...s.h, 0]));
       this.shapes[slot - 1] = { ...s, body };
@@ -1198,6 +1249,19 @@ class GpuWorld {
     this.device.queue.writeBuffer(this.bodBuf, body * 80 + 48, new Float32Array([1, 0, -1000, 0]));
   }
   // Take the impact events collected since the last call.
+  // Break a moving body into new ones (see the `inherit` kernel): `kids` are slots from addBodies, made from
+  // the parent's pose (pr, qr) of an older read-back; dv[k] is extra velocity for kid k (world frame then).
+  // The parent stops colliding now and is retired at the next step, after its pieces have been placed.
+  breakBody(parent, kids, pr, qr, dvs) {
+    const b = this.bodies[parent - 1]; if (!b || b.dead) return;
+    b.dead = true;
+    const own = this.bodyShapes && this.bodyShapes.get(parent);
+    if (own) { for (const k of own) if (this.shapes[k - 1] && this.shapes[k - 1].body === parent) this.killShape(k); this.bodyShapes.delete(parent); }
+    this.pendingInherit = this.pendingInherit || []; this.retiring = this.retiring || [];
+    kids.forEach((kid, k) => { if (kid) this.pendingInherit.push([kid, parent, ...pr, ...qr, ...(dvs[k] || [0, 0, 0])]); });
+    this.pendingInherit.push([0, parent, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+    this.retiring.push(parent);
+  }
   // free capacity: bodies and shapes (retired slots are reused)
   roomBodies() { return this.capB - this.n + (this.freeBodies ? this.freeBodies.length : 0); }
   roomShapes() { return this.capS - this.ns + (this.freeShapes ? this.freeShapes.length : 0); }
@@ -1291,12 +1355,13 @@ class GpuWorld {
   // materials in `mats`; dead shapes are skipped.
   async readPose(minBody = 0) {
     const frame = this.frame;   // the step this read-back shows
-    // bodies as of now: shapes of bodies added while the read is in flight are not in it
+    // the world as of now: which shapes exist, of which bodies (a body broken or made while the read is in
+    // flight must not vanish or appear early: the list and the poses are of the same moment)
     const n1 = this.n1, nb = this.n;
+    const list = [], slots = [], gens = [];
+    this.shapes.forEach((s, k) => { if (s && s.body < n1 && (!minBody || (!s.dead && s.body >= minBody))) { list.push(s); slots.push(k + 1); gens.push(this.shapeGen ? this.shapeGen[k] || 0 : 0); } });
     const bod = await this.read(this.bodBuf, n1 * 80), sol = await this.read(this.solBuf, n1 * 96);
     const t0 = performance.now();
-    const list = [], slots = [];
-    this.shapes.forEach((s, k) => { if (s && s.body < n1 && (!minBody || (!s.dead && s.body >= minBody))) { list.push(s); slots.push(k + 1); } });
     const pose = new Float32Array(list.length * 10), mats = new Uint8Array(list.length), cols = new Uint16Array(list.length);
     list.forEach((s, k) => {
       if (!s) return;
@@ -1312,7 +1377,7 @@ class GpuWorld {
       vel.set(sol.subarray(s, s + 3), i * 3); ang.set(sol.subarray(s + 4, s + 7), i * 3);
       sleeping[i] = bod[b + 12] > 0.5 ? 1 : 0;
     }
-    return { pose, mats, cols, slots: Uint32Array.from(slots), body, vel, ang, sleeping, frame, jsMs: performance.now() - t0 };
+    return { pose, mats, cols, slots: Uint32Array.from(slots), gens: Uint32Array.from(gens), body, vel, ang, sleeping, frame, n1, jsMs: performance.now() - t0 };
   }
 
   // This step's contacts: bodies, restitution, normal impulse total (N s) and approach speed (m/s) per contact,
