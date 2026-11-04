@@ -45,6 +45,9 @@ struct Params {
   ev_speed: f32, ev_energy: f32, o_cawake: u32, pad5: u32,
   n_inherit: u32, o_inherit: u32, wake_speed: f32, pad7: u32,
   mat: array<vec4f, 8>,   // friction, restitution, -, -
+  np1: u32, pcell: f32, pg_mask: u32, p_wake: u32,
+  p_h: f32, n_blast: u32, p_cap: u32, pad9: u32,
+  blast: array<vec4f, 6>,   // particle blasts: (centre, reach), (speed, -, -, -)
 }
 struct ColorU { c: u32 }
 
@@ -473,7 +476,7 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
   // the next: dv is the direction the contacts pushed, and the piece keeps none of a rebound along it (a crushing
   // impact absorbs the energy, it does not bounce)
   let absolute = (praw & 0x80000000u) != 0u; let noRebound = (praw & 0x40000000u) != 0u; let par = praw & 0x3fffffffu;
-  if (kid == 0u || par == 0u) { return; }
+  if (kid == 0u || par == 0u || (kid & 0x80000000u) != 0u) { return; }   // (high bit: a particle, see p_place)
   let pr = vec3f(inh(k, 2u), inh(k, 3u), inh(k, 4u));
   let qr = vec4f(inh(k, 5u), inh(k, 6u), inh(k, 7u), inh(k, 8u));
   let dv = vec3f(inh(k, 9u), inh(k, 10u), inh(k, 11u));
@@ -854,6 +857,213 @@ fn find(x0: u32) -> u32 {
 }
 `;
 
+// Granular debris: crumbs as particles (spheres, drawn as the bricks they are). Position-based dynamics: each
+// sub-step predicts, then pushes particles out of each other, of the ground and of every rigid shape (one way: a
+// particle never pushes a body), with Coulomb friction from the push; velocity is the move over the sub-step.
+// Particles at rest sleep and cost a few grid look-ups; a moving body nearby, a blast or wakeAll wakes them.
+const WGSL_P = WGSL + /* wgsl */`
+@group(2) @binding(0) var<storage, read_write> prt: array<vec4f>;
+@group(2) @binding(1) var<storage, read_write> pint: array<atomic<u32>>;
+// particle record (7 vec4): position + radius, velocity + state (0 free, 1 moving, 2 asleep, 3 crushed, 4 waiting
+// to be placed from a moving body), rotation
+// (for drawing), sub-step start position + rest timer, spin (drawing) + material, corrected position + touching,
+// where the rest timer last restarted + crushing
+const PR = 7u;
+fn R(i: u32, f: u32) -> vec4f { return prt[i * PR + f]; }
+fn setR(i: u32, f: u32, v: vec4f) { prt[i * PR + f] = v; }
+fn pg() -> u32 { return P.pg_mask + 1u; }
+fn pcellc(p: vec3f) -> vec3i { return vec3i(floor(p / P.pcell)); }
+fn phc(c: vec3i) -> u32 { return ((u32(c.x) * 73856093u) ^ (u32(c.y) * 19349663u) ^ (u32(c.z) * 83492791u)) & P.pg_mask; }
+fn pld(i: u32) -> u32 { return atomicLoad(&pint[i]); }
+fn pst(i: u32, v: u32) { atomicStore(&pint[i], v); }
+// a moving rigid shape in a grid cell around x (any level)
+fn near_awake(x: vec3f) -> bool {
+  for (var L = 0u; L < P.levels; L++) {
+    if (ld(C_LEVEL + L) == 0u) { continue; }
+    let c = cellc(x, L);
+    for (var cz = c.z - 1; cz <= c.z + 1; cz++) { for (var cy = c.y - 1; cy <= c.y + 1; cy++) { for (var cx = c.x - 1; cx <= c.x + 1; cx++) {
+      if (ld(P.o_cawake + chash(vec3i(cx, cy, cz), L)) != 0u) { return true; }
+    } } }
+  }
+  return false;
+}
+@compute @workgroup_size(64) fn p_prep(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.np1) { return; }
+  let r1 = R(i, 1); var state = u32(r1.w); if (state == 0u || state >= 3u) { return; }
+  let x = R(i, 0).xyz;
+  var v = r1.xyz;
+  var hit = false;
+  for (var b = 0u; b < P.n_blast; b++) {
+    let c = P.blast[2u * b]; let d = x - c.xyz; let l = length(d);
+    if (l < c.w) { hit = true; v += (d / max(l, 1e-3) + vec3f(0.0, 0.3, 0.0)) * P.blast[2u * b + 1u].x * (1.0 - l / c.w); }
+  }
+  if (state == 2u && (hit || P.p_wake != 0u || near_awake(x))) { state = 1u; let r3 = R(i, 3); setR(i, 3, vec4f(r3.xyz, 0.0)); }
+  if (state == 1u) { atomicAdd(&ints[12], 1u); setR(i, 1, vec4f(v, 1.0)); }
+  atomicAdd(&ints[13], 1u);
+  let hc = phc(pcellc(x));
+  pst(3u * pg() + P.p_cap + i, hc);
+  atomicAdd(&pint[hc], 1u);
+}
+// particles cut from a moving body: placed like its pieces (see inherit), from entries whose kid has the high bit
+// (kid = particle slot + 1); they wait (state 4) until then
+@compute @workgroup_size(64) fn p_place(@builtin(global_invocation_id) g: vec3u) {
+  let k = g.x; if (k >= P.n_inherit) { return; }
+  let kid = ld(P.o_inherit + k * 12u); let praw = ld(P.o_inherit + k * 12u + 1u);
+  if ((kid & 0x80000000u) == 0u) { return; }
+  let i = (kid & 0x7fffffffu) - 1u; let par = praw & 0x3fffffffu; let absolute = (praw & 0x80000000u) != 0u;
+  let pr = vec3f(inh(k, 2u), inh(k, 3u), inh(k, 4u));
+  let qr = vec4f(inh(k, 5u), inh(k, 6u), inh(k, 7u), inh(k, 8u));
+  let dv = vec3f(inh(k, 9u), inh(k, 10u), inh(k, 11u));
+  let pn = B(par, F_P).xyz; let qn = B(par, F_Q);
+  let rd = normalize(qmul(qn, vec4f(-qr.xyz, qr.w)));
+  let r0 = R(i, 0);
+  let x = pn + qrot(rd, r0.xyz - pr);
+  var v = S(par, S_V).xyz + cross(S(par, S_W).xyz, x - pn) + qrot(rd, dv);
+  if (absolute) { v = dv; }
+  setR(i, 0, vec4f(x, r0.w)); setR(i, 1, vec4f(v, 1.0)); setR(i, 2, normalize(qmul(rd, R(i, 2))));
+  setR(i, 3, vec4f(x, 0.0)); setR(i, 5, vec4f(x, 0.0)); setR(i, 6, vec4f(x, 0.0));
+}
+@compute @workgroup_size(256) fn p_scan(@builtin(local_invocation_index) t: u32) {
+  let G = pg(); let per = G / 256u; let base = t * per;
+  var s = 0u;
+  for (var k = 0u; k < per; k++) { s += pld(base + k); }
+  var run = wg_scan(t, s);
+  for (var k = 0u; k < per; k++) { pst(G + base + k, run); run += pld(base + k); }
+}
+@compute @workgroup_size(64) fn p_scatter(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.np1) { return; }
+  let st = R(i, 1).w; if (st == 0.0 || st >= 3.0) { return; }
+  let G = pg(); let hc = pld(3u * G + P.p_cap + i);
+  pst(3u * G + pld(G + hc) + atomicAdd(&pint[2u * G + hc], 1u), i);
+}
+@compute @workgroup_size(64) fn p_integrate(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }
+  var v = R(i, 1).xyz + P.gravity * P.p_h;
+  let l = length(v); if (l > 40.0) { v *= 40.0 / l; }
+  let r0 = R(i, 0);
+  setR(i, 3, vec4f(r0.xyz, R(i, 3).w));
+  setR(i, 0, vec4f(r0.xyz + v * P.p_h, r0.w));
+  setR(i, 1, vec4f(v, 1.0));
+}
+// friction: take back the sliding of this sub-step, up to mu x the push (Coulomb)
+fn pfric(disp: vec3f, n: vec3f, pen: f32, mu: f32) -> vec3f {
+  let t = disp - n * dot(disp, n); let tl = length(t);
+  if (tl < 1e-9) { return vec3f(0.0); }
+  return -t * min(mu * pen / tl, 1.0);
+}
+// push limits: a sub-step's own approach is undone in full; overlap beyond it (made by a spawn, or by a body
+// driven into a heap) separates at 2 m/s, so nothing is launched from a deep overlap
+const P_SEP = 2.0;
+@compute @workgroup_size(64) fn p_contact(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }
+  let r0 = R(i, 0); let xi = r0.xyz; let ri = r0.w; let xs = R(i, 3).xyz;
+  let mui = P.mat[u32(R(i, 4).w)].x;
+  var corr = vec3f(0.0); var n = 0.0; var touch = 0.0;
+  let cap = P_SEP * P.p_h;
+  // other particles first (a sleeping one does not give way); several pushes are averaged, over-relaxed (Jacobi)
+  let G = pg(); let c = pcellc(xi);
+  var seen: array<u32, 27>; var ns = 0u;
+  for (var cz = c.z - 1; cz <= c.z + 1; cz++) { for (var cy = c.y - 1; cy <= c.y + 1; cy++) { for (var cx = c.x - 1; cx <= c.x + 1; cx++) {
+    let hc = phc(vec3i(cx, cy, cz));
+    var dup = false; for (var q = 0u; q < ns; q++) { if (seen[q] == hc) { dup = true; } }
+    if (dup) { continue; }
+    seen[ns] = hc; ns++;
+    let s0 = pld(G + hc); let s1 = s0 + pld(hc);
+    for (var s = s0; s < s1; s++) {
+      let j = pld(3u * G + s); if (j == i) { continue; }
+      let rj = R(j, 0); let d = xi - rj.xyz; let d2 = dot(d, d); let rr = ri + rj.w;
+      // (within 1 cm counts as touching, for the rest test: a resting particle alternates between a hair's
+      // overlap and none from one sub-step to the next)
+      if (d2 >= (rr + 0.01) * (rr + 0.01) || d2 < 1e-12) { continue; }
+      let dist = sqrt(d2); let nn = d / dist;
+      touch = 1.0; if (dist >= rr) { continue; }
+      let moving = R(j, 1).w == 1.0;
+      let wgt = select(1.0, 0.5, moving);
+      let dj = select(vec3f(0.0), rj.xyz - R(j, 3).xyz, moving);
+      // undo this sub-step's approach in full; an overlap from before separates at the limit only
+      let pen = min((rr - dist) * wgt, (max(-dot((xi - xs) - dj, nn), 0.0) + cap) * wgt);
+      corr += nn * pen + pfric((xi - xs) - dj, nn, pen, mui) * wgt; n += 1.0; touch = 1.0;
+    }
+  } } }
+  var x = xi + corr * select(1.0, 1.5 / n, n > 1.5);
+  // a particle pushed hard from opposite sides by two bodies (a box set down on it on the floor) is crushed
+  var lastN = vec3f(0.0); var lastPush = 0.0; var crushed = R(i, 6).w;
+  // then the ground and the rigid shapes, in sequence, each in full: a particle never ends inside a body
+  let pg0 = ri - x.y;
+  if (pg0 > -0.01) { touch = 1.0; }
+  if (pg0 > 0.0) { let nn = vec3f(0.0, 1.0, 0.0); x += nn * pg0 + pfric(x - xs, nn, pg0, 0.5 * (mui + P.mat[P.ground_mat].x)); touch = 1.0; lastPush = pg0; lastN = nn; }
+  for (var L = 0u; L < P.levels; L++) {
+    if (ld(C_LEVEL + L) == 0u) { continue; }
+    let cc = cellc(xi, L);
+    for (var cz = cc.z - 1; cz <= cc.z + 1; cz++) { for (var cy = cc.y - 1; cy <= cc.y + 1; cy++) { for (var cx = cc.x - 1; cx <= cc.x + 1; cx++) {
+      let cell = vec3i(cx, cy, cz); let hc = chash(cell, L);
+      let s0 = ld(P.o_gstart + hc); let s1 = s0 + ld(P.o_gcount + hc);
+      for (var s = s0; s < s1; s++) {
+        let j = ld(P.o_sorted + s);
+        let wj = Hs(j, H_WP);
+        if (u32(wj.w) != L || any(cellc(wj.xyz, L) != cell)) { continue; }
+        if (any(x + vec3f(ri + 0.01) < Hs(j, H_LO).xyz) || any(x - vec3f(ri + 0.01) > Hs(j, H_HI).xyz)) { continue; }
+        let Rm = qmat(Hs(j, H_WQ)); let h = Hs(j, H_H).xyz;
+        let dl = x - wj.xyz;
+        let lc = vec3f(dot(Rm[0], dl), dot(Rm[1], dl), dot(Rm[2], dl));
+        let cl = clamp(lc, -h, h); let df = lc - cl; let d2 = dot(df, df);
+        var nl = vec3f(0.0); var pen = 0.0;
+        if (d2 > 1e-12) {
+          let dist = sqrt(d2); if (dist >= ri + 0.01) { continue; }
+          touch = 1.0; if (dist >= ri) { continue; }
+          nl = df / dist; pen = ri - dist;
+        } else {
+          let dd = h - abs(lc);
+          if (dd.x <= dd.y && dd.x <= dd.z) { nl = vec3f(select(-1.0, 1.0, lc.x >= 0.0), 0.0, 0.0); pen = dd.x + ri; }
+          else if (dd.y <= dd.z) { nl = vec3f(0.0, select(-1.0, 1.0, lc.y >= 0.0), 0.0); pen = dd.y + ri; }
+          else { nl = vec3f(0.0, 0.0, select(-1.0, 1.0, lc.z >= 0.0)); pen = dd.z + ri; }
+        }
+        let nn = Rm[0] * nl.x + Rm[1] * nl.y + Rm[2] * nl.z;
+        let b = sbody(j);
+        let vb = S(b, S_V).xyz + cross(S(b, S_W).xyz, x - B(b, F_P).xyz);
+        // out along the normal: at most as far as the body moves into the particle plus the separation limit,
+        // the rest goes as a slide along the surface (no launch from a deep overlap)
+        let push = min(pen, max(dot(vb * P.p_h - (x - xs), nn), 0.0) + cap);
+        let mu = 0.5 * (mui + P.mat[u32(Hs(j, H_ID).y)].x);
+        x += nn * push + pfric((x - xs) - vb * P.p_h, nn, push, mu); touch = 1.0;
+        if (lastPush > 0.3 * ri && pen > 0.3 * ri && dot(nn, lastN) < -0.5) { crushed = 1.0; }
+        if (pen > lastPush) { lastPush = pen; lastN = nn; }
+      }
+    } } }
+  }
+  setR(i, 5, vec4f(x, touch));
+  if (crushed > 0.0) { let r6 = R(i, 6); setR(i, 6, vec4f(r6.xyz, 1.0)); }
+}
+@compute @workgroup_size(64) fn p_apply(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }
+  let x = R(i, 5).xyz; let r0 = R(i, 0);
+  var v = (x - R(i, 3).xyz) / P.p_h;
+  let l = length(v); if (l > 40.0) { v *= 40.0 / l; }
+  setR(i, 0, vec4f(x, r0.w)); setR(i, 1, vec4f(v, 1.0));
+}
+@compute @workgroup_size(64) fn p_finish(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.np1) { return; }
+  let r0 = R(i, 0); let r1 = R(i, 1); var q = R(i, 2); let st = r1.w;
+  if (st == 1.0) {
+    let r3 = R(i, 3); let r4 = R(i, 4); let touch = R(i, 5).w;
+    var v = r1.xyz; var w = r4.xyz; var t = 0.0; var s = 1.0;
+    // at rest = touching something and staying within 1 cm of where the timer restarted (a particle wedged among
+    // sleeping ones may jitter in place; that goes nowhere)
+    let r6 = R(i, 6);
+    if (touch > 0.0) { w = cross(vec3f(0.0, 1.0, 0.0), v) / max(r0.w, 0.01); }
+    if (touch > 0.0 && distance(r0.xyz, r6.xyz) < 0.01 && length(v) < 2.0) { t = r3.w + P.dt; } else { setR(i, 6, vec4f(r0.xyz, r6.w)); }
+    if (t > 0.5 || r0.y < -50.0) { s = 2.0; v = vec3f(0.0); w = vec3f(0.0); }
+    if (r6.w > 0.0) { s = 3.0; v = vec3f(0.0); }
+    q = normalize(q + 0.5 * P.dt * qmul(vec4f(w, 0.0), q));
+    setR(i, 1, vec4f(v, s)); setR(i, 2, q); setR(i, 3, vec4f(r3.xyz, t)); setR(i, 4, vec4f(w, r4.w));
+  }
+  let v1 = R(i, 1);
+  // what is drawn, packed after the records: 3 vec4 per particle
+  let o = P.p_cap * PR + i * 3u;
+  prt[o] = vec4f(r0.xyz, v1.x); prt[o + 1u] = vec4f(v1.yz, q.xy); prt[o + 2u] = vec4f(q.zw, v1.w, r0.w);
+}
+`;
+
 // Writers of the indirect-dispatch arguments, in passes of their own so the args buffer is never
 // writable and indirect in the same dispatch.
 const WGSL_ARGS = WGSL.replace(/\/\/ -{10,} broad phase[\s\S]*$/, '') + /* wgsl */`
@@ -1057,15 +1267,28 @@ class GpuWorld {
       if (errs.length) throw new Error(tag + ': ' + errs.map(x => `${x.lineNum}:${x.linePos} ${x.message}`).join('\n'));
       return m;
     };
+    // particles (granular debris)
+    this.capP = opt.maxParticles || 0; this.np = 0; this.freeParticles = []; this.pBlasts = [];
+    this.psub = opt.particleSubsteps || 4;
+    this.pcell = 2 * (opt.particleMaxRadius || 0.3) + 0.1;
+    let PG = 256; while (PG < 2 * Math.max(1, this.capP)) PG *= 2; this.PG = PG; this.PGeff = 256;
+    const cp = Math.max(1, this.capP);
+    this.prtBuf = buf(cp * 112 + cp * 48, U.STORAGE | U.COPY_DST | U.COPY_SRC);
+    this.pintBuf = buf((3 * PG + 2 * cp) * 4, U.STORAGE | U.COPY_DST);
+    const bglP = d.createBindGroupLayout({ entries: [sto(0), sto(1)] });
+    const partL = d.createPipelineLayout({ bindGroupLayouts: [bgl0, bgl1, bglP] });
+    this.bgP = d.createBindGroup({ layout: bglP, entries: [ent(0, this.prtBuf), ent(1, this.pintBuf)] });
     const mod = await compile(WGSL, 'WGSL'), modA = await compile(WGSL_ARGS, 'WGSL args');
+    const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
                    'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
-      ...['man_args', 'pair_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); })]);
+      ...['man_args', 'pair_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
+      ...(modP ? ['p_place', 'p_prep', 'p_scan', 'p_scatter', 'p_integrate', 'p_contact', 'p_apply', 'p_finish'] : []).map(async k => { this.pl[k] = await mk(k, partL, modP); })]);
     this.ts = d.features.has('timestamp-query');
-    this.stages = ['broad', 'narrow', 'colour', 'sub-steps', 'sleep'];
+    this.stages = ['broad', 'narrow', 'colour', 'sub-steps', 'particles', 'sleep'];
     if (this.ts) {
       this.qs = d.createQuerySet({ type: 'timestamp', count: 32 });
       this.qBuf = buf(256, U.QUERY_RESOLVE | U.COPY_SRC);
@@ -1098,6 +1321,13 @@ class GpuWorld {
     f[56] = this.evSpeed; f[57] = this.evEnergy;
     u[60] = this.inheritCount || 0; u[61] = this.L.inherit; f[62] = this.wakeSpeed;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
+    if (this.capP) {
+      let pgE = 256; while (pgE < 2 * this.np && pgE < this.PG) pgE *= 2; this.PGeff = pgE;
+      u[96] = this.np; f[97] = this.pcell; u[98] = pgE - 1; u[99] = this.wakeReq ? 1 : 0;
+      f[100] = dt / this.psub; u[102] = this.capP;
+      const bl = (this.pBlasts || []).splice(0, 3); u[101] = bl.length;
+      bl.forEach((b, k) => { f.set([...b.c, b.reach], 104 + k * 8); f[108 + k * 8] = b.speed; });
+    }
     return f;
   }
 
@@ -1106,7 +1336,7 @@ class GpuWorld {
     const d = this.device;
     // Nothing awake at the start of a step whose stats we have, and nothing changed from JS since: the world is
     // at rest and stays so; the step costs nothing (a settled city of rubble is free)
-    if (this.sleep && this.stats.awake === 0 && this.statsInputs === this.inputs && !this.wakeReq && !(this.pendingInherit && this.pendingInherit.length)) {
+    if (this.sleep && this.stats.awake === 0 && !(this.stats.pActive > 0) && !this.pBlasts.length && this.statsInputs === this.inputs && !this.wakeReq && !(this.pendingInherit && this.pendingInherit.length)) {
       this.frame++; this.skipped = (this.skipped || 0) + 1; return;
     }
     if (this.pendingInherit && this.pendingInherit.length) {
@@ -1116,6 +1346,7 @@ class GpuWorld {
       d.queue.writeBuffer(this.intBuf, this.L.inherit * 4, u);
       this.inheritCount = list.length;
     }
+    const pBusy = this.statsInputs !== this.inputs || this.wakeReq || this.pBlasts.length > 0;
     d.queue.writeBuffer(this.parBuf, 0, this.params(dt));
     const L = this.L, cur = this.frame & 1;
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
@@ -1123,6 +1354,7 @@ class GpuWorld {
     if (this.statCopied === false) { clr(0, 7); clr(8, 8); } else clr(0, 16);
     clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
+    if (this.capP && this.np) { enc.clearBuffer(this.pintBuf, 0, this.PGeff * 4); enc.clearBuffer(this.pintBuf, 2 * this.PGeff * 4, this.PGeff * 4); }
     if (!this.n) { this.frame++; return; }
     const nb = Math.ceil(this.n / 64) || 1, nsh = Math.ceil(this.ns / 64) || 1;
     const stamp = this.ts && !this.qPending;
@@ -1153,7 +1385,9 @@ class GpuWorld {
     let p;
     if (this.wakeReq) { this.wakeReq = false; p = pass(null); run(p, 'wake_all', nb); p.end(); }
     if (this.inheritCount) {
-      p = pass(null); run(p, 'inherit', Math.ceil(this.inheritCount / 64)); run(p, 'retire', Math.ceil(this.inheritCount / 64)); p.end();
+      p = pass(null); run(p, 'inherit', Math.ceil(this.inheritCount / 64));
+      if (this.capP) { p.setBindGroup(2, this.bgP); run(p, 'p_place', Math.ceil(this.inheritCount / 64)); }
+      run(p, 'retire', Math.ceil(this.inheritCount / 64)); p.end();
     }
     p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'pairs', nsh); p.end();
     p = pass(null, true); run(p, 'pair_args', 1); p.end();
@@ -1181,6 +1415,20 @@ class GpuWorld {
     colors('restitute');
     run(p, 'finish', nb);
     if (this.evEnergy > 0) ind(p, 'events', 96 * 4);
+    p.end();
+    // particles, after the bodies moved (they see this step's shapes and body velocities)
+    p = pass('particles');
+    if (this.capP && this.np) {
+      p.setBindGroup(2, this.bgP);
+      const np = Math.ceil(this.np / 64);
+      run(p, 'p_prep', np); run(p, 'p_scan', 1); run(p, 'p_scatter', np);
+      // with no particle moving at the last stats and no new input, only the wake check runs (a particle woken now
+      // starts moving a few steps later, when the stats show it)
+      if (this.stats.pActive > 0 || pBusy) {
+        for (let k = 0; k < this.psub; k++) { run(p, 'p_integrate', np); run(p, 'p_contact', np); run(p, 'p_apply', np); }
+        run(p, 'p_finish', np);
+      }
+    }
     p.end();
     if (this.sleep) { p = pass('sleep'); ind(p, 'uf_union', 96 * 4); run(p, 'uf_min', nb); run(p, 'uf_sleep', nb); p.end(); }
     if (stamp) {
@@ -1288,7 +1536,7 @@ class GpuWorld {
   // Break a moving body into new ones (see the `inherit` kernel): `kids` are slots from addBodies, made from
   // the parent's pose (pr, qr) of an older read-back; dv[k] is extra velocity for kid k (world frame then).
   // The parent stops colliding now and is retired at the next step, after its pieces have been placed.
-  breakBody(parent, kids, pr, qr, dvs) {
+  breakBody(parent, kids, pr, qr, dvs, parts = [], pdvs = []) {
     this.inputs++;
     const b = this.bodies[parent - 1]; if (!b || b.dead) return;
     b.dead = true;
@@ -1303,6 +1551,13 @@ class GpuWorld {
       if (!Array.isArray(d) && d.v) this.pendingInherit.push([kid, (parent | 0x80000000) >>> 0, ...pr, ...qr, ...d.v]);
       else if (!Array.isArray(d) && d.noRebound) this.pendingInherit.push([kid, (parent | 0x40000000) >>> 0, ...pr, ...qr, ...d.noRebound]);
       else this.pendingInherit.push([kid, parent, ...pr, ...qr, ...d]);
+    });
+    // particles made from it (before the retire entry: they are placed from the parent's pose)
+    parts.forEach((slot, k) => {
+      if (slot < 0) return;
+      const d = pdvs[k] || [0, 0, 0];
+      if (!Array.isArray(d) && d.v) this.pendingInherit.push([(slot + 1) | 0x80000000, (parent | 0x80000000) >>> 0, ...pr, ...qr, ...d.v]);
+      else this.pendingInherit.push([((slot + 1) | 0x80000000) >>> 0, parent, ...pr, ...qr, ...d]);
     });
     this.pendingInherit.push([0, parent, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
     this.retiring.push(parent);
@@ -1320,6 +1575,37 @@ class GpuWorld {
   }
   // Wake all sleeping bodies at the next step (call when static shapes under them were removed).
   wakeAll() { this.wakeReq = true; this.inputs++; }
+  // ---- particles: crumbs as granular debris. list: { p, v, q, r (collision radius), mat, wait }; returns slots (-1
+  // when full). wait: made from a moving body's older pose, placed by breakBody (pass the slots there). They are
+  // drawn from readParticles().
+  addParticles(list) {
+    this.inputs++;
+    const out = [];
+    for (const e of list) {
+      if (![...e.p, ...e.v].every(Number.isFinite)) { this.rejected = (this.rejected || 0) + 1; out.push(-1); continue; }
+      let i = this.freeParticles.length ? this.freeParticles.pop() : (this.np < this.capP ? this.np++ : -1);
+      if (i < 0) { out.push(-1); continue; }
+      const q = e.q || [0, 0, 0, 1], w = e.w || [0, 0, 0], r = Math.min(e.r, this.pcell / 2 - 0.05);
+      this.device.queue.writeBuffer(this.prtBuf, i * 112, new Float32Array([...e.p, r, ...e.v, e.wait ? 4 : 1, ...q, ...e.p, 0, ...w, e.mat || 0, ...e.p, 0, ...e.p, 0]));
+      out.push(i);
+    }
+    return out;
+  }
+  killParticle(i) {
+    this.inputs++;
+    this.device.queue.writeBuffer(this.prtBuf, i * 112 + 28, new Float32Array([0]));
+    this.freeParticles.push(i);
+  }
+  roomParticles() { return this.capP - this.np + this.freeParticles.length; }
+  // push particles within `reach` of c outward (m/s at the centre, falling off with distance)
+  blastParticles(c, reach, speed) { if (this.capP) this.pBlasts.push({ c, reach, speed }); }
+  // [x, y, z, vx][vy, vz, qx, qy][qz, qw, state, r] per particle slot (state 0 = free, 3 = crushed to dust: the
+  // caller frees it with killParticle)
+  async readParticles() {
+    const n = this.np, frame = this.frame;
+    if (!n) return { data: new Float32Array(0), n: 0, frame };
+    return { data: await this.read(this.prtBuf, n * 48, Math.max(1, this.capP) * 112), n, frame };
+  }
   takeEvents() { const e = this.events; this.events = []; return e; }
   killShape(slot) {
     this.inputs++;
@@ -1368,7 +1654,7 @@ class GpuWorld {
       }
       if (seq < this.statLatest) return;
       this.statLatest = seq; this.statsInputs = sb.inputs;
-      this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7] };
+      this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7], pActive: u[12], pLive: u[13] };
       this.colorLimit = Math.min(this.maxColors, 31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
       // per-colour contact counts (they size the direct dispatches): keep a slowly decaying maximum
       const cc = new Uint32Array(raw, 64 + 48 * this.maxEvents, 33);
@@ -1378,7 +1664,7 @@ class GpuWorld {
 
   // Copy `size` bytes of `buffer` back. Staging buffers are kept per source buffer and reused (grown when
   // needed); a read while that one is still mapping gets a temporary buffer.
-  async read(buffer, size) {
+  async read(buffer, size, offset = 0) {
     this.staging = this.staging || new Map();
     let st = this.staging.get(buffer), temp = false;
     if (!st || st.busy || st.size < size) {
@@ -1387,7 +1673,7 @@ class GpuWorld {
     }
     const rb = temp ? this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }) : st.buf;
     if (!temp) st.busy = true;
-    const enc = this.device.createCommandEncoder(); enc.copyBufferToBuffer(buffer, 0, rb, 0, size);
+    const enc = this.device.createCommandEncoder(); enc.copyBufferToBuffer(buffer, offset, rb, 0, size);
     this.device.queue.submit([enc.finish()]);
     try {
       await rb.mapAsync(GPUMapMode.READ, 0, size);
@@ -1442,7 +1728,7 @@ class GpuWorld {
   }
 
   destroy() {
-    for (const b of [this.bodBuf, this.solBuf, this.shpBuf, this.intBuf, this.manBuf, this.coldBuf, this.parBuf, this.colBuf, this.argBuf, ...this.statBufs.map(b => b.buf), this.qBuf, this.qRead]) if (b) b.destroy();
+    for (const b of [this.bodBuf, this.solBuf, this.shpBuf, this.intBuf, this.manBuf, this.coldBuf, this.parBuf, this.colBuf, this.argBuf, this.prtBuf, this.pintBuf, ...this.statBufs.map(b => b.buf), this.qBuf, this.qRead]) if (b) b.destroy();
     if (this.qs) this.qs.destroy();
   }
 }

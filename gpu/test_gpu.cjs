@@ -174,7 +174,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
     if (scenes.includes('inherit')) {
       // a tumbling falling body is broken from a read-back 10 steps old: its two halves must appear where the body
       // is now, moving as it moves (not where it was)
-      const w = await GpuWorld.create(dev, [{ shapes: [{ p: [-0.5, 20, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.25], mat: 0 }, { p: [0.5, 20, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.25], mat: 0 }], v: [3, 0, 1], w: [0, 0, 2] }], { substeps: 12, sleep: false, maxBodies: 8, maxShapes: 16 });
+      const w = await GpuWorld.create(dev, [{ shapes: [{ p: [-0.5, 20, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.25], mat: 0 }, { p: [0.5, 20, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.25], mat: 0 }], v: [3, 0, 1], w: [0, 0, 2] }], { substeps: 12, sleep: false, maxBodies: 8, maxShapes: 16, maxParticles: 16 });
       for (let f = 0; f < 10; f++) w.step(1 / 60);
       await dev.queue.onSubmittedWorkDone(); await settle();
       const r0 = await w.readPose();
@@ -187,7 +187,16 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       const vTruth = Array.from(rNow.vel.subarray(0, 3));
       const kids = w.addBodies(halves);
       // the second half: no motion away from a contact pushing down (n = -y): its downward velocity goes
-      w.breakBody(1, kids, p0, q0, [[0, 0, 0], { noRebound: [0, -1, 0] }]);
+      // and a crumb of the first half as a particle, made at the old pose too
+      // (1 m above the body in its frame then, clear of its pieces)
+      const qm = (a, b) => [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0], a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]];
+      const qr_ = (q, v) => { const r = qm(qm(q, [...v, 0]), [-q[0], -q[1], -q[2], q[3]]); return r.slice(0, 3); };
+      const up = qr_(q0, [0, 1, 0]), xp = [p0[0] + up[0], p0[1] + up[1], p0[2] + up[2]];
+      const [ps] = w.addParticles([{ p: xp, v: [0, 0, 0], r: 0.1, mat: 0, wait: true }]);
+      const qNow = Array.from(rNow.body.subarray(3, 7)), pNow = Array.from(rNow.body.subarray(0, 3));
+      const upNow = qr_(qNow, [0, 1, 0]), pTruth = [pNow[0] + upNow[0], pNow[1] + upNow[1], pNow[2] + upNow[2]];
+      const wq = Array.from(rNow.ang.subarray(0, 3)), pv = [vTruth[0] + wq[1] * upNow[2] - wq[2] * upNow[1], vTruth[1] + wq[2] * upNow[0] - wq[0] * upNow[2], vTruth[2] + wq[0] * upNow[1] - wq[1] * upNow[0]];
+      w.breakBody(1, kids, p0, q0, [[0, 0, 0], { noRebound: [0, -1, 0] }], [ps], [[0, 0, 0]]);
       w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
       const r1 = await w.readPose(2);
       // one more step happened: compare with the truth moved by that step (about v dt)
@@ -198,9 +207,10 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       const vExp = [vTruth[0] + wp[1] * rr[2] - wp[2] * rr[1], vTruth[1] + wp[2] * rr[0] - wp[0] * rr[2] - 9.81 / 60, vTruth[2] + wp[0] * rr[1] - wp[1] * rr[0]];
       const verr = Math.max(...[0, 1, 2].map(a => Math.abs(vk[a] - vExp[a])));
       const v2 = Array.from(r1.vel.subarray((kids[1] - 1) * 3, (kids[1] - 1) * 3 + 3));
+      const rp = await w.readParticles(); let perr = 0; for (let a = 0; a < 3; a++) perr = Math.max(perr, Math.abs(rp.data[ps * 12 + a] - pTruth[a] - pv[a] / 60));
       w.destroy();
       // (one step of gravity after the placing: about -0.16 m/s)
-      check('inherit', err < 0.05 && verr < 0.2 && v2[1] > -0.3 && Math.abs(v2[0]) > 1, { maxError_m: err, velocityError: verr, vKid: vk, vExpected: vExp, vNoRebound: v2, kids });
+      check('inherit', err < 0.05 && verr < 0.2 && v2[1] > -0.3 && Math.abs(v2[0]) > 1 && perr < 0.05, { particleError_m: perr, maxError_m: err, velocityError: verr, vKid: vk, vExpected: vExp, vNoRebound: v2, kids });
     }
     if (scenes.includes('reuse')) {
       // bodies retired and new ones made in their slots while everything is in contact (as when pieces break)
@@ -240,6 +250,49 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       for (let f = 1; f <= 3; f++) { w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle(); await settle(); counts.push(w.stats.candidates); }
       w.destroy();
       check('paircount', true, { candidates: counts });
+    }
+    if (scenes.includes('particles')) {
+      // granular crumbs poured on a fixed table: they pile up on it and around it on the ground, never inside it
+      // or under the ground, come to rest and sleep (then the world costs nothing); a box dropped on the pile
+      // wakes it and pushes the particles out of its way
+      let rnd = 5; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const w = await GpuWorld.create(dev, [{ shapes: [{ p: [0, 1, 0], q: [0, 0, 0, 1], h: [1, 0.25, 1], mat: MAT.concrete }], fixed: true }],
+        { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16, maxParticles: 4096 });
+      const N = 2000, R = 0.08, list = [];
+      for (let i = 0; i < N; i++) list.push({ p: [(rand() - 0.5) * 1.6, 2 + rand() * 6, (rand() - 0.5) * 1.6], v: [0, -1, 0], r: R * (0.7 + 0.6 * rand()), mat: MAT.concrete });
+      w.addParticles(list);
+      const rows = []; let bad = { below: 0, inside: 0 };
+      const look = async (f, boxAt) => {
+        await dev.queue.onSubmittedWorkDone(); await settle();
+        const r = await w.readParticles(), d = r.data;
+        let onTable = 0, top = 0, inBox = 0, active = 0, crushed = 0;
+        for (let i = 0; i < r.n; i++) {
+          const x = d[i * 12], y = d[i * 12 + 1], z = d[i * 12 + 2], st = d[i * 12 + 10], rr = d[i * 12 + 11];
+          if (!st) continue; if (st === 3) { crushed++; continue; } if (st === 1) { active++; if (active <= 2 && f > 200) rows.push({ probe: i, x: +x.toFixed(3), y: +y.toFixed(3), z: +z.toFixed(3), v: [d[i * 12 + 3], d[i * 12 + 4], d[i * 12 + 5]].map(a => +a.toFixed(3)), r: +rr.toFixed(3) }); }
+          if (y < rr - 0.02) bad.below++;
+          if (Math.abs(x) < 1 - rr && Math.abs(z) < 1 - rr && y > 0.75 && y < 1.25 + rr - 0.03) { bad.inside++; if (bad.inside <= 3) rows.push({ inside: i, t: f / 60, x: +x.toFixed(3), y: +y.toFixed(3), z: +z.toFixed(3), r: +rr.toFixed(3), st }); }
+          if (Math.abs(x) < 1 && Math.abs(z) < 1 && y > 1.25) onTable++;
+          top = Math.max(top, y);
+          if (boxAt && Math.abs(x - boxAt[0]) < 0.3 - rr * 0.5 && Math.abs(y - boxAt[1]) < 0.3 - rr * 0.5 && Math.abs(z - boxAt[2]) < 0.3 - rr * 0.5) inBox++;
+        }
+        rows.push({ t: +(f / 60).toFixed(1), active, crushed, onTable, top: +top.toFixed(2), inBox, statsActive: w.stats.pActive, skipped: w.skipped || 0, ms: w.gpuMs ? +w.gpuMs.particles.toFixed(2) : null });
+      };
+      for (let f = 1; f <= 420; f++) { w.step(1 / 60); if (f % 60 === 0) await look(f); }
+      const asleep = rows[rows.length - 1].active === 0;
+      const skippedBefore = w.skipped || 0;
+      for (let f = 0; f < 30; f++) w.step(1 / 60);
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      const skips = (w.skipped || 0) - skippedBefore;
+      // a 0.6 m box dropped on the pile
+      const [bi] = w.addBodies([{ shapes: [{ p: [0.3, 3, 0.2], q: [0, 0, 0, 1], h: [0.3, 0.3, 0.3], mat: MAT.concrete }], v: [0, -3, 0], w: [0, 0, 0] }]);
+      let woke = 0;
+      for (let f = 1; f <= 120; f++) { w.step(1 / 60); if (f === 30) { await dev.queue.onSubmittedWorkDone(); await settle(); woke = w.stats.pActive; } }
+      const pr = await w.readPose(); const bp = Array.from(pr.body.subarray((bi - 1) * 7, (bi - 1) * 7 + 3));
+      await look(570, bp);
+      w.destroy();
+      const last = rows[rows.length - 1];
+      check('particles', bad.below === 0 && bad.inside === 0 && rows[6].onTable > 300 && asleep && skips > 20 && woke > 0 && last.inBox < 5,
+        { bad, asleepAt7s: asleep, skippedSteps: skips, wokeByBox: woke, box: bp.map(v => +v.toFixed(2)), rows });
     }
     if (scenes.includes('rubble')) {
       // a heap of mixed rubble falls and must come to rest: awake bodies per second, and of those how many are
