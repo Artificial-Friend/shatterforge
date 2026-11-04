@@ -179,6 +179,7 @@ const M4 = new THREE.Matrix4(), QQ = new THREE.Quaternion(), PP = new THREE.Vect
 let reading = 0, debrisShapes = 0, pendingChunks = [], readGen = 0;
 // Debris poses come back from the GPU a frame or more late, and not every frame: they are drawn blended
 // between the last two read-backs (matched shape by shape), so motion stays smooth.
+const flick = { vanished: 0, jumps: 0 };
 let snapPrev = null, snapCur = null, stepsDone = 0, readsDone = 0, readSeq = 0, readLatest = 0, stepsAtRead = 0;
 // main-thread time per frame by stage (smoothed), shown in the HUD
 const perf = {};
@@ -212,6 +213,23 @@ function pullDebris() {
     // shapes are matched between read-backs by slot and generation (a reused slot holds another body)
     r.index = new Map(); for (let k = 0; k < r.slots.length; k++) r.index.set(r.gens[k] * 1048576 + r.slots[k], k);
     snapPrev = snapCur; snapCur = r;
+    // flicker check: between two read-backs, a shape must not vanish unless its body was broken or removed, nor
+    // move much further than its speed allows
+    if (snapPrev && snapPrev.frame < r.frame) {
+      const P = snapPrev, dt = (r.frame - P.frame) / 60;
+      for (let k = 0; k < P.slots.length; k++) {
+        const key = P.gens[k] * 1048576 + P.slots[k], j = r.index.get(key);
+        if (j === undefined) {
+          const sh = gpu.shapes[P.slots[k] - 1];
+          if (sh && !sh.dead && (gpu.shapeGen ? gpu.shapeGen[P.slots[k] - 1] || 0 : 0) === P.gens[k]) flick.vanished++;
+          continue;
+        }
+        const dx = r.pose[j * 10] - P.pose[k * 10], dy = r.pose[j * 10 + 1] - P.pose[k * 10 + 1], dz = r.pose[j * 10 + 2] - P.pose[k * 10 + 2];
+        const b = P.slots[k] && gpu.shapes[P.slots[k] - 1] ? gpu.shapes[P.slots[k] - 1].body : 0, vo = (b - 1) * 3;
+        const sp = r.vel && vo + 2 < r.vel.length ? Math.hypot(r.vel[vo], r.vel[vo + 1], r.vel[vo + 2]) : 0;
+        if (Math.hypot(dx, dy, dz) > 1 + 3 * (sp + 10) * dt) flick.jumps++;
+      }
+    }
     velHist.unshift({ v: r.vel, frame: r.frame }); if (velHist.length > 4) velHist.pop(); lastReadFrame = r.frame; lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
     const n = Math.min(MAXD, r.pose.length / 10);
     for (let k = 0; k < n; k++) dMesh.setColorAt(k, debrisColour(r.cols[k], r.slots[k]));
@@ -784,7 +802,7 @@ function benchPending() { try { if (localStorage.getItem('sf-bench') === '1') { 
 async function benchStart() {
   if (!gpu) return;
   Math.random = seededRandom(20261103);
-  BENCH.on = true; BENCH.phase = 'cutting the ground storey';
+  BENCH.on = true; BENCH.phase = 'cutting the ground storey'; flick.vanished = 0; flick.jumps = 0;
   $('bench').hidden = false; $('bench-title').textContent = 'Benchmark: running';
   physicsPaused = true;
   // a fixed view from outside, looking at the tower
@@ -816,7 +834,7 @@ function benchTick(now, dt) {
     if (snapCur) for (let k = 0; k < snapCur.pose.length / 10; k++) { const y = snapCur.pose[k * 10 + 1] + snapCur.pose[k * 10 + 8]; if (Number.isFinite(y)) roof = Math.max(roof, y); else bad++; }
     // and the standing building: a ray down through the middle
     const ts = E.raycast(0.3, 200, 0.3, 0, -1, 0, 300); if (ts >= 0) roof = Math.max(roof, 200 - ts);
-    BENCH.rows.push({ sim: f / 60, wall: (now - BENCH.wall0) / 1000, fps, steps: rate.steps, gpu: g, gpuStages: gpu.gpuMs ? { ...gpu.gpuMs } : null, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, breaks, dust: dustBricks, impacts: impactMs, structure: failedJoints, roof, bad });
+    BENCH.rows.push({ sim: f / 60, wall: (now - BENCH.wall0) / 1000, fps, steps: rate.steps, gpu: g, gpuStages: gpu.gpuMs ? { ...gpu.gpuMs } : null, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, breaks, dust: dustBricks, impacts: impactMs, structure: failedJoints, roof, bad, vanished: flick.vanished, jumps: flick.jumps });
     benchShow();
   }
   if (f >= BENCH.end) { BENCH.on = false; BENCH.phase = 'done'; Math.random = mathRandom; benchShow(true); }
@@ -831,15 +849,15 @@ function benchShow(done) {
   lines.push(`settings: quality ${setting.preset || 'custom'} · crush depth ${setting.crush} m · crumbs ${setting.crumbs} · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
   lines.push(`cut: 36 blasts in ${(BENCH.cutMs / 1000).toFixed(1)} s`);
   lines.push('');
-  lines.push('  sim s  wall s   fps  steps/s  GPU ms  bodies  awake  contacts  breaks   dust  roof m  bad poses');
-  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)} ${String(x.bad).padStart(10)}`);
+  lines.push('  sim s  wall s   fps  steps/s  GPU ms  bodies  awake  contacts  breaks   dust  roof m  bad poses  vanished  jumps');
+  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)} ${String(x.bad).padStart(10)} ${String(x.vanished).padStart(9)} ${String(x.jumps).padStart(6)}`);
   if (done) {
     const simT = last.sim || 0, wallT = last.wall || 1;
     lines.push('');
     lines.push(`real-time factor ${(simT / wallT).toFixed(2)} (simulated ${simT.toFixed(1)} s in ${wallT.toFixed(1)} s)`);
     lines.push(`frame time: median ${pct(0.5).toFixed(1)} ms · 95th ${pct(0.95).toFixed(1)} ms · worst ${pct(1).toFixed(1)} ms`);
     lines.push(`GPU step: worst ${BENCH.gpuMax.toFixed(1)} ms${last.gpuStages ? ' · last ' + Object.entries(last.gpuStages).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ') : ''}`);
-    lines.push(`invalid inputs refused: ${gpu.rejected || 0} · bad poses at the end: ${last.bad || 0}`);
+    lines.push(`invalid inputs refused: ${gpu.rejected || 0} · bad poses at the end: ${last.bad || 0} · flicker check: ${flick.vanished} shapes vanished unexplained, ${flick.jumps} jumped`);
     lines.push(`peak bodies ${Math.max(...r.map(x => x.bodies))} · peak contacts ${Math.max(...r.map(x => x.contacts))} · breaks ${last.breaks} · bricks to dust ${last.dust} · roof ${r.length ? r[0].roof.toFixed(1) : '?'} -> ${(last.roof || 0).toFixed(1)} m`);
     $('bench-title').textContent = 'Benchmark: done';
   }
@@ -903,7 +921,7 @@ function hud() {
     `<span class="k">bricks</span> ${E.bricks_alive().toLocaleString()} · <span class="k">joints</span> ${E.joints_live().toLocaleString()} · ${E.bytes_per_brick().toFixed(0)} B/brick`,
     gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake${snapCur && snapCur.pose.length / 10 > MAXD ? ` · <b>${(snapCur.pose.length / 10 - MAXD).toLocaleString()} not drawn</b>` : ''}` : `<span class="k">debris physics</span> off (no WebGPU)`,
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'}` : '',
-    gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
+    gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">flicker check</span> ${flick.vanished} vanished, ${flick.jumps} jumps · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
     `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${breaks} pieces broke on impact · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
     lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,
