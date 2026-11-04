@@ -1050,16 +1050,17 @@ fn pfric(disp: vec3f, n: vec3f, pen: f32, mu: f32) -> vec3f {
   if (tl < 1e-9) { return vec3f(0.0); }
   return -t * min(mu * pen / tl, 1.0);
 }
-// push limits: a sub-step's own approach is undone in full; overlap beyond it (made by a spawn, or by a body
-// driven into a heap) separates at 2 m/s, so nothing is launched from a deep overlap
-const P_SEP = 2.0;
-@compute @workgroup_size(64) fn p_contact(@builtin(global_invocation_id) g: vec3u) {
+// Candidates, gathered once per step: the particles and shapes a particle can touch during the step (its
+// sub-steps only test these). Per particle in pint after the grid: [neighbours, shapes, 24 neighbours, 12 shapes]
+const P_NN = 24u; const P_NS = 12u; const P_CS = 38u;
+fn pcand(i: u32) -> u32 { return 3u * pg() + 2u * P.p_cap + i * P_CS; }
+@compute @workgroup_size(64) fn p_gather(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }
-  let r0 = R(i, 0); let xi = r0.xyz; let ri = r0.w; let xs = R(i, 3).xyz;
-  let mui = P.mat[u32(R(i, 4).w)].x;
-  var corr = vec3f(0.0); var n = 0.0; var touch = 0.0;
-  let cap = P_SEP * P.p_h;
-  // other particles first (a sleeping one does not give way); several pushes are averaged, over-relaxed (Jacobi)
+  let r0 = R(i, 0); let xi = r0.xyz; let ri = r0.w;
+  // how far it can get this step (and a little for the others' motion)
+  let m = length(R(i, 1).xyz) * P.dt + 0.02;
+  let o = pcand(i);
+  var nn = 0u;
   let G = pg(); let c = pcellc(xi);
   var seen: array<u32, 27>; var ns = 0u;
   for (var cz = c.z - 1; cz <= c.z + 1; cz++) { for (var cy = c.y - 1; cy <= c.y + 1; cy++) { for (var cx = c.x - 1; cx <= c.x + 1; cx++) {
@@ -1070,27 +1071,12 @@ const P_SEP = 2.0;
     let s0 = pld(G + hc); let s1 = s0 + pld(hc);
     for (var s = s0; s < s1; s++) {
       let j = pld(3u * G + s); if (j == i) { continue; }
-      let rj = R(j, 0); let d = xi - rj.xyz; let d2 = dot(d, d); let rr = ri + rj.w;
-      // (within 1 cm counts as touching, for the rest test: a resting particle alternates between a hair's
-      // overlap and none from one sub-step to the next)
-      if (d2 >= (rr + 0.01) * (rr + 0.01) || d2 < 1e-12) { continue; }
-      let dist = sqrt(d2); let nn = d / dist;
-      touch = 1.0; if (dist >= rr) { continue; }
-      let moving = R(j, 1).w == 1.0;
-      let wgt = select(1.0, 0.5, moving);
-      let dj = select(vec3f(0.0), rj.xyz - R(j, 3).xyz, moving);
-      // undo this sub-step's approach in full; an overlap from before separates at the limit only
-      let pen = min((rr - dist) * wgt, (max(-dot((xi - xs) - dj, nn), 0.0) + cap) * wgt);
-      corr += nn * pen + pfric((xi - xs) - dj, nn, pen, mui) * wgt; n += 1.0; touch = 1.0;
+      let rj = R(j, 0); let rr = ri + rj.w + m + length(R(j, 1).xyz) * P.dt + 0.01;
+      let d = xi - rj.xyz;
+      if (dot(d, d) < rr * rr && nn < P_NN) { pst(o + 2u + nn, j); nn++; }
     }
   } } }
-  var x = xi + corr * select(1.0, 1.5 / n, n > 1.5);
-  // a particle pushed hard from opposite sides by two bodies (a box set down on it on the floor) is crushed
-  var lastN = vec3f(0.0); var lastPush = 0.0; var crushed = R(i, 6).w;
-  // then the ground and the rigid shapes, in sequence, each in full: a particle never ends inside a body
-  let pg0 = ri - x.y;
-  if (pg0 > -0.01) { touch = 1.0; }
-  if (pg0 > 0.0) { let nn = vec3f(0.0, 1.0, 0.0); x += nn * pg0 + pfric(x - xs, nn, pg0, 0.5 * (mui + P.mat[P.ground_mat].x)); touch = 1.0; lastPush = pg0; lastN = nn; }
+  var nsh = 0u;
   for (var L = 0u; L < P.levels; L++) {
     if (ld(C_LEVEL + L) == 0u) { continue; }
     let cc = cellc(xi, L);
@@ -1101,34 +1087,76 @@ const P_SEP = 2.0;
         let j = ld(P.o_sorted + s);
         let wj = Hs(j, H_WP);
         if (u32(wj.w) != L || any(cellc(wj.xyz, L) != cell)) { continue; }
-        if (any(x + vec3f(ri + 0.01) < Hs(j, H_LO).xyz) || any(x - vec3f(ri + 0.01) > Hs(j, H_HI).xyz)) { continue; }
-        let Rm = qmat(Hs(j, H_WQ)); let h = Hs(j, H_H).xyz;
-        let dl = x - wj.xyz;
-        let lc = vec3f(dot(Rm[0], dl), dot(Rm[1], dl), dot(Rm[2], dl));
-        let cl = clamp(lc, -h, h); let df = lc - cl; let d2 = dot(df, df);
-        var nl = vec3f(0.0); var pen = 0.0;
-        if (d2 > 1e-12) {
-          let dist = sqrt(d2); if (dist >= ri + 0.01) { continue; }
-          touch = 1.0; if (dist >= ri) { continue; }
-          nl = df / dist; pen = ri - dist;
-        } else {
-          let dd = h - abs(lc);
-          if (dd.x <= dd.y && dd.x <= dd.z) { nl = vec3f(select(-1.0, 1.0, lc.x >= 0.0), 0.0, 0.0); pen = dd.x + ri; }
-          else if (dd.y <= dd.z) { nl = vec3f(0.0, select(-1.0, 1.0, lc.y >= 0.0), 0.0); pen = dd.y + ri; }
-          else { nl = vec3f(0.0, 0.0, select(-1.0, 1.0, lc.z >= 0.0)); pen = dd.z + ri; }
-        }
-        let nn = Rm[0] * nl.x + Rm[1] * nl.y + Rm[2] * nl.z;
-        let b = sbody(j);
-        let vb = S(b, S_V).xyz + cross(S(b, S_W).xyz, x - B(b, F_P).xyz);
-        // out along the normal: at most as far as the body moves into the particle plus the separation limit,
-        // the rest goes as a slide along the surface (no launch from a deep overlap)
-        let push = min(pen, max(dot(vb * P.p_h - (x - xs), nn), 0.0) + cap);
-        let mu = 0.5 * (mui + P.mat[u32(Hs(j, H_ID).y)].x);
-        x += nn * push + pfric((x - xs) - vb * P.p_h, nn, push, mu); touch = 1.0;
-        if (lastPush > 0.3 * ri && pen > 0.3 * ri && dot(nn, lastN) < -0.5) { crushed = 1.0; }
-        if (pen > lastPush) { lastPush = pen; lastN = nn; }
+        let e = vec3f(ri + m + 0.01);
+        if (any(xi + e < Hs(j, H_LO).xyz) || any(xi - e > Hs(j, H_HI).xyz)) { continue; }
+        if (nsh < P_NS) { pst(o + 2u + P_NN + nsh, j); nsh++; }
       }
     } } }
+  }
+  pst(o, nn); pst(o + 1u, nsh);
+}
+// push limits: a sub-step's own approach is undone in full; overlap beyond it (made by a spawn, or by a body
+// driven into a heap) separates at 2 m/s, so nothing is launched from a deep overlap
+const P_SEP = 2.0;
+@compute @workgroup_size(64) fn p_contact(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }
+  let r0 = R(i, 0); let xi = r0.xyz; let ri = r0.w; let xs = R(i, 3).xyz;
+  let mui = P.mat[u32(R(i, 4).w)].x;
+  var corr = vec3f(0.0); var n = 0.0; var touch = 0.0;
+  let cap = P_SEP * P.p_h;
+  let o = pcand(i);
+  // other particles first (a sleeping one does not give way); several pushes are averaged, over-relaxed (Jacobi)
+  let nn0 = pld(o);
+  for (var q = 0u; q < nn0; q++) {
+    let j = pld(o + 2u + q);
+    let rj = R(j, 0); let d = xi - rj.xyz; let d2 = dot(d, d); let rr = ri + rj.w;
+    // (within 1 cm counts as touching, for the rest test: a resting particle alternates between a hair's
+    // overlap and none from one sub-step to the next)
+    if (d2 >= (rr + 0.01) * (rr + 0.01) || d2 < 1e-12) { continue; }
+    let dist = sqrt(d2); let nn = d / dist;
+    touch = 1.0; if (dist >= rr) { continue; }
+    let moving = R(j, 1).w == 1.0;
+    let wgt = select(1.0, 0.5, moving);
+    let dj = select(vec3f(0.0), rj.xyz - R(j, 3).xyz, moving);
+    let pen = min((rr - dist) * wgt, (max(-dot((xi - xs) - dj, nn), 0.0) + cap) * wgt);
+    corr += nn * pen + pfric((xi - xs) - dj, nn, pen, mui) * wgt; n += 1.0;
+  }
+  var x = xi + corr * select(1.0, 1.5 / n, n > 1.5);
+  // a particle pushed hard from opposite sides by two bodies (a box set down on it on the floor) is crushed
+  var lastN = vec3f(0.0); var lastPush = 0.0; var crushed = R(i, 6).w;
+  // then the ground and the rigid shapes, in sequence, each in full: a particle never ends inside a body
+  let pg0 = ri - x.y;
+  if (pg0 > -0.01) { touch = 1.0; }
+  if (pg0 > 0.0) { let nn = vec3f(0.0, 1.0, 0.0); x += nn * pg0 + pfric(x - xs, nn, pg0, 0.5 * (mui + P.mat[P.ground_mat].x)); lastPush = pg0; lastN = nn; }
+  let ns0 = pld(o + 1u);
+  for (var q = 0u; q < ns0; q++) {
+    let j = pld(o + 2u + P_NN + q);
+    let wj = Hs(j, H_WP);
+    let Rm = qmat(Hs(j, H_WQ)); let h = Hs(j, H_H).xyz;
+    let dl = x - wj.xyz;
+    let lc = vec3f(dot(Rm[0], dl), dot(Rm[1], dl), dot(Rm[2], dl));
+    let cl = clamp(lc, -h, h); let df = lc - cl; let d2 = dot(df, df);
+    var nl = vec3f(0.0); var pen = 0.0;
+    if (d2 > 1e-12) {
+      let dist = sqrt(d2); if (dist >= ri + 0.01) { continue; }
+      touch = 1.0; if (dist >= ri) { continue; }
+      nl = df / dist; pen = ri - dist;
+    } else {
+      let dd = h - abs(lc);
+      if (dd.x <= dd.y && dd.x <= dd.z) { nl = vec3f(select(-1.0, 1.0, lc.x >= 0.0), 0.0, 0.0); pen = dd.x + ri; }
+      else if (dd.y <= dd.z) { nl = vec3f(0.0, select(-1.0, 1.0, lc.y >= 0.0), 0.0); pen = dd.y + ri; }
+      else { nl = vec3f(0.0, 0.0, select(-1.0, 1.0, lc.z >= 0.0)); pen = dd.z + ri; }
+    }
+    let nn = Rm[0] * nl.x + Rm[1] * nl.y + Rm[2] * nl.z;
+    let b = sbody(j);
+    let vb = S(b, S_V).xyz + cross(S(b, S_W).xyz, x - B(b, F_P).xyz);
+    // out along the normal: at most as far as the body moves into the particle plus the separation limit,
+    // the rest goes as a slide along the surface (no launch from a deep overlap)
+    let push = min(pen, max(dot(vb * P.p_h - (x - xs), nn), 0.0) + cap);
+    let mu = 0.5 * (mui + P.mat[u32(Hs(j, H_ID).y)].x);
+    x += nn * push + pfric((x - xs) - vb * P.p_h, nn, push, mu); touch = 1.0;
+    if (lastPush > 0.3 * ri && pen > 0.3 * ri && dot(nn, lastN) < -0.5) { crushed = 1.0; }
+    if (pen > lastPush) { lastPush = pen; lastN = nn; }
   }
   setR(i, 5, vec4f(x, touch));
   if (crushed > 0.0) { let r6 = R(i, 6); setR(i, 6, vec4f(r6.xyz, 1.0)); }
@@ -1373,7 +1401,7 @@ class GpuWorld {
     let PG = 256; while (PG < 2 * Math.max(1, this.capP)) PG *= 2; this.PG = PG; this.PGeff = 256;
     const cp = Math.max(1, this.capP);
     this.prtBuf = buf(cp * 112 + cp * 48, U.STORAGE | U.COPY_DST | U.COPY_SRC);
-    this.pintBuf = buf((3 * PG + 2 * cp) * 4, U.STORAGE | U.COPY_DST);
+    this.pintBuf = buf((3 * PG + 2 * cp + 38 * cp) * 4, U.STORAGE | U.COPY_DST);
     const bglP = d.createBindGroupLayout({ entries: [sto(0), sto(1)] });
     const partL = d.createPipelineLayout({ bindGroupLayouts: [bgl0, bgl1, bglP] });
     this.bgP = d.createBindGroup({ layout: bglP, entries: [ent(0, this.prtBuf), ent(1, this.pintBuf)] });
@@ -1385,7 +1413,7 @@ class GpuWorld {
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
-      ...(modP ? ['p_place', 'p_prep', 'p_scan', 'p_scatter', 'p_integrate', 'p_contact', 'p_apply', 'p_finish'] : []).map(async k => { this.pl[k] = await mk(k, partL, modP); })]);
+      ...(modP ? ['p_gather', 'p_place', 'p_prep', 'p_scan', 'p_scatter', 'p_integrate', 'p_contact', 'p_apply', 'p_finish'] : []).map(async k => { this.pl[k] = await mk(k, partL, modP); })]);
     this.ts = d.features.has('timestamp-query');
     this.stages = ['broad', 'narrow', 'colour', 'sub-steps', 'particles', 'sleep'];
     if (this.ts) {
@@ -1524,6 +1552,7 @@ class GpuWorld {
       // with no particle moving at the last stats and no new input, only the wake check runs (a particle woken now
       // starts moving a few steps later, when the stats show it)
       if (this.stats.pActive > 0 || pBusy) {
+        run(p, 'p_gather', np);
         for (let k = 0; k < this.psub; k++) { run(p, 'p_integrate', np); run(p, 'p_contact', np); run(p, 'p_apply', np); }
         run(p, 'p_finish', np);
       }
