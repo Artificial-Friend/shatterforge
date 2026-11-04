@@ -88,6 +88,20 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn chunk_vlen(k: u32) -> u32 { game().chunks[k as usize].v.len() as u32 }
 #[no_mangle] pub extern "C" fn chunk_iptr(k: u32) -> *const u32 { game().chunks[k as usize].i.as_ptr() }
 #[no_mangle] pub extern "C" fn chunk_ilen(k: u32) -> u32 { game().chunks[k as usize].i.len() as u32 }
+/// Volume (m³) of the static bricks chunk k shows (the same bricks its mesh is built from), for the lab's check
+/// that what is drawn never loses volume except to dust.
+#[no_mangle] pub extern "C" fn chunk_volume(k: i32) -> f32 {
+    let g = game();
+    let (y0, y1) = (k * crate::tower::STOREY, (k + 1) * crate::tower::STOREY);
+    let mut v = 0.0f64;
+    for i in 0..g.b.len() {
+        if g.b.flags[i] & (crate::brick::F_ALIVE | crate::brick::F_DYNAMIC) != crate::brick::F_ALIVE { continue; }
+        let y = g.b.y[i] as i32; if y < y0 || y >= y1 { continue; }
+        let t = g.b.tbox(i as u32);
+        v += ((t.max[0] - t.min[0]) as f64) * ((t.max[1] - t.min[1]) as f64) * ((t.max[2] - t.min[2]) as f64);
+    }
+    let t = crate::brick::TICK as f64; (v * t * t * t) as f32
+}
 #[no_mangle] pub extern "C" fn dirty_lo() -> i32 { game().dirty.0 }
 #[no_mangle] pub extern "C" fn dirty_hi() -> i32 { game().dirty.1 }
 #[no_mangle] pub extern "C" fn out_ptr() -> *const f32 { game().out.as_ptr() }

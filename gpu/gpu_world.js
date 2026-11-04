@@ -620,6 +620,17 @@ fn mhdr(m: u32) -> vec2u { let h = man[m * MS]; return vec2u(u32(h.x), u32(h.y))
 // split = an overflow contact solved in parallel with others on the same bodies (Jacobi with mass
 // splitting): each body acts as if it had 1/k of its mass for its k overflow contacts, and the velocity
 // changes are summed atomically and averaged afterwards (ovf_apply).
+// Mass ratio limit: across one contact the heavier body responds as if at most P_RATIO times heavier. A block of
+// thousands of tonnes on light rubble (1:600) does not converge in a few iterations: the rubble is squeezed and
+// the overlap comes back as a rebound of the whole block. (Momentum is not kept exactly there; the energy goes
+// down, as in crushing.) Returns the factors for the inverse masses of a and b.
+const P_RATIO = 20.0;
+fn ratio_scale(ia: f32, ib: f32) -> vec2f {
+  if (ia <= 0.0 || ib <= 0.0) { return vec2f(1.0); }
+  if (ia * P_RATIO < ib) { return vec2f(ib / (P_RATIO * ia), 1.0); }
+  if (ib * P_RATIO < ia) { return vec2f(1.0, ia / (P_RATIO * ib)); }
+  return vec2f(1.0);
+}
 fn solve_man(m: u32, use_bias: bool, split: bool) {
   let base = m * MS;
   let hd = man[base]; let a = u32(hd.x); let b = u32(hd.y); let cnt = u32(hd.z);
@@ -628,8 +639,10 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
   let va0 = va; let wa0 = wa; let vb0 = vb; let wb0 = wb;
   var ka = 1.0; var kb = 1.0;
   if (split) { ka = f32(max(ld(P.o_ocount + a), 1u)); kb = f32(max(ld(P.o_ocount + b), 1u)); }
-  let ima = va4.w * ka; let imb = vb4.w * kb;
-  let A0 = S(a, S_I0) * ka; let A1 = S(a, S_I1) * ka; let B0 = S(b, S_I0) * kb; let B1 = S(b, S_I1) * kb;
+  let sc = ratio_scale(va4.w, vb4.w);
+  let rec = split || sc.x != 1.0 || sc.y != 1.0;   // effective masses recomputed
+  let ima = va4.w * ka * sc.x; let imb = vb4.w * kb * sc.y;
+  let A0 = S(a, S_I0) * ka * sc.x; let A1 = S(a, S_I1) * ka * sc.x; let B0 = S(b, S_I0) * kb * sc.y; let B1 = S(b, S_I1) * kb * sc.y;
   let tha = S(a, S_TH).xyz; let thb = S(b, S_TH).xyz;
   let dpab = S(b, S_DP).xyz - S(a, S_DP).xyz;
   let n4 = man[base + M_N]; let n = n4.xyz;
@@ -646,7 +659,7 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
     let vn = dot(vb - va, n) + dot(wb, rbxn) - dot(wa, raxn);
     let j0 = jn[k];
     var nm = pb.w;
-    if (split) { let kk = ima + imb + dot(raxn, imul(A0, A1, raxn)) + dot(rbxn, imul(B0, B1, rbxn)); nm = select(0.0, 1.0 / kk, kk > 0.0); }
+    if (rec) { let kk = ima + imb + dot(raxn, imul(A0, A1, raxn)) + dot(rbxn, imul(B0, B1, rbxn)); nm = select(0.0, 1.0 / kk, kk > 0.0); }
     let nj = max(j0 - nm * ms * (vn + bias) - is_ * j0, 0.0);
     let imp = nj - j0;
     jn[k] = nj; tot += nj;
@@ -672,7 +685,7 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
   }
   let o1 = jt.x; let o2 = jt.y;
   var tm1 = fa4.w; var tm2 = fb4.w; var twm = e04.w;
-  if (split) {
+  if (rec) {
     let k1 = ima + imb + dot(ca1, imul(A0, A1, ca1)) + dot(cb1, imul(B0, B1, cb1));
     let k2 = ima + imb + dot(ca2, imul(A0, A1, ca2)) + dot(cb2, imul(B0, B1, cb2));
     let kt = dot(n, imul(A0, A1, n)) + dot(n, imul(B0, B1, n));
@@ -700,8 +713,8 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
     if (imb > 0.0) { acc_add(b, vb - vb0, wb - wb0); }
     return;
   }
-  if (ima > 0.0) { setS(a, S_V, vec4f(va, ima)); setS(a, S_W, vec4f(wa, 0.0)); }
-  if (imb > 0.0) { setS(b, S_V, vec4f(vb, imb)); setS(b, S_W, vec4f(wb, 0.0)); }
+  if (ima > 0.0) { setS(a, S_V, vec4f(va, va4.w)); setS(a, S_W, vec4f(wa, 0.0)); }
+  if (imb > 0.0) { setS(b, S_V, vec4f(vb, vb4.w)); setS(b, S_W, vec4f(wb, 0.0)); }
 }
 
 // fixed-point accumulation of velocity changes (there are no float atomics): 2^18 per m/s
@@ -736,8 +749,9 @@ fn restitute_man(m: u32) {
   let hd = man[base]; let a = u32(hd.x); let b = u32(hd.y); let cnt = u32(hd.z);
   let va4 = S(a, S_V); let vb4 = S(b, S_V);
   var va = va4.xyz; var wa = S(a, S_W).xyz; var vb = vb4.xyz; var wb = S(b, S_W).xyz;
-  let ima = va4.w; let imb = vb4.w;
-  let A0 = S(a, S_I0); let A1 = S(a, S_I1); let B0 = S(b, S_I0); let B1 = S(b, S_I1);
+  let sc = ratio_scale(va4.w, vb4.w); let rec = sc.x != 1.0 || sc.y != 1.0;
+  let ima = va4.w * sc.x; let imb = vb4.w * sc.y;
+  let A0 = S(a, S_I0) * sc.x; let A1 = S(a, S_I1) * sc.x; let B0 = S(b, S_I0) * sc.y; let B1 = S(b, S_I1) * sc.y;
   let n = man[base + M_N].xyz; let rv = man[base + M_RV];
   var jn = man[base + M_JN];
   // the points of a patch are coupled (one point's bounce changes the others' velocity): iterate
@@ -746,14 +760,16 @@ fn restitute_man(m: u32) {
     let pa = man[base + M_PT + 2u * k]; let pb = man[base + M_PT + 2u * k + 1u];
     let raxn = cross(pa.xyz, n); let rbxn = cross(pb.xyz, n);
     let vn = dot(vb - va, n) + dot(wb, rbxn) - dot(wa, raxn);
-    let nj = max(jn[k] - pb.w * (vn + rest * rv[k]), 0.0);
+    var nm = pb.w;
+    if (rec) { let kk = ima + imb + dot(raxn, imul(A0, A1, raxn)) + dot(rbxn, imul(B0, B1, rbxn)); nm = select(0.0, 1.0 / kk, kk > 0.0); }
+    let nj = max(jn[k] - nm * (vn + rest * rv[k]), 0.0);
     let imp = nj - jn[k]; jn[k] = nj;
     va -= n * (imp * ima); wa -= imul(A0, A1, raxn) * imp;
     vb += n * (imp * imb); wb += imul(B0, B1, rbxn) * imp;
   } }
   man[base + M_JN] = jn;
-  if (ima > 0.0) { setS(a, S_V, vec4f(va, ima)); setS(a, S_W, vec4f(wa, 0.0)); }
-  if (imb > 0.0) { setS(b, S_V, vec4f(vb, imb)); setS(b, S_W, vec4f(wb, 0.0)); }
+  if (ima > 0.0) { setS(a, S_V, vec4f(va, va4.w)); setS(a, S_W, vec4f(wa, 0.0)); }
+  if (imb > 0.0) { setS(b, S_V, vec4f(vb, vb4.w)); setS(b, S_W, vec4f(wb, 0.0)); }
 }
 
 fn color_item(g: u32) -> u32 {
@@ -1332,7 +1348,7 @@ class GpuWorld {
     const a1 = 2 * zeta + h * omega, a2 = h * omega * a1, a3 = 1 / (1 + a2);
     const f = new Float32Array(128), u = new Uint32Array(f.buffer);
     const cur = this.frame & 1, L = this.L;
-    f.set([0, -9.81, 0, h, invH, omega / a1, a2 * a3, a3, 3.0, 1.0, 0.02, dt, this.cell]);
+    f.set([0, -9.81, 0, h, invH, omega / a1, a2 * a3, a3, this.maxPush ?? 3.0, 1.0, 0.02, dt, this.cell]);
     // the grid is sized by the shapes there are, not by capacity (it is cleared and scanned every step)
     let g = 256; while (g < 2 * this.ns1 && g < this.G) g *= 2; this.Geff = g;
     u[13] = this.n1; u[14] = g - 1; u[15] = this.maxMan;

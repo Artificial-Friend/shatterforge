@@ -64,6 +64,8 @@ button:disabled { opacity: .5; cursor: default; }
   <h2>Benchmark</h2>
   <span class="hint">the same scripted destruction every run: the ground storey cut by 36 fixed blasts, the tower dropping and crushing down, three steel balls; 12 s of simulated time, then a report</span>
   <button id="bench-go" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run benchmark (reloads the page) · key K</button>
+  <button id="lab-quick" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run lab checks, quick (2 scenarios, reloads)</button>
+  <button id="lab-full" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run lab checks, full (5 scenarios, reloads)</button>
   <h2>Diagnostics</h2>
   <span class="hint">switch parts off one at a time while debris moves; the one that brings the frame rate back is the cause</span>
   <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-physics" checked> step the physics</label>
@@ -104,9 +106,24 @@ const WASM_B64 = "__WASM_B64__";
 const $ = (id) => document.getElementById(id);
 const TICK = 0.125;
 // the building (remembered): 0 concrete frame, 1 masonry, 2 timber, each at a height it can stand
+// ---- lab scenarios (the lab itself is further down): a scenario queued before the reload sets the building
+const LAB_SCENARIOS = {
+  collapse: { kind: 0, storeys: 4, frames: 600, title: 'concrete frame, 4 storeys: the ground storey cut, collapse, settle', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
+  ball: { kind: 0, storeys: 3, frames: 360, title: 'concrete frame, 3 storeys: two steel balls into the facade', script: [[10, 'ball', [-4, 4, -30, 0.15, 0.02]], [130, 'ball', [3, 2.5, -30, -0.1, 0.0]]], expect: {} },
+  masonry: { kind: 1, storeys: 3, frames: 600, title: 'masonry, 3 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
+  timber: { kind: 2, storeys: 3, frames: 600, title: 'mass timber, 3 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
+  rubble: { kind: 0, storeys: 3, frames: 720, title: 'concrete frame, 3 storeys: cut, then a blast into the rubble', script: [[0, 'cut'], [480, 'blast', [-14, 6, -14, 1, -0.45, 1, 2.5]]], expect: { settle: true } },
+};
+const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'rubble'] };
+let LABSTATE = null; try { LABSTATE = JSON.parse(localStorage.getItem('sf-lab') || 'null'); } catch (e) {}
+if (LABSTATE && !(LABSTATE.queue && LABSTATE.queue.length && LAB_SCENARIOS[LABSTATE.queue[0]])) LABSTATE = null;
+const LAB = { on: false, t: 0, f: 0 };
+// game time: the real clock, or the lab's virtual one
+const clock = () => (LAB.on ? LAB.t : performance.now());
 let KIND = 0; try { KIND = +(JSON.parse(localStorage.getItem('sf-settings') || '{}').kind || 0); } catch (e) {}
 if (![0, 1, 2].includes(KIND)) KIND = 0;
-const STOREYS = [12, 5, 6][KIND];
+if (LABSTATE) KIND = LAB_SCENARIOS[LABSTATE.queue[0]].kind;
+const STOREYS = LABSTATE ? LAB_SCENARIOS[LABSTATE.queue[0]].storeys : [12, 5, 6][KIND];
 let E = null, gpu = null, dev = null, slots = new Map(), debrisFrom = 2;
 let radius = 0.7, fly = false, locked = false, yaw = Math.PI, pitch = 0, physicsPaused = true, lastActive = -1e9;
 const keys = new Set();
@@ -138,8 +155,10 @@ addEventListener('resize', resize); resize();
 
 // ---- tower meshes, one per storey band
 const towerMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-const chunks = [];
+const chunks = [], chunkVol = {};
 function chunkMesh(k) {
+  chunkVol[k] = E.chunk_volume ? E.chunk_volume(k) : 0;
+  if (LAB.on) LAB.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
   const vl = E.chunk_vlen(k), il = E.chunk_ilen(k);
   const v = new Float32Array(E.memory.buffer, E.chunk_vptr(k), vl).slice();
   const ix = new Uint32Array(E.memory.buffer, E.chunk_iptr(k), il).slice();
@@ -200,7 +219,10 @@ function pullDebris() {
   reading++;
   const seq = ++readSeq, issuedAt = stepsDone;
   const tr = performance.now();
-  Promise.all([gpu.readPose(debrisFrom), gpu.readParticles ? gpu.readParticles() : null]).then(([r, pr]) => {
+  // particle generations now: a slot freed and reused before this read-back arrives holds another particle,
+  // and the data shows the old one (matching them by today's generation drew a crumb flying across the scene)
+  const pgen = pInfo.map(x => (x ? x.gen : 0));
+  labGate(Promise.all([gpu.readPose(debrisFrom), gpu.readParticles ? gpu.readParticles() : null])).then(([r, pr]) => {
     r.parts = pr;
     perfAdd('read wait', performance.now() - tr);
     reading--;
@@ -214,7 +236,7 @@ function pullDebris() {
       for (const e of pendingChunks) { if (e.need <= seq) due.add(e.k); else keep.push(e); }
       pendingChunks = keep; for (const k of due) chunkMesh(k);
     }
-    r.t = performance.now();
+    r.t = clock();
     // shapes are matched between read-backs by slot and generation (a reused slot holds another body)
     r.index = new Map(); for (let k = 0; k < r.slots.length; k++) r.index.set(r.gens[k] * 1048576 + r.slots[k], k);
     snapPrev = snapCur; snapCur = r;
@@ -240,13 +262,14 @@ function pullDebris() {
       const d = pr.data, list = [];
       for (let i = 0; i < pr.n; i++) {
         const st = d[i * 12 + 10], inf = pInfo[i];
-        if (!inf || inf.dead || st === 0 || st === 4) continue;
+        if (!inf || inf.dead || st === 0 || st === 4 || inf.gen !== pgen[i]) continue;
         if (st === 3) { inf.dead = true; gpu.killParticle(i); partsCrushed++; continue; }
         list.push(i);
       }
       pr.list = list; pr.gens = list.map(i => pInfo[i].gen);
       pr.index = new Map(); list.forEach((i, k) => pr.index.set(pInfo[i].gen * 1048576 + i, k));
     }
+    if (LAB.on) labOnRead(r, pr);
     velHist.unshift({ v: r.vel, frame: r.frame }); if (velHist.length > 4) velHist.pop(); lastReadFrame = r.frame; lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
     const n = Math.min(MAXD, r.pose.length / 10);
     for (let k = 0; k < n; k++) dMesh.setColorAt(k, debrisColour(r.cols[k], r.slots[k]));
@@ -264,6 +287,7 @@ function drawDebris(now) {
   const span = p ? Math.max(r.t - p.t, 1) : 1;
   const a = p ? Math.min(1, (now - r.t) / span) : 1;
   const n = Math.min(MAXD, r.pose.length / 10);
+  const lab = LAB.on; if (lab) labDrawBegin();
   for (let k = 0; k < n; k++) {
     const o = k * 10;
     const j = p && a < 1 ? p.index.get(r.gens[k] * 1048576 + r.slots[k]) : undefined;
@@ -277,6 +301,11 @@ function drawDebris(now) {
     }
     SS.set(r.pose[o + 7], r.pose[o + 8], r.pose[o + 9]);
     M4.compose(PP, QQ, SS); dMesh.setMatrixAt(k, M4);
+    if (lab) {
+      const sh = gpu.shapes[r.slots[k] - 1], b = sh ? sh.body : 0, vo = (b - 1) * 3;
+      const sp = r.vel && vo >= 0 && vo + 2 < r.vel.length ? Math.hypot(r.vel[vo], r.vel[vo + 1], r.vel[vo + 2]) : 0;
+      labDrawn(r.gens[k] * 1048576 + r.slots[k], PP.x, PP.y, PP.z, sp, LAB.balls.has(b) ? 0 : 8 * SS.x * SS.y * SS.z);
+    }
   }
   // particles, blended the same way (matched by slot and generation)
   let np = 0;
@@ -295,6 +324,7 @@ function drawDebris(now) {
       } else { PP.set(d[o], d[o + 1], d[o + 2]); QQ.set(d[o + 6], d[o + 7], d[o + 8], d[o + 9]); }
       SS.set(inf.h[0], inf.h[1], inf.h[2]);
       M4.compose(PP, QQ, SS); dMesh.setMatrixAt(n + k, M4);
+      if (lab) labDrawn(-(pr.gens[k] * 1048576 + i) - 1, PP.x, PP.y, PP.z, Math.hypot(d[o + 3], d[o + 4], d[o + 5]), 8 * SS.x * SS.y * SS.z);
     }
   }
   dMesh.count = n + np; debrisShapes = n; particlesDrawn = np;
@@ -403,7 +433,7 @@ function addPieces(list, xf, vel, cool) {
     if (b.id < 0) return;
     const idx = idxs[k], gb = idx ? gpu.bodies[idx - 1] : null;
     if (!gb) return;
-    bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, v0: bodies[k].v, f0: gpu.frame, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: performance.now() + (cool || 0) });
+    bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, v0: bodies[k].v, f0: gpu.frame, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: clock() + (cool || 0) });
   });
   // (vel was called for the bodies kept, in order, then for the particles)
   return { idxs, list, parts };
@@ -473,6 +503,7 @@ function pump() {
   else if (jobs.structure && !gpu) { jobs.structure = false; job = { op: 'structure', max: 48 }; }
   if (!job) return;
   busy = job;
+  if (LAB.on) { LAB.jobq.push({ job, due: LAB.f + LAB.jobLag }); return; }
   if (worker) { const { ctx, ...msg } = job; worker.postMessage(msg); }
   else finish(runInline(job));
 }
@@ -542,11 +573,11 @@ function blastWave(c, r) {
     const v0 = velOf(i), v = [v0[0] + dx / dist * s, v0[1] + dy / dist * s + 0.3 * s, v0[2] + dz / dist * s];
     gpu.setVelocity(i, v, [0, 1, 2].map(() => (Math.random() - 0.5) * 2), p, [lastBodies[o + 3], lastBodies[o + 4], lastBodies[o + 5], lastBodies[o + 6]]);
   }
-  lastActive = performance.now();
+  lastActive = clock();
 }
-function doBlast() {
-  const d = new THREE.Vector3(); cam.getWorldDirection(d);
-  const o = cam.position;
+function doBlast(o0, d0) {
+  const d = d0 || new THREE.Vector3(); if (!d0) cam.getWorldDirection(d);
+  const o = o0 || cam.position;
   const ts = E.raycast(o.x, o.y, o.z, d.x, d.y, d.z, 200);
   const hit = gpu ? rayDebris([o.x, o.y, o.z], [d.x, d.y, d.z], ts >= 0 ? ts : 200) : null;
   if (hit) {
@@ -586,7 +617,7 @@ function onBlast(job, r) {
     });
   }
   const pieces = bodies.filter(b => b.id >= 0).length;
-  lastActive = performance.now();
+  lastActive = clock();
   jobs.structure = true;
   lastBlast = `${bodies.length - pieces} crumbs, ${pieces} pieces · ${r.ms.toFixed(1)} ms in the engine, ${(performance.now() - job.ctx.t0).toFixed(0)} ms to the screen`;
 }
@@ -599,7 +630,7 @@ function onStructure(r) {
   const { updates, bodies } = readStatic(r.out);
   remeshDirty();
   if (gpu) { applyStatic(updates); addPieces(bodies, null, null, 150); }
-  lastActive = performance.now();
+  lastActive = clock();
   lastBlast = `structure: ${r.n} failures this round (${r.ms.toFixed(0)} ms in the engine)`;
 }
 
@@ -611,7 +642,7 @@ const PER_BODY = 32, STATIC_HITS = 96;
 function impacts() {
   const evs = gpu.takeEvents();
   if (!evs.length) return;
-  const now = performance.now();
+  const now = clock();
   const matOf = (slot) => { const sh = slot > 0 ? gpu.shapes[slot - 1] : null; return sh ? sh.mat : -1; };
   const sides = new Map();
   for (const e of evs) for (const [idx, sgn, oslot] of [[e.a, -1, e.sb], [e.b, 1, e.sa]]) {
@@ -744,7 +775,7 @@ function onImpacts(job, r) {
     breaks++;
   }
   if (window.__dbg && nbr) console.warn(`last cut: contacts at ${f[o].toFixed(0)} ticks, plane ${f[o + 1]}, capacity ${f[o + 2].toFixed(0)} MN, ${f[o + 3].toFixed(1)} MJ/m, needed ${f[o + 4].toFixed(0)} MN, squeezed ${f[o + 5]}`);
-  lastActive = performance.now();
+  lastActive = clock();
 }
 
 // ---- input
@@ -853,7 +884,7 @@ function fireBall() {
   const c = [cam.position.x + d.x * (r + 0.6), cam.position.y + d.y * (r + 0.6), cam.position.z + d.z * (r + 0.6)];
   if (gpu.roomBodies() < 1 || gpu.roomShapes() < 4) return;
   gpu.addBodies([{ shapes: ballShapes(c, r), v: [d.x * v, d.y * v, d.z * v], w: [0, 0, 0] }]);
-  lastActive = performance.now();
+  lastActive = clock();
   balls++;
   lastBlast = `steel ball ${(2 * r).toFixed(2)} m at ${v} m/s`;
 }
@@ -865,7 +896,9 @@ const BENCH = { on: false, phase: '', t0: 0, f0: 0, rows: [], frameMs: [], balls
 function seededRandom(seed) { let a = seed >>> 0; return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 $('bench-go').addEventListener('click', () => { try { localStorage.setItem('sf-bench', '1'); } catch (e) {} location.reload(); });
 $('bench-close').addEventListener('click', () => { $('bench').hidden = true; });
-$('bench-copy').addEventListener('click', () => { const t = $('bench-out').textContent; navigator.clipboard.writeText(t).catch(() => { const r = document.createRange(); r.selectNodeContents($('bench-out')); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }); });
+$('lab-quick').addEventListener('click', () => labStart(LAB_SUITES.quick));
+$('lab-full').addEventListener('click', () => labStart(LAB_SUITES.full));
+$('bench-copy').addEventListener('click', () => { const t = LAB.copyText || $('bench-out').textContent; navigator.clipboard.writeText(t).catch(() => { const r = document.createRange(); r.selectNodeContents($('bench-out')); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }); });
 function benchPending() { try { if (localStorage.getItem('sf-bench') === '1') { localStorage.removeItem('sf-bench'); return true; } } catch (e) {} return false; }
 async function benchStart() {
   if (!gpu) return;
@@ -882,7 +915,7 @@ async function benchStart() {
   BENCH.cutMs = performance.now() - t;
   BENCH.phase = 'collapse';
   BENCH.t0 = performance.now(); BENCH.f0 = stepsDone; BENCH.lastRow = stepsDone; BENCH.wall0 = BENCH.t0;
-  lastActive = performance.now();
+  lastActive = clock();
   physicsPaused = false;
 }
 function benchTick(now, dt) {
@@ -894,7 +927,7 @@ function benchTick(now, dt) {
   while (BENCH.next < BENCH.balls.length && f >= BENCH.balls[BENCH.next][0]) {
     const [, x, y, z, yw, pt] = BENCH.balls[BENCH.next++];
     const d = [Math.sin(yw) * Math.cos(pt), Math.sin(pt), Math.cos(yw) * Math.cos(pt)];
-    gpu.addBodies([{ shapes: ballShapes([x, y, z], 0.4), v: [d[0] * 120, d[1] * 120, d[2] * 120], w: [0, 0, 0] }]); lastActive = performance.now();
+    gpu.addBodies([{ shapes: ballShapes([x, y, z], 0.4), v: [d[0] * 120, d[1] * 120, d[2] * 120], w: [0, 0, 0] }]); lastActive = clock();
   }
   if (f - BENCH.lastRow >= 60 || f >= BENCH.end) {
     BENCH.lastRow = f;
@@ -937,6 +970,7 @@ function benchShow(done) {
 let last = performance.now(), acc = 0, fps = 60, frames = 0, fpsT = last;
 function frame(now) {
   requestAnimationFrame(frame);
+  if (LAB.on) { last = now; return; }   // the lab drives the frames itself
   const fj = performance.now();
   perfAdd('interval', now - last);
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
@@ -975,7 +1009,7 @@ function frameBody(now, dt) {
   }
   benchTick(now, dt);
   if (diag.draw) timed('draw', () => drawDebris(now));
-  timed('render', () => renderer.render(scene, cam));
+  if (!LAB.on || LAB.render) timed('render', () => renderer.render(scene, cam));
   frames++; frames0++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now; hud(); }
 }
 const rate = { steps: 0, reads: 0, t: performance.now(), s0: 0, r0: 0 };
@@ -1010,6 +1044,7 @@ function hud() {
   ].filter(Boolean).join('<br>');
 }
 
+__LAB_JS__
 // ---- start
 (async () => {
   try {
@@ -1018,7 +1053,7 @@ function hud() {
     E.game_new_kind(STOREYS, KIND);
     $('title').textContent = ['A 12-storey concrete-frame tower at real scale', 'A 5-storey masonry building at real scale', 'A 6-storey mass-timber building at real scale'][KIND];
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
-    await startWorker(bytes);
+    if (!LABSTATE) await startWorker(bytes);   // (the lab runs the engine inline, its jobs delayed by whole frames)
     initSettings(); initDiag(); initPreset();
     E.player_set(0, 0.0, -16);
   } catch (e) { $('warn').textContent = 'Could not start the engine: ' + e.message; return; }
@@ -1040,8 +1075,9 @@ function hud() {
   } catch (e) { gpu = null; $('warn').textContent = 'GPU physics unavailable: ' + e.message; }
   $('go').disabled = false; $('go').textContent = 'Enter';
   hud();
-  // a benchmark asked for before the reload starts by itself
-  if (benchPending()) { $('start').hidden = true; benchStart(); }
+  // a benchmark or lab run asked for before the reload starts by itself
+  if (LABSTATE && gpu) labRun().catch(e => { $('bench').hidden = false; $('bench-out').textContent = 'Lab failed: ' + e.message + '\n' + e.stack; window.LAB_ERROR = e.message; });
+  else if (benchPending()) { $('start').hidden = true; benchStart(); }
 })();
 $('go').addEventListener('click', () => {
   $('start').hidden = true; physicsPaused = false;

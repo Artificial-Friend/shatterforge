@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -16,7 +16,8 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
   fs.writeFileSync('/tmp/sf_blank.html', '<html><body></body></html>');
   await p.goto('file:///tmp/sf_blank.html');
   await p.addScriptTag({ path: path.join(__dirname, 'gpu_world.js') });
-  const res = await p.evaluate(async ({ wasm, scenes, SUB }) => {
+  const res = await p.evaluate(async ({ wasm, scenes, SUB, SAND_PUSH, SAND_MAT, SAND_SUB, SAND_COL }) => {
+    if (SAND_PUSH) globalThis.SAND_PUSH = SAND_PUSH; if (SAND_MAT) globalThis.SAND_MAT = SAND_MAT; if (SAND_SUB) globalThis.SAND_SUB = SAND_SUB; if (SAND_COL) globalThis.SAND_COL = SAND_COL;
     // SF_SUB=n forces n sub-steps everywhere (to see what fewer cost in accuracy)
     if (SUB) { const c0 = GpuWorld.create; GpuWorld.create = (d, l, o = {}) => c0.call(GpuWorld, d, l, { ...o, substeps: SUB }); }
     const bytes = Uint8Array.from(atob(wasm), c => c.charCodeAt(0));
@@ -253,6 +254,34 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       check('paircount', true, { candidates: counts });
     }
+    if (scenes.includes('sandwich')) {
+      // a heavy block (a building's upper part, ~1,900 t) lands at 5.7 m/s on light rubble pieces (~5 t each)
+      // lying on the ground: it must not rebound (concrete restitution 0.1: at most 0.6 m/s) nor throw them up
+      const pieces = [];
+      for (let i = 0; i < 6; i++) for (let k = 0; k < 4; k++) pieces.push({ shapes: [{ p: [-7.5 + i * 3, 0.6, -6 + k * 4], q: [0, 0, 0, 1], h: [1.0, 0.6, 1.0], mat: globalThis.SAND_MAT != null ? +globalThis.SAND_MAT : MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
+      const SM = globalThis.SAND_MAT != null ? +globalThis.SAND_MAT : MAT.concrete;
+      const block = { shapes: [{ p: [0, 1.2 + 0.05 + 4, 0], q: [0, 0, 0, 1], h: [10, 4, 10], mat: SM }], v: [0, -5.7, 0], w: [0, 0, 0] };
+      // (the block weighs 2400 kg/m^3 x 3200 m^3 = 7,700 t; scaled to the case seen, 1,900 t, by its density)
+      const w = await GpuWorld.create(dev, [...pieces, block], { substeps: +(globalThis.SAND_SUB || 12), sleep: false });
+      if (globalThis.SAND_PUSH) w.maxPush = +globalThis.SAND_PUSH;
+      if (globalThis.SAND_COL) { w.maxColors = +globalThis.SAND_COL; w.colorLimit = +globalThis.SAND_COL; }
+      const statsAt = [];
+      const bi = w.n;   // the block is the last body
+      let vmax = -1e9, pmax = -1e9, yBlock = [], hit = -1;
+      for (let f = 1; f <= 90; f++) {
+        w.step(1 / 60);
+        await dev.queue.onSubmittedWorkDone(); await settle();
+        const r = await w.readPose();
+        const vy = r.vel[(bi - 1) * 3 + 1];
+        if (hit < 0 && vy > -5) hit = f;
+        if (hit > 0) vmax = Math.max(vmax, vy);
+        for (let b = 1; b < bi; b++) pmax = Math.max(pmax, r.vel[(b - 1) * 3 + 1]);
+        if (f % 5 === 0) yBlock.push(+r.body[(bi - 1) * 7 + 1].toFixed(3));
+        if (f === 3) statsAt.push({ ...w.stats, colorLimit: w.colorLimit });
+      }
+      w.destroy();
+      check('sandwich', vmax < 0.6 && pmax < 2, { hitAt: hit, blockMaxUp_ms: +vmax.toFixed(2), piecesMaxUp_ms: +pmax.toFixed(2), blockY: yBlock, stats: statsAt });
+    }
     if (scenes.includes('particles')) {
       // granular crumbs poured on a fixed table: they pile up on it and around it on the ground, never inside it
       // or under the ground, come to rest and sleep (then the world costs nothing); a box dropped on the pile
@@ -332,7 +361,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0) });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   await b.close();
