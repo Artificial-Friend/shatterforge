@@ -149,5 +149,13 @@ SwiftShader runs WebGPU on the CPU, so its timings mean nothing. Throughput is m
 
 ## Still to do
 
+- **Large bodies landing (open, found by the lab).** A body with more contacts than colours (the upper part of a building, thousands of bricks) is partly solved in the parallel overflow pass. Two Jacobi relax rounds do not take back the push-out of the biased pass: the GPU test `compound` (800 bricks as one body landing at 5.9 m/s on a brick floor) rebounds at 1.1 m/s where concrete gives 0.59, and in the lab's collapse the building's upper part rebounds at up to 3.8 m/s with the pieces under it. What was tried:
+  - 6 relax rounds fix the isolated test (0.63 m/s) but double the sub-step time, and did not fix the collapse.
+  - Mass splitting over all of a body's contacts (coloured ones included) made no difference.
+  - Restitution, push limits, sub-steps and colours do not change it.
+  The candidates are crushing on contact on the GPU (a heavy body landing on light rubble crushes it in the same step instead of four frames later in the engine), or a dedicated solver for very large bodies (all their contacts in one sequential pass). `compound` is left out of the default run until then.
+- **Mass ratio limit.** Across one contact the heavier body responds as if at most 20 times heavier (GPU test `sandwich`: a 7,700 t block landing on 11 t rubble went from a 2.52 m/s rebound to 0.37 m/s).
+- **Depenetration** is at most 1 m/s (it was 3; pieces made overlapping the slab they were crushing into popped out).
+
 - **Contact sag.** Stiffer contacts are still needed. A 20-high stack sags 7 mm (0.35 mm per contact), within budget but not the micron level of real masonry.
 - **CPU reference.** The CPU engine does not have compound bodies, materials or restitution. It stays the reference for the box core only.

@@ -637,16 +637,10 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
   let va4 = S(a, S_V); let vb4 = S(b, S_V);
   var va = va4.xyz; var wa = S(a, S_W).xyz; var vb = vb4.xyz; var wb = S(b, S_W).xyz;
   let va0 = va; let wa0 = wa; let vb0 = vb; let wb0 = wb;
-  // Mass splitting: a body with more contacts than colours (some in the parallel overflow pass) has every one
-  // of its contacts act on a share of it (mass / its contact count), the coloured ones too, and every change is
-  // applied with its real mass (here at the end for the coloured ones, averaged in ovf_apply for the others).
-  // Solving its coloured contacts with the full mass first (each stopping the whole body at one point) and the
-  // rest split by the overflow count alone threw a large body landing on a brick floor back up at 1-9 m/s.
   var ka = 1.0; var kb = 1.0;
-  if (split || ld(P.o_ocount + a) > 0u) { ka = f32(max(ld(P.o_bcount + a), 1u)); }
-  if (split || ld(P.o_ocount + b) > 0u) { kb = f32(max(ld(P.o_bcount + b), 1u)); }
+  if (split) { ka = f32(max(ld(P.o_ocount + a), 1u)); kb = f32(max(ld(P.o_ocount + b), 1u)); }
   let sc = ratio_scale(va4.w, vb4.w);
-  let rec = split || ka != 1.0 || kb != 1.0 || sc.x != 1.0 || sc.y != 1.0;   // effective masses recomputed
+  let rec = split || sc.x != 1.0 || sc.y != 1.0;   // effective masses recomputed
   let ima = va4.w * ka * sc.x; let imb = vb4.w * kb * sc.y;
   let A0 = S(a, S_I0) * ka * sc.x; let A1 = S(a, S_I1) * ka * sc.x; let B0 = S(b, S_I0) * kb * sc.y; let B1 = S(b, S_I1) * kb * sc.y;
   let tha = S(a, S_TH).xyz; let thb = S(b, S_TH).xyz;
@@ -716,13 +710,13 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
   if (!use_bias) { let o = man[base + M_OUT]; man[base + M_OUT] = vec4f(o.x, o.y + tot, o.zw); }
   if (split) {
     // (each change divided by the count here, not after summing: a large body has thousands of overflow
-    // contacts, and their changes against a share of its mass (several m/s each) overflowed the 32-bit sum)
+    // contacts, and their changes against a share of its mass (several m/s each) can overflow the 32-bit sum)
     if (ima > 0.0) { acc_add(a, (va - va0) / ka, (wa - wa0) / ka); }
     if (imb > 0.0) { acc_add(b, (vb - vb0) / kb, (wb - wb0) / kb); }
     return;
   }
-  if (ima > 0.0) { setS(a, S_V, vec4f(va0 + (va - va0) / ka, va4.w)); setS(a, S_W, vec4f(wa0 + (wa - wa0) / ka, 0.0)); }
-  if (imb > 0.0) { setS(b, S_V, vec4f(vb0 + (vb - vb0) / kb, vb4.w)); setS(b, S_W, vec4f(wb0 + (wb - wb0) / kb, 0.0)); }
+  if (ima > 0.0) { setS(a, S_V, vec4f(va, va4.w)); setS(a, S_W, vec4f(wa, 0.0)); }
+  if (imb > 0.0) { setS(b, S_V, vec4f(vb, vb4.w)); setS(b, S_W, vec4f(wb, 0.0)); }
 }
 
 // fixed-point accumulation of velocity changes (there are no float atomics): 2^18 per m/s
@@ -744,7 +738,7 @@ fn acc_add(i: u32, dv: vec3f, dw: vec3f) {
     dw[k] = f32(bitcast<i32>(atomicExchange(&ints[o + 3u + k], 0u))) / ACC;
   }
   let v4 = S(i, S_V); if (v4.w == 0.0) { return; }
-  // (the changes were made against a share of the mass, mass / contact count, and divided by that count)
+  // (the changes were already divided by the count)
   setS(i, S_V, vec4f(v4.xyz + dv, v4.w)); setS(i, S_W, vec4f(S(i, S_W).xyz + dw, 0.0));
 }
 
@@ -1455,10 +1449,8 @@ class GpuWorld {
       for (let c = 0; c < C; c++) { p.setBindGroup(1, this.bg1, [c * 256]); if (this.indirect) p.dispatchWorkgroupsIndirect(this.argBuf, c * 12); else p.dispatchWorkgroups(colWg[c]); }
       p.setBindGroup(1, this.bg1, [0]);
       if (k === 'restitute') { ind(p, 'restitute_ovf', C * 12); return; }
-      // overflow contacts: Jacobi rounds with mass splitting; the relax pass needs more of them (6): with 2, the
-      // push-out of the biased pass stayed in a large body landing on a floor (up to 1.3 m/s of rebound with no
-      // restitution at all)
-      for (let it = 0; it < (k === 'relax' ? (this.relaxRounds ?? 6) : 2); it++) { ind(p, k + '_ovf', C * 12); run(p, 'ovf_apply', nb); }
+      // overflow contacts: two Jacobi rounds with mass splitting
+      for (let it = 0; it < (k === 'relax' ? (this.relaxRounds ?? 2) : 2); it++) { ind(p, k + '_ovf', C * 12); run(p, 'ovf_apply', nb); }
     };
     for (let s = 0; s < this.substeps; s++) {
       run(p, 'integrate_warm', nb);
