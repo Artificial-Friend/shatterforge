@@ -152,7 +152,7 @@ struct Params {
   blast: array<vec4f, 6>,   // particle blasts: (centre, reach), (speed, -, -, -)
   o_ptab: u32, ptab_mask: u32, o_big: u32, o_mslot: u32,   // contact reduction (see red_count)
   o_crushed: u32, o_crush: u32, crush_ratio: f32, crush_dv: f32,   // crushing (see crush)
-  o_hull: u32, o_hl: u32, pad11: u32, pad12: f32,   // the convex chunk library, in the shape buffer
+  o_hull: u32, o_hl: u32, dbg: u32, ovf_push: f32,   // the convex chunk library, in the shape buffer
 }
 struct ColorU { c: u32 }
 
@@ -913,7 +913,7 @@ fn color_one(mi: u32, support: bool) {
   if (u32(man[(P.cur_base + mi) * MS].z) >= 8u) { st(P.o_mcolor + mi, 0xffffffffu); return; }   // (reduced away)
   let ab = mhdr(P.cur_base + mi); let a = ab.x; let b = ab.y;
   let da = dyn_awake(a); let db = dyn_awake(b);
-  if (support != (!da || !db)) { return; }
+  if ((P.dbg & 4u) != 0u) { if (support) { return; } } else if (support != (!da || !db)) { return; }
   var col = P.color_limit;
   for (var c = 0u; c < P.color_limit; c++) {
     let bit = 1u << c;
@@ -1009,10 +1009,16 @@ fn ratio_scale(ia: f32, ib: f32) -> vec2f {
 // rose at 8 m/s and threw the pieces at 15 (GPU test stumps); in the lab collapse the upper part of the
 // building rose 0.5 m after landing.
 fn limited(v0: vec3f, w0: vec3f, v: ptr<function, vec3f>, w: ptr<function, vec3f>, sc: f32) {
-  if (sc == 1.0) { return; }
-  if (dot(*v, *v) > dot(v0, v0) || dot(*w, *w) > dot(w0, w0)) {
-    *v = v0 + (*v - v0) / sc; *w = w0 + (*w - w0) / sc;
-  }
+  if (sc == 1.0 || (P.dbg & 2u) != 0u) { return; }
+  *v = v0 + slowing(v0, *v - v0, sc); *w = w0 + slowing(w0, *w - w0, sc);
+}
+// the part of a change d to x that brings |x| down to its least is kept; the rest is divided by sc (all or
+// nothing lost the slowing too when a change overshot zero: a block landing on rubble sank and rebounded at
+// 1.9 m/s, GPU test sandwich)
+fn slowing(x: vec3f, d: vec3f, sc: f32) -> vec3f {
+  let dd = dot(d, d); if (dd == 0.0) { return d; }
+  let t = clamp(-dot(x, d) / dd, 0.0, 1.0);
+  return d * (t + (1.0 - t) / sc);
 }
 fn solve_man(m: u32, use_bias: bool, split: bool) {
   let base = m * MS;
@@ -1025,7 +1031,7 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
   // (the ratio is limited between the masses as split: limited first, a body split over k contacts acted as
   // 20/k times the light body, lighter than it; a slab landing with 100 pieces on it was thrown up at 8 m/s,
   // GPU test stumps)
-  let sc = ratio_scale(va4.w * ka, vb4.w * kb);
+  let sc = select(ratio_scale(va4.w * ka, vb4.w * kb), ratio_scale(va4.w, vb4.w), (P.dbg & 1u) != 0u);
   let rec = split || sc.x != 1.0 || sc.y != 1.0;   // effective masses recomputed
   let ima = va4.w * ka * sc.x; let imb = vb4.w * kb * sc.y;
   let A0 = S(a, S_I0) * ka * sc.x; let A1 = S(a, S_I1) * ka * sc.x; let B0 = S(b, S_I0) * kb * sc.y; let B1 = S(b, S_I1) * kb * sc.y;
@@ -1041,7 +1047,7 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
     let s = pa.w + dn + dot(thb, rbxn) - dot(tha, raxn);
     var bias = 0.0; var ms = 1.0; var is_ = 0.0;
     if (s > 0.0) { bias = s * P.inv_h; }
-    else if (use_bias) { bias = max(P.bias_rate * s, -P.max_push * select(1.0, P.pad12, split)); ms = P.mass_scale; is_ = P.imp_scale; }
+    else if (use_bias) { bias = max(P.bias_rate * s, -P.max_push * select(1.0, P.ovf_push, split)); ms = P.mass_scale; is_ = P.imp_scale; }
     let vn = dot(vb - va, n) + dot(wb, rbxn) - dot(wa, raxn);
     let j0 = jn[k];
     var nm = pb.w;
@@ -1938,7 +1944,7 @@ class GpuWorld {
     // the pair table sized by the contacts there were (as the grid), up to its capacity
     let tp = 1024; while (tp < 2 * ((this.stats.manifolds || 0) * 1.5 + 2048) && tp < this.TP) tp *= 2; this.TPeff = tp;
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
-    u[136] = this.oHull; u[137] = L.hl; f[139] = this.ovfPush ?? 1;
+    u[136] = this.oHull; u[137] = L.hl; f[139] = this.ovfPush ?? 1; u[138] = this.dbgBits || 0;
     u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 3;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
