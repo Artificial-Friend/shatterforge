@@ -95,7 +95,8 @@ static mut SNAP: Vec<u8> = Vec::new();
     let (y0, y1) = (k * crate::tower::STOREY, (k + 1) * crate::tower::STOREY);
     let mut v = 0.0f64;
     for i in 0..g.b.len() {
-        if g.b.flags[i] & (crate::brick::F_ALIVE | crate::brick::F_DYNAMIC) != crate::brick::F_ALIVE { continue; }
+        // (the volume the chunk's mesh draws: bricks on a fracture surface are drawn by the page, as cells)
+        if g.b.flags[i] & (crate::brick::F_ALIVE | crate::brick::F_DYNAMIC | crate::brick::F_FRAC) != crate::brick::F_ALIVE { continue; }
         let y = g.b.y[i] as i32; if y < y0 || y >= y1 { continue; }
         let t = g.b.tbox(i as u32);
         v += ((t.max[0] - t.min[0]) as f64) * ((t.max[1] - t.min[1]) as f64) * ((t.max[2] - t.min[2]) as f64);

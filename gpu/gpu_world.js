@@ -2047,7 +2047,7 @@ class GpuWorld {
   }
   // Static shapes of fixed body `body` (1-based body index): set (create when slot is null) or kill.
   // centre and half extents in metres, axis-aligned; returns the slot (1-based shape index).
-  setStaticShape(slot, body, centre, half, mat) {
+  setStaticShape(slot, body, centre, half, mat, hull = 0) {
     this.inputs++;
     const b = this.bodies[body - 1];
     if (slot == null) {
@@ -2061,9 +2061,9 @@ class GpuWorld {
     // a new shape in this slot gets a new generation, so read-backs never take it for the slot's old shape
     if (!this.shapes[slot - 1] || this.shapes[slot - 1].dead) { this.shapeGen = this.shapeGen || []; this.shapeGen[slot - 1] = (this.shapeGen[slot - 1] || 0) + 1; }
     const lp = [centre[0] - b.p[0], centre[1] - b.p[1], centre[2] - b.p[2]];
-    const rec = { body, mat, lp, lq: [0, 0, 0, 1], h: half };
+    const rec = { body, mat, lp, lq: [0, 0, 0, 1], h: half, hull };
     this.shapes[slot - 1] = rec;
-    this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, mat, 0, 0, ...lp, 0, 0, 0, 0, 1, ...half, 0]));
+    this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, mat, 0, hull, ...lp, 0, 0, 0, 0, 1, ...half, 0]));
     return slot;
   }
   // Retire a body: it stops moving and colliding (its slot is not reused).

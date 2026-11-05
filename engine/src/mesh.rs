@@ -51,7 +51,8 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
     let mut m = Mesh::default();
     let mut rects: Vec<Rect> = Vec::new();
     for i in 0..b.len() as u32 {
-        if !b.alive(i) || b.flags[i as usize] & crate::brick::F_DYNAMIC != 0 || !keep(b, i) { continue; }
+        // (bricks on a fracture surface are drawn by the page as their Voronoi cells)
+        if !b.alive(i) || b.flags[i as usize] & (crate::brick::F_DYNAMIC | crate::brick::F_FRAC) != 0 || !keep(b, i) { continue; }
         let tb = b.tbox(i);
         let col = colour(b, i);
         // cracked joints of this brick (axis, plane, overlap box): drawn as dark seams where they meet its faces

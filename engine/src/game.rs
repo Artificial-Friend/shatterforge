@@ -92,7 +92,7 @@ impl Game {
     /// A brick as [x, y, z, sx, sy, sz (ticks), material + 16 x paint].
     fn push_box(out: &mut Vec<f32>, b: &Bricks, i: u32) {
         let t = b.tbox(i);
-        out.extend_from_slice(&[t.min[0] as f32, t.min[1] as f32, t.min[2] as f32, (t.max[0] - t.min[0]) as f32, (t.max[1] - t.min[1]) as f32, (t.max[2] - t.min[2]) as f32, (b.mat[i as usize] as u32 + 16 * b.paint[i as usize] as u32) as f32]);
+        out.extend_from_slice(&[t.min[0] as f32, t.min[1] as f32, t.min[2] as f32, (t.max[0] - t.min[0]) as f32, (t.max[1] - t.min[1]) as f32, (t.max[2] - t.min[2]) as f32, (b.mat[i as usize] as u32 + 16 * b.paint[i as usize] as u32 + if b.flags[i as usize] & crate::brick::F_FRAC != 0 { 256 } else { 0 }) as f32]);
     }
 
     /// All static bricks: [n, (index, x, y, z, sx, sy, sz, material) ...] in ticks.
@@ -248,7 +248,7 @@ impl Game {
                 while jj != NONE {
                     if self.b.joint_other(jj, n) == c.brick {
                         // reinforced concrete cracks but the steel holds the two halves: the joint stays, cracked
-                        if reinf { self.b.jdmg[jj as usize] = self.b.jdmg[jj as usize].max(1); self.cracked_total += 1; } else { self.b.remove_joint(jj); }
+                        if reinf { self.b.jdmg[jj as usize] = self.b.jdmg[jj as usize].max(1); self.cracked_total += 1; } else { self.b.fracture_joint(jj); }
                         break;
                     }
                     jj = self.b.joint_next(jj, n);
@@ -263,7 +263,7 @@ impl Game {
                 // still bears, without tension), then parts
                 let masonry = standing && (self.b.mat[x as usize] == crate::brick::mat::MASONRY || self.b.mat[y as usize] == crate::brick::mat::MASONRY);
                 if (reinf || masonry) && self.b.jdmg[j as usize] == 0 { self.b.jdmg[j as usize] = 1; self.b.log.push(x); self.b.log.push(y); self.cracked_total += 1; done.push(j); continue; }
-                self.b.remove_joint(j);
+                self.b.fracture_joint(j);
                 self.b.log.push(x); self.b.log.push(y);
                 done.push(j);
             }
@@ -721,7 +721,7 @@ fn cut_section(b: &mut Bricks, set: &mut Vec<u32>, ax: usize, at_oriented: i32) 
             if t.min[ax] < plane && plane < t.max[ax] {
                 let m = b.split(i, ax, plane);
                 let mut jj = b.jhead[m as usize];
-                while jj != NONE { if b.joint_other(jj, m) == i { b.remove_joint(jj); break; } jj = b.joint_next(jj, m); }
+                while jj != NONE { if b.joint_other(jj, m) == i { b.fracture_joint(jj); break; } jj = b.joint_next(jj, m); }
                 set.push(m); n += 1;
             }
         }
@@ -735,7 +735,7 @@ fn cut_section(b: &mut Bricks, set: &mut Vec<u32>, ax: usize, at_oriented: i32) 
             while j != NONE { let o = b.joint_other(j, i); if b.jaxis[j as usize] as usize == ax && idx2[o as usize] && b.tbox(o).min[ax] == plane { cut.push(j); } j = b.joint_next(j, i); }
         }
         cut.sort_unstable(); cut.dedup();
-        for &j in &cut { b.remove_joint(j); n += 1; }
+        for &j in &cut { b.fracture_joint(j); n += 1; }
         let _ = idx;
         break;
     }
@@ -796,7 +796,7 @@ fn sever_infill(b: &mut Bricks, set: &[u32]) -> usize {
             j = b.joint_next(j, i); }
     }
     cut.sort_unstable(); cut.dedup();
-    for &j in &cut { b.remove_joint(j); }
+    for &j in &cut { b.fracture_joint(j); }
     cut.len()
 }
 
@@ -953,6 +953,21 @@ mod tests {
         std::println!("sideways hits on a masonry pier: {} joints failed by sideways loads, cracked after each hit {cracked:?}, bricks loose after each {fell:?}", g.side_failed);
         assert!(g.side_failed > 0, "the sideways load fails joints");
         assert!(cracked[0] > 0, "the first hit cracks the mortar");
+    }
+    #[test] fn a_blast_leaves_a_fracture_surface() {
+        // a blast in a wall: the bricks round the crater that are left standing, and those of the pieces that fall,
+        // are marked as on a fracture surface (drawn as Voronoi cells, losing one or two); none bigger than 2 m or
+        // smaller than 0.25 m a side; the standing ones are left out of the engine's mesh
+        let mut g = Game::new_kind(3, 1);
+        let q0 = g.chunks[1].quads;
+        g.blast(v3(-6.0, 5.0, -11.2), 1.2);
+        let frac: std::vec::Vec<u32> = (0..g.b.len() as u32).filter(|&i| g.b.alive(i) && g.b.flags[i as usize] & crate::brick::F_FRAC != 0).collect();
+        let standing = frac.iter().filter(|&&i| g.b.flags[i as usize] & F_DYNAMIC == 0).count();
+        std::println!("blast in a masonry facade: {} bricks on the fracture surface ({standing} standing), storey-1 mesh {q0} -> {} quads", frac.len(), g.chunks[1].quads);
+        assert!(standing > 4, "the crater's rim is a fracture surface");
+        for &i in &frac { let s = g.b.size(i); assert!(s.iter().all(|&v| v >= 2 && v <= 16), "size {s:?}"); }
+        // the spalled cells: one or two, never all, the same every time
+        for i in 0..200u32 { for n in 2..=6u32 { let (p, m) = crate::brick::frac_cells(i, n); assert!(p < 16 && m != 0 && m.count_ones() <= 2 && m < (1 << n)); assert_eq!(crate::brick::frac_cells(i, n), (p, m)); } }
     }
     #[test] fn a_falling_slab_cracks_on_impact() {
         // a free piece: a 4 m x 4 m slab of 1 m x 0.25 m planks joined edge to edge, hitting the ground on a corner

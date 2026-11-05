@@ -4,7 +4,7 @@
 // same frames. Read-backs arrive LAB.readLag frames after they were issued and engine jobs LAB.jobLag frames
 // after they were sent, as on a real machine. What would be drawn is checked every frame; the physics at every
 // read-back. The result is a report of checks (pass/fail with limits), events and a time series.
-function labTruthStatic() { let v = 0; for (let k = 0; k < E.chunk_count(); k++) v += E.chunk_volume(k); return v; }
+function labTruthStatic() { let v = 0; for (let k = 0; k < E.chunk_count(); k++) v += E.chunk_volume(k); return v + staticCellVol; }
 function labBoxVol(h) { return 8 * h[0] * h[1] * h[2]; }
 function labInstall() {
   // the volume of everything the GPU holds, kept as it changes (the ball is not part of the building)
@@ -260,7 +260,7 @@ async function labRun() {
   $('start').hidden = true; physicsPaused = false;
   $('bench').hidden = false; $('bench-title').textContent = `Lab: ${name} (${st.done.length + 1} of ${st.done.length + st.queue.length})`;
   labInstall();
-  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
+  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0) + staticCellPubVol;
   try { const info = dev.adapterInfo || (dev.adapter && dev.adapter.info); L.adapter = info ? `${info.vendor} ${info.architecture} ${info.description || ''}`.trim() : ''; } catch (e) {}
   const tw = performance.now();
   let lastShow = 0;

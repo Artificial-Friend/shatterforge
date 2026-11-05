@@ -24,6 +24,21 @@ pub const F_DYNAMIC: u8 = 4;
 pub const F_MONO: u8 = 8;
 /// reinforced concrete: a failure first cracks it (the steel holds, half the strength is left), a second one separates
 pub const F_REINF: u8 = 16;
+/// on a fracture surface: a joint of it broke, or a neighbour was crushed away. Drawn and collided as its Voronoi
+/// cells (pattern and the cells it lost from `frac_cells`), so a break is jagged, not a step of boxes.
+pub const F_FRAC: u8 = 32;
+/// The cell pattern of fractured brick `i` (0..16, see the GPU's hull library) and the mask of its cells that spall
+/// off (fall away as chunks): one or two of them, never all. Fixed by the brick's index, so the worker's engine,
+/// the page's copy and the page agree without being told.
+pub fn frac_cells(i: u32, ncells: u32) -> (u32, u32) {
+    let h = i.wrapping_mul(2654435761).rotate_right(7) ^ 0x9e37_79b9;
+    let pattern = h % 16;
+    if ncells < 2 { return (pattern, 0); }
+    let a = (h >> 8) % ncells;
+    let mut mask = 1u32 << a;
+    if ncells > 3 && (h >> 16) & 1 == 1 { mask |= 1 << ((a + 1 + (h >> 20) % (ncells - 1)) % ncells); }
+    (pattern, mask)
+}
 
 /// Spatial index: each brick sits in exactly one cell, the cell holding its min corner, at the finest of four
 /// levels (1, 4, 16, 64 m) whose cell is at least as large as the brick. A query visits, per level, the cells
@@ -161,6 +176,9 @@ impl Bricks {
 
     /// Remove a brick: its joints go, the record stays (dead) so indices remain stable.
     pub fn remove(&mut self, i: u32) {
+        // what it touched is now a fracture surface
+        let mut j = self.jhead[i as usize];
+        while j != NONE { let o = self.joint_other(j, i); self.mark_frac(o); j = self.joint_next(j, i); }
         while self.jhead[i as usize] != NONE { let j = self.jhead[i as usize]; self.remove_joint(j); }
         self.flags[i as usize] &= !F_ALIVE;
         self.log.push(i);
@@ -283,6 +301,22 @@ impl Bricks {
         if prev == NONE { self.jhead[k as usize] = nxt } else { self.set_next(prev, k, nxt) }
     }
 
+    /// Mark brick `i` as on a fracture surface (if it is a size that reads as rubble: 0.25 to 2 m a side; bigger
+    /// ones are refined near a break, smaller ones are crumbs already).
+    pub fn mark_frac(&mut self, i: u32) {
+        let iu = i as usize;
+        if self.flags[iu] & F_ALIVE == 0 || self.flags[iu] & F_FRAC != 0 || self.mat[iu] == mat::GLASS { return; }
+        let s = self.size(i);
+        if s.iter().any(|&v| v < 2) || s.iter().any(|&v| v > 16) { return; }
+        self.flags[iu] |= F_FRAC;
+        self.log.push(i);
+    }
+    /// A joint that breaks: both bricks are now on a fracture surface.
+    pub fn fracture_joint(&mut self, j: u32) {
+        let (a, b) = (self.ja[j as usize], self.jb[j as usize]);
+        self.mark_frac(a); self.mark_frac(b);
+        self.remove_joint(j);
+    }
     pub fn remove_joint(&mut self, j: u32) {
         let (a, b) = (self.ja[j as usize], self.jb[j as usize]);
         self.unlink(j, a); self.unlink(j, b);
