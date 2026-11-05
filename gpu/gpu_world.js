@@ -541,11 +541,18 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   cen /= f32(c.cnt);
   var rad = 0.0; for (var k = 0u; k < c.cnt; k++) { rad += length(c.pts[k].xyz - cen); }
   rad /= f32(c.cnt);
-  let old = find_old(sa, sb);
+  var old = find_old(sa, sb);
   var jt1 = 0.0; var jt2 = 0.0; var jtw = 0.0;
   var fa = cen - pa; var fb = cen - pb; var e0 = vec3f(0.0);
   var laf = transpose(Ra) * fa; var lbf = select(transpose(Rb) * fb, cen, b == 0u);
   var ojn = vec4f(0.0); var ocnt = 0u;
+  // Which side was fixed (static, or asleep and held as static) when the contact was made. A moving body that
+  // hits a sleeping one is stopped as if by a wall, and the contact keeps that whole impact impulse; the
+  // sleeper wakes, and at the next step that impulse was warm-started into it at its real (small) mass: single
+  // bricks at rest were thrown at 20-35 m/s, once at 2,800 m/s (lab collapse, real GPU and software GPU,
+  // always one step after waking; GPU test wakeup). Such a contact starts afresh.
+  let fixedNow = select(0.0, 1.0, ima == 0.0) + select(0.0, 2.0, imb == 0.0);
+  if (old != 0xffffffffu && man[old * MS + M_OUT].w != fixedNow && (P.dbg & 16u) == 0u) { old = 0xffffffffu; }
   if (old != 0xffffffffu) {
     let ob = old * MS; let oc = old * CS;
     let ohd = man[ob]; ocnt = u32(ohd.z) & 7u; ojn = man[ob + M_JN];
@@ -592,7 +599,7 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   man[base + M_JT] = vec4f(jt1, jt2, jtw, rad);
   man[base + M_JN] = jn;
   man[base + M_RV] = rv;
-  man[base + M_OUT] = vec4f(rest, 0.0, approach, 0.0);
+  man[base + M_OUT] = vec4f(rest, 0.0, approach, fixedNow);
   cold[cb + 4u] = vec4f(laf, f32(sa)); cold[cb + 5u] = vec4f(lbf, f32(sb));
   insert_new(sa, sb, mi);
 }

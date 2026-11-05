@@ -544,36 +544,35 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
         { bad, asleepAt7s: asleep, skippedSteps: skips, wokeByBox: woke, box: bp.map(v => +v.toFixed(2)), rows });
     }
     if (scenes.includes('wakeup')) {
-      // small pieces asleep on the ground, a heavy slab (307 t) set down on them, then the pieces woken from
-      // outside: their contacts with the slab were made while they slept (held as static) and carry the slab's
-      // weight share into the woken pieces. A suspect for the lab burst (collapse frame 138: a 2-brick piece under
-      // the upper part, woken, went from rest to 2,800 m/s); it does not reproduce here (0.16 m/s). Nothing may
-      // move faster than 2 m/s.
+      // a moving body hits sleeping bricks: in that step they count as fixed and the contact takes the whole
+      // impact impulse; they wake, and the next step warm-started it into them. Lab collapse (real GPU, frame
+      // 212): two bricks asleep against the facade, woken by a 17-brick piece swinging into them, went to 30 and
+      // 35 m/s one step later. Here: 6 single bricks asleep on the ground, a 12-brick bar swung into them at 4 m/s.
+      // Bricks may move no faster than the bar (4 m/s plus restitution: < 5 m/s).
       const B = 0.25, list = [];
-      for (const [x, z] of [[-2, -2], [2, -2], [-2, 2], [2, 2], [0, 0]]) list.push({ shapes: [{ p: [x - B, B, z], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete }, { p: [x + B, B, z], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
-      const w = await GpuWorld.create(dev, list, { substeps: 12, sleep: true, maxShapes: 1200, maxBodies: 16 });
+      for (let k = 0; k < 6; k++) list.push({ shapes: [{ p: [0, 0.125, -1.5 + k * 0.6], q: [0, 0, 0, 1], h: [0.125, 0.125, 0.25], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
+      // (WAKE_WALL=1: the bricks stand against a static wall and the bar spins into them, as in the lab)
+      const WALL = !!globalThis.WAKE_WALL;
+      if (WALL) for (const b of list) b.shapes[0].p[0] = 0.125;
+      const w = await GpuWorld.create(dev, WALL ? [{ fixed: true, shapes: [{ p: [-0.5, 1, 0], q: [0, 0, 0, 1], h: [0.5, 1, 4], mat: MAT.concrete }] }, ...list] : list, { substeps: 12, sleep: true, maxShapes: 64, maxBodies: 16 });
+      const o0 = WALL ? 1 : 0;
       for (let f = 0; f < 150; f++) w.step(1 / 60);
       await dev.queue.onSubmittedWorkDone(); await settle();
-      let r = await w.readPose(); const asleepBefore = Array.from(r.sleeping.slice(0, 5)).reduce((a, b) => a + b, 0);
-      const slab = []; for (let i = 0; i < 16; i++) for (let k = 0; k < 16; k++) for (let j = 0; j < 4; j++) slab.push({ p: [-3.75 + i * 0.5, 0.5 + B + 0.005 + j * 0.5, -3.75 + k * 0.5], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete });
-      // set down gently (it does not wake them), then 40 frames later one piece is woken from outside
-      for (const q of slab) q.p[1] -= 0.003;
-      w.addBodies([{ shapes: slab, v: [0, 0, 0], w: [0, 0, 0] }]);
-      let vmax = 0, at = -1; const vs = []; let asleepAt40 = -1;
-      for (let f = 1; f <= 90; f++) {
-        if (f === 40) {
-          await dev.queue.onSubmittedWorkDone(); await settle(); const r0 = await w.readPose();
-          asleepAt40 = Array.from(r0.sleeping.slice(0, 5)).reduce((a, b) => a + b, 0);
-          for (const b of [1, 2, 3, 4, 5]) w.setVelocity(b, [0, 0.01, 0], [0, 0, 0], [...r0.body.slice((b - 1) * 7, (b - 1) * 7 + 3)], [...r0.body.slice((b - 1) * 7 + 3, (b - 1) * 7 + 7)]);
-        }
+      let r = await w.readPose(); const asleepBefore = Array.from(r.sleeping.slice(o0, o0 + 6)).reduce((a, b) => a + b, 0);
+      const bar = [];
+      if (WALL) { for (let k = 0; k < 17; k++) bar.push({ p: [1.0, 0.26, -4.25 + k * 0.5], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete }); w.addBodies([{ shapes: bar, v: [-3, 0, 0], w: [0, +(globalThis.WAKE_SPIN || 3), 0] }]); }
+      else { for (let k = 0; k < 12; k++) bar.push({ p: [-1.2, 0.26, -2.75 + k * 0.5], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete }); w.addBodies([{ shapes: bar, v: [4, 0, 0], w: [0, 0, 0] }]); }
+      let vmax = 0, at = -1; const vs = [];
+      for (let f = 1; f <= 60; f++) {
         w.step(1 / 60);
         await dev.queue.onSubmittedWorkDone(); await settle();
         r = await w.readPose();
-        for (let i = 0; i < w.n; i++) { const v = speed(r.vel, i); if (v > vmax) { vmax = v; at = f; } }
-        if (f <= 12) vs.push(+Math.max(...[0, 1, 2, 3, 4].map(i => speed(r.vel, i))).toFixed(2));
+        let m = 0; for (let i = o0; i < o0 + 6; i++) m = Math.max(m, speed(r.vel, i));
+        if (m > vmax) { vmax = m; at = f; }
+        if (f <= 20) vs.push(+m.toFixed(2));
       }
       w.destroy();
-      check('wakeup', asleepBefore === 5 && vmax < 2, { asleepBefore, asleepAt40, fastest_ms: +vmax.toFixed(2), at, piecesMax: vs });
+      check('wakeup', asleepBefore === 6 && vmax < 5, { asleepBefore, bricksFastest_ms: +vmax.toFixed(2), at, bricksMax: vs });
     }
     if (scenes.includes('stress')) {
       // Collapse-like rubble at rest must stay at rest: compound pieces of 1-12 bricks piled between stumps, a
@@ -664,7 +663,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   // the results for docs/STATUS.md (tools/status.py): full runs only (a run of a few scenes is not the state)

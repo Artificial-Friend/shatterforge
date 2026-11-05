@@ -106,6 +106,8 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn dirty_hi() -> i32 { game().dirty.1 }
 #[no_mangle] pub extern "C" fn out_ptr() -> *const f32 { game().out.as_ptr() }
 #[no_mangle] pub extern "C" fn out_len() -> u32 { game().out.len() as u32 }
+#[no_mangle] pub extern "C" fn rest_load(x: f32, y: f32, z: f32, f: f32) { game().rest.push([x, y, z, f]); }
+#[no_mangle] pub extern "C" fn rest_applied() -> f32 { game().rest_applied }
 #[no_mangle] pub extern "C" fn bricks_dump() { game().dump(); }
 #[no_mangle] pub extern "C" fn blast(x: f32, y: f32, z: f32, r: f32) -> u32 { game().blast(v3(x, y, z), r) as u32 }
 #[no_mangle] pub extern "C" fn raycast(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32, max: f32) -> f32 { game().raycast(v3(ox, oy, oz), v3(dx, dy, dz), max) }

@@ -195,6 +195,7 @@ pub fn flexural(m: u8) -> f32 {
 }
 
 /// A crack through a brick from bending: split brick `brick` at tick `at` across `axis`.
+#[derive(Clone, Copy, Debug)]
 pub struct Crack { pub brick: u32, pub axis: usize, pub at: i32, pub ratio: f32 }
 
 /// Bending inside bricks under gravity. Each brick is in equilibrium between its weight (spread over its
@@ -313,6 +314,8 @@ pub struct Analysis {
     pub max_ratio: f32,
     pub iterations: usize,
     pub nodes: usize,
+    /// the worst link inside a brick: (ratio, brick, axis, flow N, moment N m, section width m)
+    pub worst_in: (f32, u32, usize, f32, f32, f32),
 }
 
 struct Node { brick: u32, lo: [i32; 3], hi: [i32; 3], load: f32, sink: bool }
@@ -343,12 +346,20 @@ fn cells_of(t: &crate::brick::TBox) -> (Vec<i32>, Vec<i32>) {
 /// arm (M / F) on each side: the section is the face widened by that, up to the plate's own width.
 fn spread(face: f32, m: f32, f: f32, extent: f32) -> f32 {
     let arm = if fabs(f) > 1e-3 { fabs(m / f) } else { 0.0 };
-    (face + 2.0 * arm).min(extent).max(face)
+    // at most a column strip: the width of plate that carries a bay's moment to its supports is about half the
+    // span between them (flat-slab design: 3.75 m for 7.5 m bays). Uncapped, a section deep in a bay, where the
+    // shear F is small and M / F large, was as wide as the whole 22 m slab: 60 kPa of rubble on one bay came out
+    // at 0.70 of strength where a 7.5 m span gives 3.7 times.
+    (face + 2.0 * arm).min(extent).min(face + STRIP).max(face)
 }
+const STRIP: f32 = 3.75;
 
 /// Analyse `set` under per-brick loads `load` (N) acting along `dir`, supported at `sink` bricks.
 /// Moments are evaluated for vertical loads (gravity).
-pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) -> Analysis {
+pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) -> Analysis { analyse_at(b, set, load, &[], sink, dir) }
+/// As `analyse`, plus loads at points: (index into `set`, x, z in ticks, N). A point load goes to the cell of
+/// that brick under the point (a heap of rubble on one bay of a 22 m slab loads that bay, not the whole slab).
+pub fn analyse_at(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32, f32)], sink: &[bool], dir: V3) -> Analysis {
     let gravity = fabs(dir.y) > 0.99;
     let mut nodes: Vec<Node> = Vec::new();
     let mut first = vec![NONE; b.len()];     // brick -> first node
@@ -457,6 +468,15 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
             j = b.joint_next(j, i);
         }
     }
+    for &(k, x, z, f) in point {
+        let i = set[k as usize];
+        let (fst, (nx, nz)) = (first[i as usize], grid[k as usize]);
+        if fst == NONE { continue; }
+        let (xs, zs) = (&cuts[k as usize].0, &cuts[k as usize].1);
+        let cx = xs.partition_point(|&v| (v as f32) <= x).saturating_sub(1).min(nx - 1);
+        let cz = zs.partition_point(|&v| (v as f32) <= z).saturating_sub(1).min(nz - 1);
+        nodes[(fst + (cz * nx + cx) as u32) as usize].load += f;
+    }
     let n = nodes.len();
     // adjacency
     let mut head = vec![NONE; n]; let mut next = vec![NONE; 2 * links.len()];
@@ -539,7 +559,7 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
         }
     }
     // checks
-    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n };
+    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0) };
     // joints: sum their sub-links
     let mut jsum: Vec<(u32, f32, [f32; 2], [i32; 3], [i32; 3])> = Vec::new();
     let mut jslot = hashbrown::HashMap::new();
@@ -578,6 +598,10 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
         if ratio > out.max_ratio { out.max_ratio = ratio; }
         if ratio > 1.0 { out.failed.push((j, ratio)); }
     }
+    if gravity { for (j, r) in overturning(b, &nodes, &links, &live) {
+        if r > out.max_ratio { out.max_ratio = r; }
+        if r > 1.0 && !out.failed.iter().any(|&(x, _)| x == j) { out.failed.push((j, r)); }
+    } }
     // links inside bricks: shear and bending of the brick's own section
     for (l, k) in links.iter().enumerate() {
         if k.joint != NONE || !live[k.a as usize] { continue; }
@@ -592,11 +616,101 @@ pub fn analyse(b: &Bricks, set: &[u32], load: &[f32], sink: &[bool], dir: V3) ->
             let t = b.tbox(i);
             let width = spread((k.face_hi[2 - k.axis] - k.face_lo[2 - k.axis]) as f32 * TICK, mc, flow[l], (t.max[2 - k.axis] - t.min[2 - k.axis]) as f32 * TICK);
             ratio = ratio.max(fabs(mc) / (width * depth * depth / 6.0) / flexural(m));
+            if ratio > out.worst_in.0 { out.worst_in = (ratio, i, k.axis, flow[l], mc, width); }
         }
         if ratio > out.max_ratio { out.max_ratio = ratio; }
         if ratio > 1.0 { out.cracks.push(Crack { brick: i, axis: k.axis, at: k.face_lo[k.axis], ratio }); }
     }
     out
+}
+
+/// Overturning at each bearing level. The scalar flow sends every load down some path to the ground, but it has
+/// no moment balance: a building whose ground storey is gone except one column was carried by that column like a
+/// table on one leg. At each horizontal plane where bricks bear on bricks (a storey's floor line), each
+/// connected part above it has a weight W whose resultant lies at its load centroid. The supports bearing at
+/// that plane can hold it only if the resultant lies inside the area they cover (their convex hull), or
+/// outside by no more than they can carry in bending: e = sum(f_flex b d^2 / 6) / W. Beyond that the part tips
+/// about its supports: every support joint at that plane fails (ratio = how far out / allowed), the part comes
+/// loose and the rigid-body solver tips it. Returns (joint, ratio) for the joints of the planes that fail.
+fn overturning(b: &Bricks, nodes: &[Node], links: &[Link], live: &[bool]) -> Vec<(u32, f32)> {
+    let n = nodes.len();
+    let structural = |l: &Link| {
+        let (p, q) = (nodes[l.a as usize].brick as usize, nodes[l.b as usize].brick as usize);
+        (b.flags[p] | b.flags[q]) & (F_INFILL | crate::brick::F_MONO) == 0
+    };
+    // bearing planes: the heights of bearing joints between structural bricks
+    let mut planes: Vec<i32> = links.iter().filter(|l| l.axis == 1 && l.joint != NONE && live[l.a as usize] && structural(l)).map(|l| l.face_lo[1]).collect();
+    planes.sort_unstable(); planes.dedup();
+    let mut out = Vec::new();
+    let mut comp = vec![NONE; n];
+    for &y in &planes {
+        // the parts above the plane (nodes wholly above it, joined by links that stay above it)
+        for c in comp.iter_mut() { *c = NONE; }
+        let above = |k: usize| live[k] && nodes[k].lo[1] >= y;
+        // union-find over links among nodes above
+        let mut par: Vec<u32> = (0..n as u32).collect();
+        fn find(p: &mut [u32], mut x: u32) -> u32 { while p[x as usize] != x { p[x as usize] = p[p[x as usize] as usize]; x = p[x as usize]; } x }
+        for l in links { let (a, c) = (l.a as usize, l.b as usize); if above(a) && above(c) { let (ra, rc) = (find(&mut par, l.a), find(&mut par, l.b)); if ra != rc { par[ra as usize] = rc; } } }
+        let mut ncomp = 0u32;
+        let mut root_of = vec![NONE; n];
+        for k in 0..n { if above(k) { let r = find(&mut par, k as u32) as usize; if root_of[r] == NONE { root_of[r] = ncomp; ncomp += 1; } comp[k] = root_of[r]; } }
+        if ncomp == 0 { continue; }
+        // weight and its first moments per part
+        let mut w = vec![0.0f64; ncomp as usize]; let mut mx = vec![0.0f64; ncomp as usize]; let mut mz = vec![0.0f64; ncomp as usize];
+        for k in 0..n { let c = comp[k]; if c == NONE { continue; }
+            let nd = &nodes[k]; let (cx, cz) = (0.5 * (nd.lo[0] + nd.hi[0]) as f64, 0.5 * (nd.lo[2] + nd.hi[2]) as f64);
+            w[c as usize] += nd.load as f64; mx[c as usize] += nd.load as f64 * cx; mz[c as usize] += nd.load as f64 * cz; }
+        // its supports at the plane: bearing links from a node above to one below, carrying load down
+        let mut sup: Vec<Vec<usize>> = vec![Vec::new(); ncomp as usize];
+        for (li, l) in links.iter().enumerate() {
+            if l.axis != 1 || l.joint == NONE || l.face_lo[1] != y || !structural(l) { continue; }
+            let (a, c) = (l.a as usize, l.b as usize);
+            let up = if comp[c] != NONE && comp[a] == NONE { c } else if comp[a] != NONE && comp[c] == NONE { a } else { continue };
+            sup[comp[up] as usize].push(li);
+        }
+        for c in 0..ncomp as usize {
+            if w[c] <= 0.0 || sup[c].is_empty() { continue; }
+            let (gx, gz) = (mx[c] / w[c], mz[c] / w[c]);
+            // the supports' faces, as corners in ticks, and what they carry in bending (N m)
+            let mut pts: Vec<(f64, f64)> = Vec::new();
+            let mut mcap = 0.0f64;
+            for &li in &sup[c] {
+                let l = &links[li];
+                for (x, z) in [(l.face_lo[0], l.face_lo[2]), (l.face_hi[0], l.face_lo[2]), (l.face_lo[0], l.face_hi[2]), (l.face_hi[0], l.face_hi[2])] { pts.push((x as f64, z as f64)); }
+                let (bx, bz) = ((l.face_hi[0] - l.face_lo[0]) as f32 * TICK, (l.face_hi[2] - l.face_lo[2]) as f32 * TICK);
+                let (p, q) = (nodes[l.a as usize].brick as usize, nodes[l.b as usize].brick as usize);
+                let f = flexural(b.mat[p]).min(flexural(b.mat[q])) * if b.jdmg[l.joint as usize] > 0 { 0.5 } else { 1.0 };
+                // the weaker way of bending the face
+                mcap += (f * bx.max(bz) * bx.min(bz) * bx.min(bz) / 6.0) as f64;
+            }
+            let out_by = outside_hull(&mut pts, gx, gz) * TICK as f64;   // m
+            if out_by <= 0.0 { continue; }
+            let allowed = mcap / w[c];
+            let ratio = (out_by / allowed.max(1e-6)) as f32;
+            if ratio <= 1.0 { continue; }
+            for &li in &sup[c] { out.push((links[li].joint, ratio)); }
+        }
+    }
+    out.sort_unstable_by_key(|x| x.0); out.dedup_by_key(|x| x.0);
+    out
+}
+
+/// How far (in the units of the points) (x, z) lies outside the convex hull of `pts`; 0 inside.
+fn outside_hull(pts: &mut Vec<(f64, f64)>, x: f64, z: f64) -> f64 {
+    pts.sort_by(|a, c| a.partial_cmp(c).unwrap_or(core::cmp::Ordering::Equal)); pts.dedup();
+    if pts.len() == 1 { let d = ((pts[0].0 - x).powi(2) + (pts[0].1 - z).powi(2)).sqrt(); return d; }
+    let cross = |o: (f64, f64), a: (f64, f64), c: (f64, f64)| (a.0 - o.0) * (c.1 - o.1) - (a.1 - o.1) * (c.0 - o.0);
+    let mut h: Vec<(f64, f64)> = Vec::new();
+    for &p in pts.iter() { while h.len() >= 2 && cross(h[h.len() - 2], h[h.len() - 1], p) <= 0.0 { h.pop(); } h.push(p); }
+    let lower = h.len() + 1;
+    for &p in pts.iter().rev().skip(1) { while h.len() >= lower && cross(h[h.len() - 2], h[h.len() - 1], p) <= 0.0 { h.pop(); } h.push(p); }
+    h.pop();
+    // distance to the hull: 0 if inside (counter-clockwise hull: all edges have the point on their left)
+    let seg = |a: (f64, f64), c: (f64, f64)| { let (dx, dz) = (c.0 - a.0, c.1 - a.1); let l2 = dx * dx + dz * dz; let t = if l2 > 0.0 { (((x - a.0) * dx + (z - a.1) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 }; ((a.0 + t * dx - x).powi(2) + (a.1 + t * dz - z).powi(2)).sqrt() };
+    if h.len() < 3 { return if h.len() == 2 { seg(h[0], h[1]) } else { 0.0 }; }
+    let inside = (0..h.len()).all(|i| cross(h[i], h[(i + 1) % h.len()], (x, z)) >= 0.0);
+    if inside { return 0.0; }
+    (0..h.len()).map(|i| seg(h[i], h[(i + 1) % h.len()])).fold(f64::MAX, f64::min)
 }
 
 #[cfg(test)]
@@ -635,6 +749,22 @@ mod analysis_tests {
             assert_eq!(a.max_ratio > 1.0, expect);
         }
     }
+    #[test] fn a_slab_on_one_off_centre_column_tips_and_a_centred_one_holds() {
+        // a 6 m x 6 m concrete slab (0.25 m) on one 0.5 m column 3 m high. Centred: it stands (the resultant is
+        // over the column). At a corner: the slab's weight (212 kN) acts 3.9 m off the column, which can bend at
+        // most f b d^2 / 6 = 12 MPa x 0.5^3 / 6 = 250 kNm, e = 1.2 m: it tips. Before the overturning check both
+        // stood (the scalar flow carried the slab down the corner column).
+        for (off, expect) in [(20, false), (0, true)] {
+            let mut b = Bricks::new();
+            b.add([0, 0, 0], [80, 2, 80], mat::CONCRETE, 0, 0);          // ground slab (the support)
+            b.add([off, 2, off], [4, 24, 4], mat::CONCRETE, 1, 0);         // column
+            b.add([0, 26, 0], [48, 2, 48], mat::CONCRETE, 0, 0);          // slab above
+            b.build_joints();
+            let a = gravity(&b);
+            std::println!("column at {} m: worst {:.2}, failed {:?}", off as f32 * TICK, a.max_ratio, a.failed.iter().map(|x| x.1).collect::<std::vec::Vec<_>>());
+            assert_eq!(!a.failed.is_empty(), expect, "column at {off}");
+        }
+    }
     #[test] fn intact_tower_stands() {
         let b = tower::build(12, 1);
         let t = std::time::Instant::now();
@@ -642,4 +772,68 @@ mod analysis_tests {
         std::println!("tower: {} nodes, worst {:.2}, {} joints and {} cracks over, {} CG iterations, {:.0} ms", a.nodes, a.max_ratio, a.failed.len(), a.cracks.len(), a.iterations, t.elapsed().as_secs_f64() * 1e3);
         assert!(a.failed.is_empty() && a.cracks.is_empty());
     }
+}
+
+/// Floor panels under heavy loads (rubble lying on them). The cell graph underestimates the bending of a bay
+/// (its moments split over parallel paths), so a loaded bay is checked as in flat-slab design: in each direction
+/// the total static moment of the bay, q L^2 / 8 per metre of width, must be carried by the sections over its
+/// supports and at midspan together, 2 m_p with m_p = f_flex d^2 / 6 (a free edge: q L^2 / 2 against m_p).
+/// L runs between the faces of the supports under the slab that are nearest the load on each side (within
+/// 6 m across). A bay over that cracks along its support lines (both directions) and comes down.
+/// `point`: (brick, x, z ticks, N). Returns cracks (ratio > 1) and the worst ratio.
+pub fn panels(b: &Bricks, point: &[(u32, f32, f32, f32)]) -> (Vec<Crack>, f32) {
+    let mut out = Vec::new();
+    let mut worst = 0.0f32;
+    let mut bricks: Vec<u32> = point.iter().map(|p| p.0).collect();
+    bricks.sort_unstable(); bricks.dedup();
+    for &i in &bricks {
+        let iu = i as usize;
+        if b.flags[iu] & (F_INFILL | crate::brick::F_MONO) != 0 { continue; }
+        let t = b.tbox(i);
+        let depth = (t.max[1] - t.min[1]) as f32 * TICK;
+        // plates only: wider than 4 times their depth both ways
+        if ((t.max[0] - t.min[0]).min(t.max[2] - t.min[2]) as f32) * TICK < 4.0 * depth { continue; }
+        // supports: structural bricks it bears on
+        let mut sup: Vec<[i32; 4]> = Vec::new();
+        let mut j = b.jhead[iu];
+        while j != NONE {
+            let o = b.joint_other(j, i); let ot = b.tbox(o);
+            if b.jaxis[j as usize] == 1 && ot.max[1] == t.min[1] && b.flags[o as usize] & F_INFILL == 0 {
+                sup.push([ot.min[0].max(t.min[0]), ot.min[2].max(t.min[2]), ot.max[0].min(t.max[0]), ot.max[2].min(t.max[2])]);
+            }
+            j = b.joint_next(j, i);
+        }
+        let mp = flexural(b.mat[iu]) * depth * depth / 6.0;
+        let selfw = mat::density(b.mat[iu]) * depth * 9.81;   // Pa
+        let band = 6.0 / TICK;
+        // each loaded point picks its bay; points in one bay are checked once
+        let mut seen: Vec<[i32; 4]> = Vec::new();
+        for p in point.iter().filter(|p| p.0 == i) {
+            let (x, z) = (p.1, p.2);
+            // x span: supports within the band across (z)
+            let near_z = |s: &[i32; 4]| (s[1] as f32) <= z + band && (s[3] as f32) >= z - band;
+            let near_x = |s: &[i32; 4]| (s[0] as f32) <= x + band && (s[2] as f32) >= x - band;
+            let left = sup.iter().filter(|s| near_z(s) && (s[2] as f32) <= x).map(|s| s[2]).max();
+            let right = sup.iter().filter(|s| near_z(s) && (s[0] as f32) >= x).map(|s| s[0]).min();
+            let lo = sup.iter().filter(|s| near_x(s) && (s[3] as f32) <= z).map(|s| s[3]).max();
+            let hi = sup.iter().filter(|s| near_x(s) && (s[1] as f32) >= z).map(|s| s[1]).min();
+            let bay = [left.unwrap_or(t.min[0]), lo.unwrap_or(t.min[2]), right.unwrap_or(t.max[0]), hi.unwrap_or(t.max[2])];
+            if seen.contains(&bay) { continue; }
+            seen.push(bay);
+            let area = ((bay[2] - bay[0]).max(1) * (bay[3] - bay[1]).max(1)) as f32 * TICK * TICK;
+            let on: f32 = point.iter().filter(|q| q.0 == i && q.1 >= bay[0] as f32 && q.1 <= bay[2] as f32 && q.2 >= bay[1] as f32 && q.2 <= bay[3] as f32).map(|q| q.3).sum();
+            let q = selfw + on / area;
+            let ratio_dir = |l: i32, both: bool| { let l = l as f32 * TICK; if both { q * l * l / 8.0 / (2.0 * mp) } else { q * l * l / 2.0 / mp } };
+            let rx = ratio_dir(bay[2] - bay[0], left.is_some() && right.is_some());
+            let rz = ratio_dir(bay[3] - bay[1], lo.is_some() && hi.is_some());
+            let r = rx.max(rz);
+            worst = worst.max(r);
+            if r <= 1.0 { continue; }
+            // it comes down along its support lines
+            for (axis, at) in [(0usize, bay[0]), (0, bay[2]), (2, bay[1]), (2, bay[3])] {
+                if at > t.min[axis] && at < t.max[axis] { out.push(Crack { brick: i, axis, at, ratio: r }); }
+            }
+        }
+    }
+    (out, worst)
 }

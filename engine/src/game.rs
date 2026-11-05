@@ -20,6 +20,14 @@ use alloc::vec::Vec;
 
 pub struct Game {
     pub b: Bricks,
+    /// weight resting on the structure (rubble lying on floors), for the next structure_step: (x, y, z m, N)
+    pub rest: Vec<[f32; 4]>,
+    /// last structure_step: the resting weight it found a floor for (N)
+    pub rest_applied: f32,
+    /// joints and bricks failed by sideways hits (all impacts calls)
+    pub side_failed: usize,
+    /// worst floor panel under resting loads at the last structure_step (load / capacity)
+    pub panel_ratio: f32,
     pub player: Player,
     pub chunks: Vec<Mesh>,
     pub out: Vec<f32>,
@@ -66,7 +74,7 @@ impl Game {
     pub fn new_kind(storeys: i32, kind: u8) -> Self {
         let b = tower::build_kind(storeys, 1, kind);
         let n = (storeys + 2) as usize;
-        let mut g = Game { b, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
+        let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
                            out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH };
         for k in 0..n as i32 { g.remesh(k); }
         g
@@ -178,9 +186,29 @@ impl Game {
     pub fn structure_step(&mut self, max_fail: usize) -> usize {
         self.b.log.clear();
         let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
-        let load: Vec<f32> = set.iter().map(|&i| structure::mass(&self.b, i) * 9.81).collect();
+        let mut load: Vec<f32> = set.iter().map(|&i| structure::mass(&self.b, i) * 9.81).collect();
+        // rubble lying on the structure weighs on the brick under it: a floor heaped with debris carries it, and
+        // fails when it is too much
+        let rest = core::mem::take(&mut self.rest);
+        self.rest_applied = 0.0;
+        let mut point = Vec::new();
+        if !rest.is_empty() {
+            let mut idx = vec![NONE; self.b.len()];
+            for (k, &i) in set.iter().enumerate() { idx[i as usize] = k as u32; }
+            for r in &rest {
+                if let Some(i) = self.brick_below(v3(r[0], r[1], r[2]), 4.0) { let k = idx[i as usize]; if k != NONE { point.push((k, r[0] / TICK, r[2] / TICK, r[3])); self.rest_applied += r[3]; } }
+            }
+        }
+        let _ = &mut load;
         let sink: Vec<bool> = set.iter().map(|&i| self.b.y[i as usize] <= 0).collect();
-        let a = structure::analyse(&self.b, &set, &load, &sink, v3(0.0, -1.0, 0.0));
+        let mut a = structure::analyse_at(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0));
+        if !point.is_empty() {
+            let pts: Vec<(u32, f32, f32, f32)> = point.iter().map(|&(k, x, z, f)| (set[k as usize], x, z, f)).collect();
+            let (cracks, worst) = structure::panels(&self.b, &pts);
+            self.panel_ratio = worst;
+            a.max_ratio = a.max_ratio.max(worst);
+            a.cracks.extend(cracks);
+        }
         self.max_ratio = a.max_ratio;
         let work = self.apply_failures(&a, max_fail);
         self.failed_total += work.len();
@@ -314,7 +342,8 @@ impl Game {
         self.b.log.clear();
         // ---- the standing structure
         let mut scrumbs = Vec::new();
-        let mut extra: Vec<(u32, f32)> = Vec::new();
+        let mut extra: Vec<(u32, f32, [f32; 3])> = Vec::new();
+        let mut side: Vec<(u32, V3, [f32; 3])> = Vec::new();
         for h in hits.iter().filter(|h| h.who < 0) {
             let mut near = Vec::new();
             let lo = [floor(h.p[0]) as i32 - 3, floor(h.p[1]) as i32 - 3, floor(h.p[2]) as i32 - 3];
@@ -332,9 +361,11 @@ impl Game {
                 for &i in &near { if dist2(&self.b, i, h.p) <= rt * rt { scrumbs.push(i); } }
                 for &i in &scrumbs { if self.b.flags[i as usize] & F_ALIVE != 0 { self.b.remove(i); } }
             }
-            // the contact force loads the bricks around the contact (its downward part: the check is vertical)
+            // the contact force loads the bricks around the contact: its downward part with the weight, its sideways
+            // part as a load case of its own (a piece swinging into a wall pushes it over or knocks bricks out)
             let f = h.j / dt * (-h.d.y).max(0.0);
-            if f <= 0.0 { continue; }
+            let lat = v3(h.d.x, 0.0, h.d.z) * (h.j / dt);
+            if f <= 0.0 && lat.len() <= 0.0 { continue; }
             let rr = rt.max(2.0) + 3.0;
             let mut near = Vec::new();
             let lo = [floor(h.p[0] - rr) as i32, floor(h.p[1] - rr) as i32, floor(h.p[2] - rr) as i32];
@@ -342,8 +373,8 @@ impl Game {
             self.b.query(lo, [lo[0] + w, lo[1] + w, lo[2] + w], true, &mut near);
             near.retain(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && sphere_hits(&self.b, i, h.p, rr));
             if near.is_empty() { continue; }
-            let share = f / near.len() as f32;
-            for &i in &near { extra.push((i, share)); }
+            if f > 0.0 { let share = f / near.len() as f32; for &i in &near { extra.push((i, share, h.p)); } }
+            if lat.len() > 0.0 { let share = 1.0 / near.len() as f32; for &i in &near { side.push((i, lat * share, h.p)); } }
         }
         scrumbs.sort_unstable(); scrumbs.dedup();
         // crumb budget: beyond it, crushed material goes as dust (an even sample of the crumbs stays)
@@ -354,18 +385,39 @@ impl Game {
         let mut rubble_room = self.rubble_keep;
         let mut rubble: Vec<u32> = Vec::new();
         let mut spieces = Vec::new();
-        if !extra.is_empty() || !scrumbs.is_empty() {
+        if !extra.is_empty() || !scrumbs.is_empty() || !side.is_empty() {
             let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
             let mut idx = vec![NONE; self.b.len()];
             for (k, &i) in set.iter().enumerate() { idx[i as usize] = k as u32; }
-            let mut load: Vec<f32> = set.iter().map(|&i| structure::mass(&self.b, i) * 9.81).collect();
-            for &(i, f) in &extra { let k = idx[i as usize]; if k != NONE { load[k as usize] += f; } }
+            let load: Vec<f32> = set.iter().map(|&i| structure::mass(&self.b, i) * 9.81).collect();
+            // (at the contact: a hit on a 22 m slab loads the cell it lands on)
+            let mut point = Vec::new();
+            for &(i, f, p) in &extra { let k = idx[i as usize]; if k != NONE { point.push((k, p[0], p[2], f)); } }
             let sink: Vec<bool> = set.iter().map(|&i| self.b.y[i as usize] <= 0).collect();
             if !extra.is_empty() {
-                let a = structure::analyse(&self.b, &set, &load, &sink, v3(0.0, -1.0, 0.0));
+                let a = structure::analyse_at(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0));
                 self.max_ratio = self.max_ratio.max(a.max_ratio);
                 let work = self.apply_failures(&a, 256);
                 self.failed_total += work.len();
+            }
+            // sideways hits: their loads alone, in their main direction, flow to the ground (shear and tension in
+            // the joints on the way). Bricks that failed in the vertical case above are still in the set; joints
+            // removed there are gone from the graph already.
+            let total = side.iter().fold(v3(0.0, 0.0, 0.0), |a, &(_, l, _)| a + l);
+            if total.len() > 0.0 {
+                let dirn = total * (1.0 / total.len());
+                let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
+                let mut idx = vec![NONE; self.b.len()];
+                for (k, &i) in set.iter().enumerate() { idx[i as usize] = k as u32; }
+                let lload = vec![0.0f32; set.len()];
+                let mut point = Vec::new();
+                for &(i, l, p) in &side { let k = idx[i as usize]; if k != NONE { point.push((k, p[0], p[2], l.dot(dirn).max(0.0))); } }
+                let sink: Vec<bool> = set.iter().map(|&i| self.b.y[i as usize] <= 0).collect();
+                let a = structure::analyse_at(&self.b, &set, &lload, &point, &sink, dirn);
+                self.max_ratio = self.max_ratio.max(a.max_ratio);
+                let work = self.apply_failures(&a, 256);
+                self.failed_total += work.len();
+                self.side_failed += work.len();
             }
             spieces = self.detach();
         }
@@ -570,6 +622,14 @@ impl Game {
     }
 
     /// Ray from o along unit d (m): distance to the first static brick, or a negative value.
+    /// The standing brick whose top is the first under the point (x, y, z m), within `max` m below it.
+    pub fn brick_below(&self, p: V3, max: f32) -> Option<u32> {
+        let (x, y, z) = (p.x / TICK, p.y / TICK, p.z / TICK);
+        let (xi, zi) = (floor(x) as i32, floor(z) as i32);
+        let mut near = Vec::new();
+        self.b.query([xi, floor(y - max / TICK) as i32, zi], [xi + 1, floor(y) as i32 + 1, zi + 1], false, &mut near);
+        near.into_iter().filter(|&i| { let t = self.b.tbox(i); (t.max[1] as f32) <= y + 1.0 }).max_by_key(|&i| self.b.tbox(i).max[1])
+    }
     pub fn raycast(&mut self, o: V3, d: V3, max: f32) -> f32 {
         match self.b.raycast([o.x / TICK, o.y / TICK, o.z / TICK], [d.x, d.y, d.z], max / TICK) { Some((_, t, _)) => t * TICK, None => -1.0 }
     }
@@ -791,6 +851,67 @@ mod tests {
         }
         std::println!("after cutting the perimeter: {} joints failed in {rounds} rounds, biggest falling piece {biggest} bricks, worst ratio now {:.2}", g.failed_total, g.max_ratio);
         assert!(biggest > 300, "the floors above come down");
+    }
+    #[test] fn a_tower_left_on_one_column_comes_down() {
+        // the ground storey blasted away except one column: the upper building must not stand on it.
+        for (kind, keep) in [(0u8, (-10.7f32, -10.7f32)), (0, (-3.7, -3.7)), (0, (-3.7, -10.7)), (1, (-3.7, -3.7)), (2, (-3.7, -3.7)), (1, (-10.7, -10.7))] {
+            let mut g = Game::new_kind(4, kind);
+            assert_eq!(g.structure_step(64), 0, "intact building stands");
+            let mut x = -11.6f32;
+            while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 {
+                if (x - keep.0).abs() > 1.3 || (z - keep.1).abs() > 1.3 { g.blast(v3(x, 1.6, z), 0.7); }
+                z += 0.8; } x += 0.8; }
+            let mut rounds = 0; let mut biggest = 0;
+            while rounds < 200 {
+                let n = g.structure_step(64);
+                for (id, sz) in bodies_in(&g.out) { if id >= 0 { biggest = biggest.max(sz); } }
+                rounds += 1;
+                if n == 0 { break; }
+            }
+            std::println!("kind {kind}, one column at {keep:?}: {} joints failed in {rounds} rounds, biggest falling piece {biggest} bricks", g.failed_total);
+            assert!(biggest > 300, "kind {kind}, column at {keep:?}: the floors above come down");
+        }
+    }
+    #[test] fn rubble_lying_on_a_floor_weighs_on_it() {
+        // rubble heaped over one bay of the second floor (6.5 m square between columns). Light rubble (3 kPa, a
+        // 0.15 m layer) is carried; 60 kPa (about 3 m of loose concrete rubble) is not: the bay's static moment
+        // q L^2 / 8 = 66 kPa x 6.4^2 / 8 = 338 kNm/m against 2 x 125 kNm/m (f_flex 12 MPa, 0.25 m) is 1.35 times
+        // what it carries. Before resting loads the floor never felt rubble; with them spread over the whole
+        // 22 m slab brick, 0.59 of strength; at their points through the cell graph, 0.70.
+        for (kpa, expect) in [(3.0f32, false), (60.0, true)] {
+            let mut g = Game::new_kind(4, 0);
+            assert_eq!(g.structure_step(64), 0);
+            let (mut x, mut pts) = (-10.25f32, 0);
+            while x <= -4.25 { let mut z = -10.25f32; while z <= -4.25 { g.rest.push([x, 7.9, z, kpa * 1000.0 * 0.25]); pts += 1; z += 0.5; } x += 0.5; }
+            let (mut failed, mut fell, mut applied) = (0, 0, 0.0f32);
+            for round in 0..40 {
+                if round > 0 && failed > 0 {
+                    // the rubble stays on what is left of the floor
+                    let (mut x, mut k) = (-10.25f32, 0); while x <= -4.25 { let mut z = -10.25f32; while z <= -4.25 { g.rest.push([x, 7.9, z, kpa * 1000.0 * 0.25]); k += 1; z += 0.5; } x += 0.5; } let _ = k;
+                }
+                let n = g.structure_step(64);
+                if round == 0 { applied = g.rest_applied; std::println!("  round 0: worst {:.2}, panel {:.2}", g.max_ratio, g.panel_ratio); }
+                failed += n;
+                for (id, sz) in bodies_in(&g.out) { if id >= 0 { fell += sz; } }
+                if n == 0 { break; }
+            }
+            std::println!("{kpa} kPa of rubble on a bay ({pts} points, {:.0} kN found a floor): {failed} failures, {fell} bricks fell", applied / 1000.0);
+            assert!(applied > 0.9 * kpa * 1000.0 * 0.25 * pts as f32, "the rubble rests on the slab");
+            assert_eq!(fell > 0, expect, "{kpa} kPa");
+        }
+    }
+    #[test] fn a_sideways_hit_knocks_bricks_out_of_a_wall() {
+        // a 1 t piece swinging into a masonry pier of the second storey at 6 m/s (J = 6 kN s over a frame):
+        // 360 kN sideways on a few bricks of mortar (0.3 MPa in tension, 0.5 in shear). Before, only the
+        // downward part of a contact force loaded the structure, so a sideways hit only crushed what it touched.
+        let mut g = Game::new_kind(4, 1);
+        assert_eq!(g.structure_step(64), 0);
+        // contact on the south facade (z = -11.25 m) at 5.5 m up, pushing the wall north (into the building)
+        g.inp = vec![-1.0, -6.0, 5.5, -11.2, 0.0, 0.0, 1.0, 6000.0, 6.0, 0.0, 0.0];
+        g.impacts(1.0 / 60.0);
+        let mut fell = 0; for (id, sz) in bodies_in(&g.out) { if id >= 0 { fell += sz; } }
+        std::println!("sideways hit on a masonry pier: {} joints failed by the sideways load, {fell} bricks came loose", g.side_failed);
+        assert!(g.side_failed > 0, "the sideways load fails joints");
     }
     #[test] fn a_falling_slab_cracks_on_impact() {
         // a free piece: a 4 m x 4 m slab of 1 m x 0.25 m planks joined edge to edge, hitting the ground on a corner
