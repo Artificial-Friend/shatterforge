@@ -24,6 +24,7 @@ const names = args.length ? args.flatMap(a => SUITES[a] || [a]) : SUITES.quick;
     let threeJs; try { threeJs = fs.readFileSync(require.resolve('three/build/three.min.js'), 'utf8'); } catch (e) { threeJs = fs.readFileSync(path.join(process.env.SF_NODE_MODULES || '', 'three/build/three.min.js'), 'utf8'); }
     await p.route('**/three.min.js', r => r.fulfill({ body: threeJs, contentType: 'text/javascript' }));
     // one scenario per page load, queued the way the page's own button queues them (no render: nothing looks)
+    await p.addInitScript((nf) => { if (nf) window.__noFracCells = true; }, !!process.env.SF_NO_FRAC_CELLS);   // (compare without irregular fracture)
     await p.addInitScript(([name, readLag, jobLag, frames, trace]) => {
       if (sessionStorage.getItem('lab-set')) return; sessionStorage.setItem('lab-set', '1');
       localStorage.setItem('sf-lab', JSON.stringify({ queue: [name], done: [], results: [], readLag, jobLag, render: false, external: true, frames, trace }));

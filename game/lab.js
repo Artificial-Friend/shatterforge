@@ -81,6 +81,16 @@ function labDrawn(key, x, y, z, bound, vol) {
   if (d.n >= d.keys.length) { const g = (a, C) => { const b = new C(a.length * 2); b.set(a); return b; }; d.keys = g(d.keys, Float64Array); d.pos = g(d.pos, Float32Array); d.bound = g(d.bound, Float32Array); }
   d.keys[d.n] = key; d.pos[d.n * 3] = x; d.pos[d.n * 3 + 1] = y; d.pos[d.n * 3 + 2] = z; d.bound[d.n] = bound; d.n++; d.vol += vol;
 }
+// (for a hole: the bodies and particles that exist but have nothing drawn, biggest first)
+function labUndrawn() {
+  const L = LAB, d = L.draw, drawnBodies = new Set(), drawnParts = new Set();
+  for (let k = 0; k < d.n; k++) { const key = d.keys[k]; if (key < 0) drawnParts.add((-key - 1) % 1048576); else { const sh = gpu.shapes[(key % 1048576) - 1]; if (sh) drawnBodies.add(sh.body); } }
+  const out = [];
+  for (const [b, v] of L.bodyVol) if (!drawnBodies.has(b)) { const gb = gpu.bodies[b - 1]; out.push({ body: b, vol: +v.toFixed(3), made: gb && gb.labF, size: gb && gb.labH }); }
+  for (const [i, v] of L.partVol) if (!drawnParts.has(i)) out.push({ particle: i, vol: +v.toFixed(3), state: snapCur && snapCur.parts && snapCur.parts.n > i ? snapCur.parts.data[i * 12 + 10] : null });
+  out.sort((a, b) => b.vol - a.vol);
+  return { count: out.length, vol: +out.reduce((a, x) => a + x.vol, 0).toFixed(3), first: out.slice(0, 6) };
+}
 // every frame: what is drawn against what exists
 function labFrameChecks() {
   const L = LAB, d = L.draw, f = L.f;
@@ -90,7 +100,7 @@ function labFrameChecks() {
   const parts = () => ({ static_drawn: +L.staticDrawn.toFixed(2), static_now: +L.staticT.toFixed(2), gpu_drawn: +d.vol.toFixed(2), gpu_now: +L.gpuVol.toFixed(2), reads_pending: L.gates.length, chunks_pending: pendingChunks.length, placing: gpu.placing() });
   L.Thist.push(L.T); if (L.Thist.length > L.readLag + L.jobLag + 4) L.Thist.shift();
   const lo = Math.min(...L.Thist), hi = Math.max(...L.Thist), tol = L.volTol;
-  if (D < lo - tol) { L.holeFrames++; L.holeMax = Math.max(L.holeMax, lo - D); if (!L.inHole) labEvent('hole', f, { missing_m3: +(lo - D).toFixed(3), ...parts() }); L.inHole = true; }
+  if (D < lo - tol) { L.holeFrames++; L.holeMax = Math.max(L.holeMax, lo - D); if (!L.inHole) labEvent('hole', f, { missing_m3: +(lo - D).toFixed(3), ...parts(), undrawn: labUndrawn() }); L.inHole = true; }
   else if (L.inHole) { L.inHole = false; L.holesRecovered++; }
   if (D > hi + tol) { L.dupFrames++; L.dupMax = Math.max(L.dupMax, D - hi); labEvent('duplicate', f, { extra_m3: +(D - hi).toFixed(3), ...parts() }); }
   L.D = D;

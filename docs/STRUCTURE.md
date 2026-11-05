@@ -88,6 +88,29 @@ What it took, in a model where every material is equally stiff:
 | A timber floor bends at 2.4 MPa over its 0.25 m depth | 50 × 225 mm joists at 400 mm, 24 MPa: 25 kNm per metre | as solid timber (20 MPa), a bay carried 300 kPa of rubble |
 | Shop windows stand between brick piers | glass fronts on slender posts under one transfer beam were too soft a support | |
 
+## Irregular fracture
+
+A brick on a fracture surface is drawn and collided as the Voronoi cells of one of the 16 fracture patterns, which tile it exactly. One or two of its cells spall off and fall as crumbs. A break shows jagged edges instead of a step of boxes, on both the piece that falls and the part left standing.
+
+Which bricks:
+- The engine marks a brick as on a fracture surface (`F_FRAC`) when a joint of it breaks or a neighbour is crushed away.
+- Only bricks of 0.25–2 m a side are marked. Bigger ones are refined near a break, and smaller ones are crumbs already.
+- The mark goes with the brick's box to the page (code bit 256), and the engine's mesh leaves marked bricks out.
+
+Which cells:
+- The pattern and the spalled cells come from the brick's index (`brick::frac_cells`, the same hash on the page). The worker's engine, the page's copy and the page agree without being told.
+- A brick that already spalled keeps the same cells when its piece breaks again. Spalling again made its material twice.
+
+On the page:
+- Standing fractured bricks are static hull shapes on the GPU and instanced cell meshes. Each job's cells are shown with that job's chunk meshes. Shown as they stood at the moment, a later job's cells appeared before its debris did: holes of up to 0.6 m³.
+- At most 1,500 standing bricks become cells, and only while there is shape capacity to spare. Beyond that a brick stays whole, drawn as one cube cell. The cut in the lab's collapse marks thousands of bricks, and as cells and chunk bodies they ran the GPU world out of shapes: the building did not fall, with 5,813 bodies awake and 13 s GPU steps.
+- New pieces made from the standing structure take cells for their fractured bricks. A piece cut from a moving piece does not spall again: the GPU places such pieces one for one.
+- Spalled cells fall as particles. All crumbs (particles) are drawn as cells scaled to their volume; their physics is a sphere as before.
+
+Engine test `a_blast_leaves_a_fracture_surface`: a blast in a masonry facade marks 16 standing bricks, all 0.25–2 m. The spalled cells are always one or two, never all, the same every time.
+
+Open: in the lab's collapse (150 frames, software GPU), 3–5 frames show drawn volume below what exists by 0.07–0.4 m³: crumbs not yet drawn for one or two frames. The same run with cell fracture off (`SF_NO_FRAC_CELLS=1 node game/lab.cjs collapse --frames 150`) has none.
+
 ## Known limits
 
 - **Every material equally stiff.** The flow's stiffness has no Young's modulus, so steel draws no more load than brick of the same size. Tried: stiffness by modulus (steel 6.7, brick 0.17 of concrete), and shear deformation of deep members in series with bending. Each one put the 12-storey concrete tower over strength under its own weight (105–111%) and the masonry building at 147%. Not kept.

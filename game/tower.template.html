@@ -161,7 +161,6 @@ const towerMat = new THREE.MeshLambertMaterial({ vertexColors: true });
 const chunks = [], chunkVol = {};
 function chunkMesh(k) {
   chunkVol[k] = E.chunk_volume ? E.chunk_volume(k) : 0;
-  publishFrac();
   if (LAB.on) LAB.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0) + staticCellPubVol;
   const vl = E.chunk_vlen(k), il = E.chunk_ilen(k);
   const v = new Float32Array(E.memory.buffer, E.chunk_vptr(k), vl).slice();
@@ -260,9 +259,14 @@ function pullDebris() {
     const t0 = performance.now();
     // the building's mesh changes in the frame the debris that replaces it first shows: with the first
     // read-back issued after that debris was made
-    if (pendingChunks.length) {
+    if (pendingChunks.length || fracPending.length) {
       const due = new Set(), keep = [];
       for (const e of pendingChunks) { if (e.need <= seq) due.add(e.k); else keep.push(e); }
+      // the standing cells as they were after the latest job now due (a later job's are not shown before its debris)
+      let snap = null; const fk = [];
+      for (const f of fracPending) { if (f.need <= seq) snap = f; else fk.push(f); }
+      fracPending = fk;
+      if (snap) publishFrac(snap);
       pendingChunks = keep; for (const k of due) chunkMesh(k);
     }
     r.t = clock();
@@ -347,7 +351,8 @@ function drawDebris(now) {
   const nb = r.tgt ? Math.min(MAXD, r.nBox) : n;
   const pr = r.parts, pp = p && p.parts;
   if (pr && pr.list) {
-    np = Math.min(MAXD - nb, pr.list.length);
+    // (all of them: drawn as cells they do not take the box mesh's instances; those drawn as boxes stop at MAXD)
+    np = pr.list.length;
     const d = pr.data, pd = pp && pp.data;
     for (let k = 0; k < np; k++) {
       const i = pr.list[k], o = i * 12, inf = pInfo[i];
@@ -368,7 +373,7 @@ function drawDebris(now) {
         M4.compose(PP, QQ, SS);
         const c = (r.hullCount ? r.hullCount.get(hid) || 0 : 0) + (pHull.get(hid) || 0);
         if (c < HULL_CAP) { const m = hullMesh(hid); m.setMatrixAt(c, M4); m.setColorAt(c, debrisColour(inf.col || 0, i)); pHull.set(hid, (pHull.get(hid) || 0) + 1); }
-      } else { M4.compose(PP, QQ, SS); dMesh.setMatrixAt(nb + np2, M4); np2++; }
+      } else if (nb + np2 < MAXD) { M4.compose(PP, QQ, SS); dMesh.setMatrixAt(nb + np2, M4); np2++; }
       if (lab) labDrawn(-(pr.gens[k] * 1048576 + i) - 1, PP.x, PP.y, PP.z, Math.hypot(d[o + 3], d[o + 4], d[o + 5]), vol);
     }
   }
@@ -438,15 +443,28 @@ function fracSplit(idx, s, p, q) {
   return { kept: cells.filter((c, k) => !((mask >> k) & 1)), spall: cells.filter((c, k) => (mask >> k) & 1) };
 }
 const fracStatic = new Map();   // standing fractured brick -> { key, slots, cells }
+const FRAC_MAX = 1500;
+const FRACTURE_CELLS = !window.__noFracCells;   // (off only to compare, in the lab)
+const fracGone = new Map();   // box key -> brick index, of standing fractured bricks that went with a piece
+// box key (tower frame) -> the hash its cells were made with: a brick that already spalled keeps the same cells when
+// its piece breaks again (the engine hands back the whole brick; spalling again made its material twice)
+const fracKeys = new Map();
 let staticCellVol = 0, staticCellPubVol = 0, fracDirty = false;
 const cellVol = (c) => 8 * c.h[0] * c.h[1] * c.h[2] * GpuWorld.hulls.hulls[c.hull].vol;
 // the standing cells are drawn from their own instanced meshes, published with the chunk meshes (so a brick
 // leaves the engine's mesh and shows as cells in the same frame)
 const staticCellMeshes = new Map();
-function publishFrac() {
+let fracPending = [];
+// the standing cells now, to be shown with the chunk meshes of the job that made them (or at once, without a GPU)
+function snapFrac() {
   if (!fracDirty) return; fracDirty = false;
+  const list = []; for (const [idx, r] of fracStatic) for (const c of r.cells) list.push([c, idx]);
+  const snap = { list, vol: staticCellVol, need: readSeq + 1 };
+  if (gpu) fracPending.push(snap); else publishFrac(snap);
+}
+function publishFrac(snap) {
   const by = new Map();
-  for (const [idx, r] of fracStatic) for (const c of r.cells) { let l = by.get(c.hull); if (!l) by.set(c.hull, l = []); l.push([c, idx]); }
+  for (const [c, idx] of snap.list) { let l = by.get(c.hull); if (!l) by.set(c.hull, l = []); l.push([c, idx]); }
   for (const [id, m] of staticCellMeshes) if (!by.has(id)) m.count = 0;
   for (const [id, l] of by) {
     let m = staticCellMeshes.get(id);
@@ -465,7 +483,14 @@ function publishFrac() {
     }
     m.count = n; m.instanceMatrix.needsUpdate = true; m.instanceColor.needsUpdate = true;
   }
-  staticCellPubVol = staticCellVol;
+  staticCellPubVol = snap.vol;
+  if (LAB.on) LAB.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0) + staticCellPubVol;
+}
+// cells that spall off a fracture surface fall as crumbs: particles of the cell's volume (drawn as cells)
+function addCrumbCells(cells) {
+  const slotsP = gpu.addParticles(cells.map(c => ({ p: c.p, v: [0, 0, 0], w: [0, 0, 0], q: c.q, r: Math.cbrt(6 * c.h[0] * c.h[1] * c.h[2] * GpuWorld.hulls.hulls[c.hull].vol / Math.PI), mat: c.mat })));
+  // (h is the box of equal volume)
+  slotsP.forEach((slot, k) => { if (slot < 0) return; const c = cells[k], e = Math.cbrt(GpuWorld.hulls.hulls[c.hull].vol); const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: c.h.map(x => x * e), col: c.col, gen: g, dead: false }; partsMade++; });
 }
 function applyStatic(updates) {
   let woke = false;
@@ -474,32 +499,45 @@ function applyStatic(updates) {
     const [idx, alive] = [u[0], u[1]];
     const s = boxShape(u, 2);
     const fr = fracStatic.get(idx), key = u.slice(2, 8).join(',');
-    const frac = alive && s.frac && setting.chunks && GpuWorld.hulls;
+    const frac = alive && s.frac && GpuWorld.hulls;
     // a fractured brick changed (split, or no longer fractured): its cells go first
     if (fr && (!frac || fr.key !== key)) {
       for (const sl of fr.slots) gpu.killShape(sl);
       for (const c of fr.cells) staticCellVol -= cellVol(c);
       fracStatic.delete(idx); fracDirty = true; woke = true;
+      // (if it now falls with a piece, the piece takes the same cells and spalls nothing more)
+      if (!alive) fracGone.set(key, idx);
     }
+    // (within budget: at most FRAC_MAX standing bricks as cells, and only with shape capacity to spare; the cut of
+    // the lab's collapse marks thousands, and as cells and chunk bodies they ran the GPU world out of shapes)
+    // (over budget it stays whole: one cell, the cube; the engine leaves every fractured brick out of its mesh, so
+    // it must be drawn here either way)
+    const whole = frac && !fracStatic.has(idx) && (!setting.chunks || !FRACTURE_CELLS || fracStatic.size >= FRAC_MAX || gpu.roomShapes() < 4096);
     if (frac) {
       if (fracStatic.has(idx)) continue;
       if (slots.has(idx)) { gpu.killShape(slots.get(idx)); slots.delete(idx); }
-      const { kept, spall } = fracSplit(idx, s, s.p, [0, 0, 0, 1]);
+      const { kept, spall } = whole ? { kept: [{ p: s.p.slice(), q: [0, 0, 0, 1], h: s.h.slice(), mat: s.mat, col: s.col, hull: 0 }], spall: [] } : fracSplit(idx, s, s.p, [0, 0, 0, 1]);
       // (spalled once: a brick seen again after a split keeps all its cells)
       const first = !fr;
       const cells = first ? kept : kept.concat(spall);
       fracStatic.set(idx, { key, cells, slots: cells.map(c => gpu.setStaticShape(null, 1, c.p, c.h, c.mat, c.hull)) });
+      if (!whole) fracKeys.set(key, idx);
       for (const c of cells) staticCellVol += cellVol(c);
-      if (first) for (const c of spall) spalled.push({ shapes: [{ ...c }], v: [0, 0, 0], w: [0, 0, 0] });
+      if (first) for (const c of spall) spalled.push(c);
       fracDirty = true; woke = true;
       continue;
     }
     if (alive) slots.set(idx, gpu.setStaticShape(slots.get(idx) ?? null, 1, s.p, s.h, s.mat));
     else if (slots.has(idx)) { gpu.killShape(slots.get(idx)); slots.delete(idx); woke = true; }
   }
-  // the spalled cells fall as chunks
-  if (spalled.length && gpu.roomBodies() >= spalled.length && gpu.roomShapes() >= spalled.length) gpu.addBodies(spalled);
+  // the spalled cells fall as crumbs (particles, drawn as cells); without room for them, as chunk bodies
+  if (spalled.length) {
+    const asP = gpu.addParticles && setting.particles && gpu.roomParticles && gpu.roomParticles() >= spalled.length;
+    if (asP) addCrumbCells(spalled);
+    else if (gpu.roomBodies() >= spalled.length && gpu.roomShapes() >= spalled.length) gpu.addBodies(spalled.map(c => ({ shapes: [{ ...c }], v: [0, 0, 0], w: [0, 0, 0] })));
+  }
   if (woke) gpu.wakeAll();   // what rested on removed bricks must fall
+  snapFrac();
 }
 // Add bodies whose boxes are in the tower frame. xf: tower frame -> world { R, T, C } (identity when absent);
 // vel(c): the velocity a body starts with at world point c, and its spin.
@@ -523,7 +561,8 @@ function addPieces(list, xf, vel, cool) {
   // capacity: bodies and shapes (slots of retired bodies are not reused)
   // fractured boxes of new pieces (made from the standing structure, not cut from a moving piece): their cells,
   // the spalled ones as chunks of their own
-  if (!xf && setting.chunks && GpuWorld.hulls) {
+  const spallP = [];
+  if (setting.chunks && GpuWorld.hulls && FRACTURE_CELLS) {
     const extra = [];
     for (const b of list) {
       if (b.chunk || b.boxes.length < 2) continue;
@@ -531,12 +570,24 @@ function addPieces(list, xf, vel, cool) {
       for (let k = 0; k < b.boxes.length; k++) {
         const s = boxShape(b.boxes[k], 0);
         if (!s.frac) continue;
-        const { kept, spall } = fracSplit(Math.floor(s.p[0] * 977 + s.p[1] * 131 + s.p[2] * 7919) >>> 0, s, s.p, [0, 0, 0, 1]);
+        const key = Array.from(b.boxes[k].slice(0, 6)).join(','), was = fracGone.get(key) ?? fracKeys.get(key);
+        // already cells (standing, or in the piece this one broke from): the same ones, nothing more spalls
+        if (was !== undefined) { fracGone.delete(key); b.cells[k] = fracSplit(was, s, s.p, [0, 0, 0, 1]).kept; continue; }
+        // newly fractured: only in pieces made from the standing structure (a piece cut from a moving one is
+        // placed by the GPU one for one, with no room for crumbs placed with it)
+        if (xf) continue;
+        const h = Math.floor(s.p[0] * 977 + s.p[1] * 131 + s.p[2] * 7919) >>> 0;
+        const { kept, spall } = fracSplit(h, s, s.p, [0, 0, 0, 1]);
+        fracKeys.set(key, h);
         b.cells[k] = kept;
-        for (const c of spall) extra.push({ id: -1, boxes: [b.boxes[k]], chunk: c, of: b });
+        for (const c of spall) spallP.push(c);
       }
     }
     if (extra.length) list = list.concat(extra);
+    // the spalled cells fall as crumbs; without room for them as particles, they stay on the piece
+    const room = setting.particles && gpu.roomParticles ? gpu.roomParticles() : 0;
+    if (spallP.length && room >= spallP.length) addCrumbCells(spallP);
+    else if (spallP.length) for (const b of list) if (b.cells) b.cells = b.cells.map((kept, k) => kept && kept.length ? kept.concat(fracSplit(Math.floor(boxShape(b.boxes[k], 0).p[0] * 977 + boxShape(b.boxes[k], 0).p[1] * 131 + boxShape(b.boxes[k], 0).p[2] * 7919) >>> 0, boxShape(b.boxes[k], 0), boxShape(b.boxes[k], 0).p, [0, 0, 0, 1]).spall) : kept);
   }
   let room = gpu.roomBodies(), sroom = gpu.roomShapes(), k = 0;
   const nShapes = (b) => b.chunk ? 1 : b.boxes.reduce((n, bx, i) => n + (b.cells && b.cells[i] ? b.cells[i].length : 1), 0);
@@ -561,7 +612,13 @@ function addPieces(list, xf, vel, cool) {
     if (b.chunk) { const v = vel ? vel(b.chunk.p, b.of) : { v: [0, 0, 0], w: [0, 0, 0] }; return { shapes: [{ ...b.chunk }], v: v.v, w: v.w }; }
     let m = 0, c = [0, 0, 0];
     const shapes = b.boxes.flatMap((bx, k) => {
-      if (b.cells && b.cells[k]) return b.cells[k].map(cs => { const vol = cs.h[0] * cs.h[1] * cs.h[2] * GpuWorld.hulls.hulls[cs.hull].vol; m += vol; for (let a = 0; a < 3; a++) c[a] += vol * cs.p[a]; return { ...cs }; });
+      // (cells are made in the tower frame: moved into the world like the boxes)
+      if (b.cells && b.cells[k]) return b.cells[k].map(cs => {
+        const w = mv(R, [cs.p[0] - C[0], cs.p[1] - C[1], cs.p[2] - C[2]]);
+        const p = [T[0] + w[0], T[1] + w[1], T[2] + w[2]];
+        const vol = cs.h[0] * cs.h[1] * cs.h[2] * GpuWorld.hulls.hulls[cs.hull].vol; m += vol; for (let a = 0; a < 3; a++) c[a] += vol * p[a];
+        return { ...cs, p, q: qs };
+      });
       const s = boxShape(bx, 0);
       const w = mv(R, [s.p[0] - C[0], s.p[1] - C[1], s.p[2] - C[2]]);
       s.p = [T[0] + w[0], T[1] + w[1], T[2] + w[2]]; s.q = qs;
