@@ -45,7 +45,7 @@ A pair uses the geometric mean of the two frictions and the larger restitution. 
 | Stage | Kernels | Work |
 | --- | --- | --- |
 | Broad phase | `prep_bodies`, `prep_shapes`, `scan`, `scatter`, `pairs` | Shape poses and AABBs, then a multi-level hashed grid: level L has 4^L × the base cell, and each shape goes to the level that fits its AABB. A shape queries its own level (j > i) and each non-empty coarser level, so every pair is found once, from its smaller shape. |
-| Narrow phase | `narrow` | One thread per shape pair: box-box SAT, clipping and 4-point reduction. Warm-start match through a GPU hash table keyed by shape pair, then constraint masses and approach speeds. |
+| Narrow phase | `narrow`, `hull_args`, `narrow_hull` | `narrow` takes the box pairs: box-box SAT, clipping and 4-point reduction. Pairs with a convex chunk are listed and tested by `narrow_hull`, one indirect dispatch sized by that list (stage `chunks` in the timings). Then for both: warm-start match through a GPU hash table keyed by shape pair, constraint masses and approach speeds. |
 | Colouring | `color`, `color_scan`, `color_scatter`, `adj_scan` | Greedy colouring with atomic per-body masks, plus per-body contact lists |
 | Sub-steps | `integrate_warm`, `solve`, `integrate_pos`, `relax` | Warm start per body (no colouring needed). Gauss-Seidel solve per colour, with one indirect dispatch per colour. |
 | After the sub-steps | `restitute`, `finish` | Restitution per colour, positions, sleep timers |
@@ -91,6 +91,8 @@ This replaces the previous rule, where only moving shapes searched and a large m
 All dispatches are direct, so the browser does not validate them one by one; Chromium validates indirect dispatches individually, and about 800 per step stalled whole frames.
 
 - **Colour passes loop.** Each colour pass is sized from the recent per-colour count (×1.5 + 256) and its threads take every stride-th contact, so a colour that grew since the stats were read is still solved in full, only by fewer threads. (Sizing from stats without the loop left contacts unsolved in fast-changing scenes.)
+- **Narrow phase loops too.** `narrow` is sized from the recent candidate-pair count (×2, at least 8,192) and loops the same way. Sized by the capacity (24 pairs per shape) it spent most of its time in threads with nothing to do.
+- **Chunk pairs apart.** The chunk test needs both hulls' corners and directions and 16 clipped points per thread; in the same kernel as the boxes, every box pair paid for that too. GPU test `pile` (2,000 boxes, software GPU) checks the narrow phase against the broad phase: 260 against 49 ms with chunks and capacity sizing, 63 against 53 ms after both changes (57 against 49 before chunks).
 - **Everything else by capacity.** The kernels skip work past their real counts.
 - **Colour cap.** At most 16 sequential colours are solved per sub-step by default (`maxColors`); contacts beyond them go to the parallel pass.
 - **Read-backs in flight.** Up to three stats read-backs and three debris read-backs are in flight at once. A late, older result is dropped, but impact events are never dropped.

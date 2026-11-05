@@ -535,7 +535,11 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       for (let i = 0; i < 2000; i++) { const y = r.pose[i * 10 + 1]; if (!isFinite(y)) nan++; miny = Math.min(miny, y); maxy = Math.max(maxy, y); }
       E.pile_setup(2000, 4); for (let f = 0; f < 120; f++) E.step(1 / 60);
       const c = grab(); let cmin = 9, cmax = -9; for (let i = 0; i < 2000; i++) { cmin = Math.min(cmin, c[i * 10 + 1]); cmax = Math.max(cmax, c[i * 10 + 1]); }
-      check('pile', nan === 0 && Math.abs(miny - cmin) < 0.02 && Math.abs(maxy - cmax) < 0.1, { gpu: { miny, maxy, stats: r.stats, ms: r.ms, stages: r.gpu }, cpu: { miny: cmin, maxy: cmax, manifolds: E.manifolds() } });
+      // narrow-phase cost against the broad phase (a ratio, so it holds on any GPU): box pairs must not pay for the
+      // convex chunk test or for threads sized by the pair capacity. Software GPU, 2000 boxes: before the fix narrow
+      // 260 ms against broad 49 ms (5.3x); after, 63 against 53 (1.2x); before chunks came in, 57 against 49
+      const nr = r.gpu ? r.gpu.narrow / r.gpu.broad : 0;
+      check('pile', nan === 0 && Math.abs(miny - cmin) < 0.02 && Math.abs(maxy - cmax) < 0.1 && nr < 2.5, { narrowOverBroad: +nr.toFixed(2), gpu: { miny, maxy, stats: r.stats, ms: r.ms, stages: r.gpu }, cpu: { miny: cmin, maxy: cmax, manifolds: E.manifolds() } });
       done(r);
     }
     return out;

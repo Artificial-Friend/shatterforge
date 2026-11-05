@@ -50,7 +50,7 @@ struct Params {
   blast: array<vec4f, 6>,   // particle blasts: (centre, reach), (speed, -, -, -)
   o_ptab: u32, ptab_mask: u32, o_big: u32, o_mslot: u32,   // contact reduction (see red_count)
   o_crushed: u32, o_crush: u32, crush_ratio: f32, crush_dv: f32,   // crushing (see crush)
-  o_hull: u32, pad10: u32, pad11: u32, pad12: u32,   // the convex chunk library, in the shape buffer
+  o_hull: u32, o_hl: u32, pad11: u32, pad12: u32,   // the convex chunk library, in the shape buffer
 }
 struct ColorU { c: u32 }
 
@@ -646,22 +646,64 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
   wake(i);
 }
 
-@compute @workgroup_size(64) fn narrow(@builtin(global_invocation_id) g: vec3u) {
-  let k = g.x; if (k >= min(ld(C_NPAIR), P.max_pairs)) { return; }
+// Two kernels: boxes here, and every pair with a convex chunk in narrow_hull. The chunk test keeps both hulls'
+// corners, directions and up to 16 clipped points per thread; in one kernel with the boxes that made every
+// thread pay for them (the box-only pile went from 59 to 260 ms of narrow phase on the software GPU when chunks
+// came in). Pairs with a chunk are listed here and tested there, over exactly that list.
+fn pair_wake_emit(si: u32, sj: u32, bi: u32, bj: u32, vi: vec3f, ri: f32, rj: f32, c: Contact) {
+  if (c.cnt == 0u) { return; }
+  // a moving body wakes a sleeping one it touches (it joins the solver next step) when it moves enough to
+  // matter: a piece just woken (at rest) or creeping does not wake its neighbours, so a pile wakes only as far
+  // as the disturbance really goes
+  let spi = length(vi) + length(S(bi, S_W).xyz) * ri; let spj = length(S(bj, S_V).xyz) + length(S(bj, S_W).xyz) * rj;
+  if (dyn_awake(bi) && spi > P.wake_speed) { wake(bj); }
+  if (dyn_awake(bj) && spj > P.wake_speed) { wake(bi); }
+  emit(si, sj, bi, bj, c);
+}
+// the ground margin covers how far a corner can come down in a step: the fall and the spin (a chunk spinning
+// at 10 rad/s swung its corners 8-15 cm into the ground before the contact was there)
+fn ground_margin(si: u32, bi: u32) -> f32 {
+  return P.spec + (max(-S(bi, S_V).y, 0.0) + length(S(bi, S_W).xyz) * (length(Hs(si, H_LP).xyz) + length(Hs(si, H_H).xyz))) * P.dt;
+}
+fn pair_margin(si: u32, sj: u32, bi: u32, bj: u32) -> vec3f {   // (margin, ri, rj)
+  let ri = length(Hs(si, H_LP).xyz) + length(Hs(si, H_H).xyz); let rj = length(Hs(sj, H_LP).xyz) + length(Hs(sj, H_H).xyz);
+  let rel = length(S(bj, S_V).xyz - S(bi, S_V).xyz) + length(S(bi, S_W).xyz) * ri + length(S(bj, S_W).xyz) * rj;
+  return vec3f(P.spec + rel * P.dt, ri, rj);
+}
+// (a grid-stride loop: with direct dispatches it is sized by the recent pair count, not by the capacity; 24
+// pairs per shape made the capacity 3x larger and the box pile's narrow phase 57 -> 131 ms on the software
+// GPU, all threads with nothing to do)
+@compute @workgroup_size(64) fn narrow(@builtin(global_invocation_id) g: vec3u, @builtin(num_workgroups) nw: vec3u) {
+  let n = min(ld(C_NPAIR), P.max_pairs);
+  for (var k = g.x; k < n; k += nw.x * 64u) { narrow_box(k); }
+}
+fn narrow_box(k: u32) {
+  let si = ld(P.o_pairs + 2u * k); let sj = ld(P.o_pairs + 2u * k + 1u);
+  let hull = Hs(si, H_ID).w != 0.0 || (sj != 0u && Hs(sj, H_ID).w != 0.0);
+  if (hull) { let h = atomicAdd(&ints[P.o_hl], 1u); st(P.o_hl + 1u + h, k); return; }
+  let bi = sbody(si);
+  if (sj == 0u) {
+    let gc = ground_contact(Hs(si, H_WP).xyz, Hs(si, H_WQ), Hs(si, H_H).xyz, ground_margin(si, bi));
+    if (gc.cnt > 0u) { emit(si, 0u, bi, 0u, gc); }
+    return;
+  }
+  atomicAdd(&ints[C_PAIRS], 1u);
+  let bj = sbody(sj);
+  let m = pair_margin(si, sj, bi, bj);
+  let c = box_box(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), Hs(si, H_H).xyz, Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), Hs(sj, H_H).xyz, m.x);
+  pair_wake_emit(si, sj, bi, bj, S(bi, S_V).xyz, m.y, m.z, c);
+}
+@compute @workgroup_size(64) fn narrow_hull(@builtin(global_invocation_id) g: vec3u) {
+  if (g.x >= min(ld(P.o_hl), P.max_pairs)) { return; }
+  let k = ld(P.o_hl + 1u + g.x);
   let si = ld(P.o_pairs + 2u * k); let sj = ld(P.o_pairs + 2u * k + 1u);
   let bi = sbody(si);
-  let vi = S(bi, S_V).xyz;
   let ti = u32(Hs(si, H_ID).w);
   if (sj == 0u) {
-    // (the margin covers how far a corner can come down in a step: the fall and the spin; a chunk spinning at
-    // 10 rad/s swung its corners 8-15 cm into the ground before the contact was there)
-    let gm = P.spec + (max(-vi.y, 0.0) + length(S(bi, S_W).xyz) * (length(Hs(si, H_LP).xyz) + length(Hs(si, H_H).xyz))) * P.dt;
-    var gc: Contact;
-    if (ti == 0u) { gc = ground_contact(Hs(si, H_WP).xyz, Hs(si, H_WQ), Hs(si, H_H).xyz, gm); }
-    else { gc = hull_ground(HShape(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), Hs(si, H_H).xyz, ti), gm); }
+    var gc = hull_ground(HShape(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), Hs(si, H_H).xyz, ti), ground_margin(si, bi));
     // a chunk's corners on the ground: up to 8, as two contacts of 4 (one patch of 4 left the others free to
     // swing into the ground); the second is keyed as against ground "shape" 0x7fffffff
-    if (ti != 0u && gc.cnt > 4u) {
+    if (gc.cnt > 4u) {
       var c2: Contact; c2.n = gc.n; c2.cnt = gc.cnt - 4u;
       for (var q = 0u; q < c2.cnt; q++) { c2.pts[q] = gc.pts[4u + q]; }
       gc.cnt = 4u;
@@ -672,22 +714,10 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
   }
   atomicAdd(&ints[C_PAIRS], 1u);
   let bj = sbody(sj);
-  let hi_ = Hs(si, H_H).xyz; let hj_ = Hs(sj, H_H).xyz;
-  let ri = length(Hs(si, H_LP).xyz) + length(hi_); let rj = length(Hs(sj, H_LP).xyz) + length(hj_);
-  let rel = length(S(bj, S_V).xyz - vi) + length(S(bi, S_W).xyz) * ri + length(S(bj, S_W).xyz) * rj;
+  let m = pair_margin(si, sj, bi, bj);
   let tj = u32(Hs(sj, H_ID).w);
-  var c: Contact;
-  if (ti == 0u && tj == 0u) { c = box_box(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), hi_, Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), hj_, P.spec + rel * P.dt); }
-  else { c = hull_hull(HShape(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), hi_, ti), HShape(Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), hj_, tj), P.spec + rel * P.dt); }
-  if (c.cnt > 0u) {
-    // a moving body wakes a sleeping one it touches (it joins the solver next step) when it moves enough to
-    // matter: a piece just woken (at rest) or creeping does not wake its neighbours, so a pile wakes only as far
-    // as the disturbance really goes
-    let spi = length(vi) + length(S(bi, S_W).xyz) * ri; let spj = length(S(bj, S_V).xyz) + length(S(bj, S_W).xyz) * rj;
-    if (dyn_awake(bi) && spi > P.wake_speed) { wake(bj); }
-    if (dyn_awake(bj) && spj > P.wake_speed) { wake(bi); }
-    emit(si, sj, bi, bj, c);
-  }
+  let c = hull_hull(HShape(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), Hs(si, H_H).xyz, ti), HShape(Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), Hs(sj, H_H).xyz, tj), m.x);
+  pair_wake_emit(si, sj, bi, bj, S(bi, S_V).xyz, m.y, m.z, c);
 }
 
 // ---------------------------------------------------------------- contact reduction
@@ -1398,6 +1428,10 @@ const WGSL_ARGS = WGSL.replace(/\/\/ -{10,} broad phase[\s\S]*$/, '') + /* wgsl 
   let n = min(ld(C_NPAIR), P.max_pairs);
   args[99] = (n + 63u) / 64u; args[100] = 1u; args[101] = 1u;
 }
+@compute @workgroup_size(1) fn hull_args() {
+  let n = min(ld(P.o_hl), P.max_pairs);
+  args[102] = (n + 63u) / 64u; args[103] = 1u; args[104] = 1u;
+}
 @compute @workgroup_size(1) fn color_scan() {
   var run = 0u;
   for (var c = 0u; c <= P.color_limit; c++) {
@@ -1662,7 +1696,7 @@ class GpuWorld {
     // contact's pair slot
     let TP = 1024; while (TP < 2 * this.maxMan) TP *= 2; this.TP = TP;
     take('ptab', 3 * TP); take('big', 64 * 4096); take('mslot', this.maxMan);
-    take('crushed', cb1); take('crush', 12 * 256);
+    take('hl', 1 + this.maxPairs); take('crushed', cb1); take('crush', 12 * 256);
     this.maxEvents = 512; take('events', 12 * this.maxEvents);
     this.maxInherit = 4096; take('inherit', 12 * this.maxInherit);
     this.L = L; this.nInts = o;
@@ -1732,14 +1766,14 @@ class GpuWorld {
     const mod = await compile(WGSL, 'WGSL'), modA = await compile(WGSL_ARGS, 'WGSL args');
     const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
-    const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
+    const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
                    'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_score', 'red_pick', 'red_apply', 'crush'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
-      ...['man_args', 'pair_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
+      ...['man_args', 'pair_args', 'hull_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
       ...(modP ? ['p_gather', 'p_place', 'p_prep', 'p_scan', 'p_scatter', 'p_integrate', 'p_contact', 'p_apply', 'p_finish'] : []).map(async k => { this.pl[k] = await mk(k, partL, modP); })]);
     this.ts = d.features.has('timestamp-query');
-    this.stages = ['broad', 'narrow', 'colour', 'sub-steps', 'particles', 'sleep'];
+    this.stages = ['broad', 'narrow', 'chunks', 'colour', 'sub-steps', 'particles', 'sleep'];
     if (this.ts) {
       this.qs = d.createQuerySet({ type: 'timestamp', count: 32 });
       this.qBuf = buf(256, U.QUERY_RESOLVE | U.COPY_SRC);
@@ -1774,7 +1808,7 @@ class GpuWorld {
     // the pair table sized by the contacts there were (as the grid), up to its capacity
     let tp = 1024; while (tp < 2 * ((this.stats.manifolds || 0) * 1.5 + 2048) && tp < this.TP) tp *= 2; this.TPeff = tp;
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
-    u[136] = this.oHull;
+    u[136] = this.oHull; u[137] = L.hl;
     u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 3;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
@@ -1809,7 +1843,7 @@ class GpuWorld {
     // counters; impact events keep accumulating until a step copies them out (a pending read-back skips the copy)
     if (this.statCopied === false) { clr(0, 7); clr(8, 7); } else clr(0, 16);   // (events and crushes gather until copied)
     clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
-    clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
+    clr(L.hl, 1); clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (this.reduce !== false) { clr(L.ptab, 3 * this.TPeff); clr(L.big, 64 * 4096); }
     if (this.capP && this.np) { enc.clearBuffer(this.pintBuf, 0, this.PGeff * 4); enc.clearBuffer(this.pintBuf, 2 * this.PGeff * 4, this.PGeff * 4); }
     if (!this.n) { this.frame++; return; }
@@ -1835,7 +1869,9 @@ class GpuWorld {
     // colour passes loop over their contacts (grid stride), so they can be sized by the recent count with margin:
     // a colour that grew is still solved in full, only by fewer threads
     const colWg = this.colCounts.map(c => Math.min(perColour, wgCap(c * 1.5 + 256)));
-    const dirWg = { 396: wgCap(this.maxPairs), 384: perMan };   // narrow (args 99), per-manifold (args 96)
+    // narrow loops over its pairs: by the recent count with margin (stats arrive a few steps late)
+    const pairWg = Math.min(wgCap(this.maxPairs), wgCap(Math.max(8192, 2 * (this.stats.candidates || 0))));
+    const dirWg = { 396: pairWg, 384: perMan };   // narrow (args 99), per-manifold (args 96)
     const ind = this.indirect
       ? (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); }
       : (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(k === 'restitute_ovf' ? 1 : dirWg[off] ?? perMan); };
@@ -1849,6 +1885,9 @@ class GpuWorld {
     p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'pairs', nsh); p.end();
     p = pass(null, true); run(p, 'pair_args', 1); p.end();
     p = pass('narrow'); ind(p, 'narrow', 99 * 4); p.end();
+    // the chunk pairs listed by narrow, always sized by their real count (one indirect dispatch)
+    p = pass(null, true); run(p, 'hull_args', 1); p.end();
+    p = pass('chunks'); p.setPipeline(this.pl.narrow_hull); p.dispatchWorkgroupsIndirect(this.argBuf, 102 * 4); p.end();
     p = pass(null, true); run(p, 'man_args', 1); p.end();
     p = pass('colour');
     if (this.reduce !== false) for (const k of ['red_count', 'red_score', 'red_pick', 'red_apply']) ind(p, k, 96 * 4);
