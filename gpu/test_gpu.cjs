@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'hulls', 'hullpairs'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -16,8 +16,8 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
   fs.writeFileSync('/tmp/sf_blank.html', '<html><body></body></html>');
   await p.goto('file:///tmp/sf_blank.html');
   await p.addScriptTag({ path: path.join(__dirname, 'gpu_world.js') });
-  const res = await p.evaluate(async ({ wasm, scenes, SUB, SAND_PUSH, SAND_MAT, SAND_SUB, SAND_COL, SAND_FALL, COMP_N, COMP_FLOOR, RELAX }) => {
-    if (SAND_PUSH) globalThis.SAND_PUSH = SAND_PUSH; if (SAND_MAT) globalThis.SAND_MAT = SAND_MAT; if (SAND_SUB) globalThis.SAND_SUB = SAND_SUB; if (SAND_COL) globalThis.SAND_COL = SAND_COL; if (SAND_FALL) globalThis.SAND_FALL = 1; if (COMP_N) globalThis.COMP_N = COMP_N; if (COMP_FLOOR) globalThis.COMP_FLOOR = 1; if (RELAX) globalThis.RELAX = RELAX;
+  const res = await p.evaluate(async ({ wasm, scenes, SUB, SAND_PUSH, SAND_MAT, SAND_SUB, SAND_COL, SAND_FALL, COMP_N, COMP_FLOOR, RELAX, HNOSLEEP, HBOX, HNOCRUSH, HNORED, HONLY, HPDYN, HRANDOM, HBIG }) => {
+    if (SAND_PUSH) globalThis.SAND_PUSH = SAND_PUSH; if (SAND_MAT) globalThis.SAND_MAT = SAND_MAT; if (SAND_SUB) globalThis.SAND_SUB = SAND_SUB; if (SAND_COL) globalThis.SAND_COL = SAND_COL; if (SAND_FALL) globalThis.SAND_FALL = 1; if (COMP_N) globalThis.COMP_N = COMP_N; if (COMP_FLOOR) globalThis.COMP_FLOOR = 1; if (RELAX) globalThis.RELAX = RELAX; if (HNOSLEEP) globalThis.HNOSLEEP = 1; if (HBOX) globalThis.HBOX = 1; if (HNOCRUSH) globalThis.HNOCRUSH = 1; if (HNORED) globalThis.HNORED = 1; if (HONLY) globalThis.HONLY = HONLY; if (HPDYN) globalThis.HPDYN = 1; if (HRANDOM) globalThis.HRANDOM = 1; if (HBIG) globalThis.HBIG = 1;
     // SF_SUB=n forces n sub-steps everywhere (to see what fewer cost in accuracy)
     if (SUB) { const c0 = GpuWorld.create; GpuWorld.create = (d, l, o = {}) => c0.call(GpuWorld, d, l, { ...o, substeps: SUB }); }
     const bytes = Uint8Array.from(atob(wasm), c => c.charCodeAt(0));
@@ -284,6 +284,133 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       check('sandwich', vmax < 0.6 && pmax < 2, { hitAt: hit, blockMaxUp_ms: +vmax.toFixed(2), piecesMaxUp_ms: +pmax.toFixed(2), blockY: yBlock, stats: statsAt });
     }
+    if (scenes.includes('hullthrow')) {
+      // chunks thrown at the ground at 4-14 m/s with spin up to 15 rad/s: none passes into it (corner > 5 cm deep,
+      // checked every 2nd frame)
+      let rnd = 21; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const H = GpuWorld.hulls, nh = H.hulls.length, list = [], ids = [];
+      for (let k = 0; k < 200; k++) { const id0 = 1 + Math.floor(rand() * (nh - 1)), id = globalThis.HBOX ? 0 : id0; ids.push(id);
+        list.push({ shapes: [{ p: [(k % 20) * 2 - 20, 1.5 + rand(), Math.floor(k / 20) * 2 - 10], q: qa([rand() - 0.5, rand() - 0.5, rand() - 0.5], rand() * 6), h: H.hulls[id0].box.h.map(v => v * 0.25 + 0.04), hull: id, mat: MAT.concrete }],
+          v: [(rand() - 0.5) * 6, -4 - rand() * 10, (rand() - 0.5) * 6], w: [0, 1, 2].map(() => (rand() - 0.5) * 30) }); }
+      const only = globalThis.HONLY != null ? +globalThis.HONLY : -1;
+      const w = await GpuWorld.create(dev, only >= 0 ? [list[only]] : list, { substeps: 12, sleep: false }); if (only >= 0) { ids.splice(0, ids.length, ids[only]); }
+      const corner = (pose, k, id) => { const o = k * 10, q = [pose[o + 3], pose[o + 4], pose[o + 5], pose[o + 6]], h = [pose[o + 7], pose[o + 8], pose[o + 9]];
+        let m = 1e9; for (const v of H.hulls[id].V) { const x = [v[0] * h[0], v[1] * h[1], v[2] * h[2]];
+          const y = 2 * (q[0] * q[1] + q[3] * q[2]) * x[0] + (1 - 2 * (q[0] * q[0] + q[2] * q[2])) * x[1] + 2 * (q[1] * q[2] - q[3] * q[0]) * x[2]; m = Math.min(m, pose[o + 1] + y); } return m; };
+      let worst = 0, first = null; const tr = [];
+      for (let f = 1; f <= 90; f++) { w.step(1 / 60);
+        if (f % 2 === 0 || only >= 0) { await dev.queue.onSubmittedWorkDone(); await settle(); const r = await w.readPose();
+          if (only >= 0 && f <= 16) tr.push([f, +corner(r.pose, 0, ids[0]).toFixed(3), +r.vel[1].toFixed(2), w.stats.manifolds]);
+          for (let k = 0; k < ids.length; k++) { const c = corner(r.pose, k, ids[k]); if (c < worst) { worst = c; if (c < -0.05 && !first) first = { f, k, id: ids[k], corner: +c.toFixed(3), v: Array.from(r.vel.subarray(k * 3, k * 3 + 3)).map(x => +x.toFixed(2)), wv: Array.from(r.ang.subarray(k * 3, k * 3 + 3)).map(x => +x.toFixed(2)) }; } } } }
+      w.destroy();
+      check('hullthrow', worst > -0.05, { deepest_m: +worst.toFixed(3), first, trace: tr.length ? tr : undefined });
+    }
+    if (scenes.includes('hullpairs')) {
+      // chunk on chunk: 200 random pairs, a fixed chunk and one dropped on it from 5 cm above; after 2 s no corner
+      // of the dropped one is more than 3 cm inside the fixed one (it rests on it or slid off)
+      let rnd = 9; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const H = GpuWorld.hulls, nh = H.hulls.length;
+      const q2m_ = (q) => { const [x, y, z, w] = q; return [[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)], [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)], [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]; };
+      const verts = (id, p, q, h) => { const R = q2m_(q); return H.hulls[id].V.map(v => { const l = [v[0] * h[0], v[1] * h[1], v[2] * h[2]]; return [0, 1, 2].map(i => p[i] + R[i][0] * l[0] + R[i][1] * l[1] + R[i][2] * l[2]); }); };
+      const planes = (id, p, q, h) => { const R = q2m_(q); return H.hulls[id].faces.map(f => { const nl = [f.n[0] / h[0], f.n[1] / h[1], f.n[2] / h[2]]; let n = [0, 1, 2].map(i => R[i][0] * nl[0] + R[i][1] * nl[1] + R[i][2] * nl[2]); const L = Math.hypot(...n); n = n.map(x => x / L); return { n, d: f.d / L + n[0] * p[0] + n[1] * p[1] + n[2] * p[2] }; }); };
+      const list = [], meta = [];
+      for (let k = 0; k < 200; k++) {
+        const x = (k % 20) * 3 - 30, z = Math.floor(k / 20) * 3 - 15;
+        const ia = Math.floor(rand() * nh), ib = Math.floor(rand() * nh);
+        const qa_ = qa([rand() - 0.5, rand() - 0.5, rand() - 0.5], rand() * 6), qb_ = qa([rand() - 0.5, rand() - 0.5, rand() - 0.5], rand() * 6);
+        const ha = H.hulls[ia].box.h.map(v => v * 0.4 + 0.1), hb = H.hulls[ib].box.h.map(v => v * 0.25 + 0.05);
+        const pa = [x, globalThis.HPDYN ? 0.02 - Math.min(...verts(ia, [0, 0, 0], qa_, ha).map(v => v[1])) : 1.5, z];
+        // B just above A's top
+        const topA = Math.max(...verts(ia, pa, qa_, ha).map(v => v[1])), vb0 = verts(ib, [0, 0, 0], qb_, hb), lowB = Math.min(...vb0.map(v => v[1]));
+        const pb = [x + (rand() - 0.5) * 0.2, topA - lowB + 0.05, z + (rand() - 0.5) * 0.2];
+        list.push(globalThis.HPDYN ? { shapes: [{ p: pa, q: qa_, h: ha, hull: ia, mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] } : { shapes: [{ p: pa, q: qa_, h: ha, hull: ia, mat: MAT.concrete }], fixed: true });
+        list.push({ shapes: [{ p: pb, q: qb_, h: hb, hull: ib, mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
+        meta.push({ ia, ib, pa, qa: qa_, ha, hb });
+      }
+      const w = await GpuWorld.create(dev, list, { substeps: 12, sleep: false });
+      for (let f = 0; f < 120; f++) w.step(1 / 60);
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      const r = await w.readPose();
+      let worst = 0, bad = [], vmax = 0;
+      for (let k = 0; k < 200; k++) {
+        const m = meta[k], o = (2 * k + 1) * 10, pb = [r.pose[o], r.pose[o + 1], r.pose[o + 2]], qb = [r.pose[o + 3], r.pose[o + 4], r.pose[o + 5], r.pose[o + 6]];
+        const oa = 2 * k * 10, paN = [r.pose[oa], r.pose[oa + 1], r.pose[oa + 2]], qaN = [r.pose[oa + 3], r.pose[oa + 4], r.pose[oa + 5], r.pose[oa + 6]];
+        const PA = planes(m.ia, paN, qaN, m.ha);
+        const lowA = Math.min(...verts(m.ia, paN, qaN, m.ha).map(v => v[1])); if (lowA < -0.03 && bad.length < 8) bad.push({ k, aUnderGround: +lowA.toFixed(3), ia: m.ia, ib: m.ib });
+        let depth = 0;
+        for (const v of verts(m.ib, pb, qb, m.hb)) { const d = Math.min(...PA.map(pl => pl.d - (pl.n[0] * v[0] + pl.n[1] * v[1] + pl.n[2] * v[2]))); depth = Math.max(depth, d); }
+        worst = Math.max(worst, depth); if (depth > 0.03 && bad.length < 8) bad.push({ k, ia: m.ia, ib: m.ib, depth: +depth.toFixed(3), yB: +pb[1].toFixed(2) });
+        vmax = Math.max(vmax, speed(r.vel, 2 * k + 1));
+      }
+      w.destroy();
+      check('hullpairs', worst < 0.03 && vmax < 3 && !bad.length, { deepest_m: +worst.toFixed(3), fastest_ms: +vmax.toFixed(2), bad });
+    }
+    if (scenes.includes('hulls')) {
+      // convex chunks: (a) every cell of the library, scaled to a 0.5 m brick, dropped tumbling on the ground:
+      // all come to rest on a face, none under the ground (centre of mass at the box centre: a wedge toppled about
+      // a point outside it; the true centroid: rest speed 0.03 -> 0.0004 m/s); (b) the 6 chunks of a brick placed
+      // together on the ground stay as they are (face contacts between chunks hold); (c) a heap of 300 chunks
+      // dropped from a grid (HRANDOM=1: at random, deeply overlapping) settles and sleeps, nothing under the ground
+      // at any time, no NaN, no step losing pairs. (With 8 pairs per shape the list overflowed in such a heap and
+      // lost ground pairs: chunks fell through, -7.8 m; 24 per shape: -0.9 mm.)
+      let rnd = 3; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const H = GpuWorld.hulls, ids = H.hulls.map((_, i) => i).slice(1);
+      const minY = (r, w, b) => { let m = 1e9; for (const sl of w.bodyShapes.get(b) || []) { const sh = w.shapes[sl - 1]; m = Math.min(m, sh ? 0 : 0); } return m; };
+      // (a)
+      const la = ids.map((id, k) => ({ shapes: [{ p: [(k % 8) * 1.5 - 5, 1 + rand(), Math.floor(k / 8) * 1.5 - 5], q: qa([rand() - 0.5, rand() - 0.5, rand() - 0.5], rand() * 6), h: H.hulls[id].box.h.map(x => x * 0.25 + 0.05), hull: id, mat: MAT.concrete }], v: [0, 0, 0], w: [rand() * 4 - 2, rand() * 4 - 2, rand() * 4 - 2] }));
+      let w = await GpuWorld.create(dev, la, { substeps: 12, sleep: false });
+      for (let f = 0; f < 240; f++) w.step(1 / 60);
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      let r = await w.readPose();
+      let vmax = 0, ylow = 1e9, nanA = 0;
+      for (let b = 1; b <= ids.length; b++) { const v = speed(r.vel, b - 1); if (!Number.isFinite(v)) nanA++; else vmax = Math.max(vmax, v); }
+      // the lowest corner of each chunk (a shape's centre is its cell's box centre, which may lie outside a wedge)
+      const corner = (pose, k, id) => { const o = k * 10, q = [pose[o + 3], pose[o + 4], pose[o + 5], pose[o + 6]], h = [pose[o + 7], pose[o + 8], pose[o + 9]];
+        let m = 1e9; for (const v of H.hulls[id].V) { const x = [v[0] * h[0], v[1] * h[1], v[2] * h[2]];
+          const y = 2 * (q[0] * q[1] + q[3] * q[2]) * x[0] + (1 - 2 * (q[0] * q[0] + q[2] * q[2])) * x[1] + 2 * (q[1] * q[2] - q[3] * q[0]) * x[2]; m = Math.min(m, pose[o + 1] + y); } return m; };
+      for (let k = 0; k < r.pose.length / 10; k++) ylow = Math.min(ylow, corner(r.pose, k, ids[k]));
+      w.destroy();
+      // (b) the 6 cells of a pattern, one body each, exactly tiling a 1 x 0.5 x 1 m brick on the ground
+      const pat = H.patterns.findIndex(p => p.length === 6);
+      const lb = GpuWorld.hullShapes([0, 0.25, 0], [0, 0, 0, 1], [0.5, 0.25, 0.5], pat, MAT.concrete).map(sh => ({ shapes: [sh], v: [0, 0, 0], w: [0, 0, 0] }));
+      w = await GpuWorld.create(dev, lb, { substeps: 12, sleep: false });
+      const r0 = await w.readPose();
+      for (let f = 0; f < 180; f++) w.step(1 / 60);
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      const r1 = await w.readPose();
+      let drift = 0; for (let b = 0; b < lb.length; b++) for (let a = 0; a < 3; a++) drift = Math.max(drift, Math.abs(r1.body[b * 7 + a] - r0.body[b * 7 + a]));
+      w.destroy();
+      // (c) a heap
+      const lc = [];
+      for (let k = 0; k < 300; k++) { const pat2 = Math.floor(rand() * H.patterns.length), cells = H.patterns[pat2], id = cells[Math.floor(rand() * cells.length)];
+        // (on a jittered grid, as debris made from bricks: never overlapping at the start)
+        const gx = k % 5, gz = Math.floor(k / 5) % 5, gy = Math.floor(k / 25);
+        lc.push({ shapes: [{ p: globalThis.HRANDOM ? [(rand() - 0.5) * 3, 0.5 + rand() * 6, (rand() - 0.5) * 3] : [(gx - 2) * 0.75 + (rand() - 0.5) * 0.1, 0.5 + gy * 0.75, (gz - 2) * 0.75 + (rand() - 0.5) * 0.1], q: qa([rand() - 0.5, rand() - 0.5, rand() - 0.5], rand() * 6), h: H.hulls[id].box.h.map(x => x * 0.25 + 0.04), hull: globalThis.HBOX ? 0 : id, mat: k % 2 }], v: [0, -2, 0], w: [0, 0, 0] }); }
+      if (globalThis.HONLY) { const K = +globalThis.HONLY; const one = [lc[K]]; const w1 = await GpuWorld.create(dev, one, { substeps: 12, sleep: false });
+        const tr = []; for (let f = 1; f <= 60; f++) { w1.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle(); const rr = await w1.readPose(); tr.push([f, +rr.pose[1].toFixed(3), +rr.vel[1].toFixed(2), +corner(rr.pose, 0, lc[K].shapes[0].hull).toFixed(3)]); }
+        w1.destroy(); return { hulls: { ok: false, single: K, spec: lc[K], trace: tr } }; }
+      w = await GpuWorld.create(dev, lc, { substeps: 12, sleep: !globalThis.HNOSLEEP, ...(globalThis.HBIG ? { maxContacts: 20000, maxPairs: 40000 } : {}) });
+      if (globalThis.HNOCRUSH) w.crushing = false; if (globalThis.HNORED) w.reduce = false;
+      const awake = [];
+      let firstUnder = null;
+      for (let f = 1; f <= 480; f++) {
+        w.step(1 / 60);
+        if (f % 60 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); awake.push(w.stats.awake); }
+        if (f % 4 === 0) globalThis.__drop = Math.max(globalThis.__drop || 0, w.stats.dropped || 0);
+        if (!firstUnder && f % 4 === 0) {
+          await dev.queue.onSubmittedWorkDone(); await settle();
+          const rr = await w.readPose();
+          for (let k = 0; k < rr.pose.length / 10; k++) { const c = corner(rr.pose, k, lc[k].shapes[0].hull || 0);
+          if (c < -0.1) { firstUnder = { f, k, hull: lc[k].shapes[0].hull, corner: +c.toFixed(3), centre: Array.from(rr.pose.subarray(k * 10, k * 10 + 3)).map(x => +x.toFixed(2)), h: lc[k].shapes[0].h.map(x => +x.toFixed(2)), v: Array.from(rr.vel.subarray(k * 3, k * 3 + 3)).map(x => +x.toFixed(2)) }; break; } }
+        }
+      }
+      const rc = await w.readPose();
+      let nanC = 0, lowC = 1e9, topC = 0;
+      for (let k = 0; k < rc.pose.length / 10; k++) { const y = rc.pose[k * 10 + 1]; if (!Number.isFinite(y)) nanC++; else { lowC = Math.min(lowC, corner(rc.pose, k, lc[k].shapes[0].hull || 0)); topC = Math.max(topC, y); } }
+      const st = w.stats, lostSteps = w.lost || 0; w.destroy();
+      check('hulls', nanA === 0 && vmax < 0.05 && ylow > -0.02 && drift < 0.01 && nanC === 0 && lowC > -0.02 && !firstUnder && !lostSteps && awake[awake.length - 1] < 15,
+        { a_restSpeedMax: +vmax.toFixed(4), a_lowestCorner_m: +ylow.toFixed(4), b_pattern: pat, b_drift_m: +drift.toFixed(4), c_awakePerSecond: awake, c_lowestCorner_m: +lowC.toFixed(4), c_firstUnder: firstUnder, c_droppedMax: globalThis.__drop || 0, c_top: +topC.toFixed(2), c_stats: st });
+    }
     if (scenes.includes('crush')) {
       // the sandwich again, with crushing: the light pieces under the heavy block are crushed (listed, then
       // colliding with the static world only), the block comes down on the ground, nothing is thrown up; a light
@@ -408,7 +535,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   // the results for docs/STATUS.md (tools/status.py)

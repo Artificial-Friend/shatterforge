@@ -50,6 +50,7 @@ struct Params {
   blast: array<vec4f, 6>,   // particle blasts: (centre, reach), (speed, -, -, -)
   o_ptab: u32, ptab_mask: u32, o_big: u32, o_mslot: u32,   // contact reduction (see red_count)
   o_crushed: u32, o_crush: u32, crush_ratio: f32, crush_dv: f32,   // crushing (see crush)
+  o_hull: u32, pad10: u32, pad11: u32, pad12: u32,   // the convex chunk library, in the shape buffer
 }
 struct ColorU { c: u32 }
 
@@ -337,6 +338,122 @@ fn box_box(pa: vec3f, ra: mat3x3f, ha: vec3f, pb: vec3f, rb: mat3x3f, hb: vec3f,
 }
 
 
+// ---- convex chunks (see hullLibrary): a shape with hull t > 0 is that hull in its box, stretched by h
+const HSTR = 80u;
+fn hhead(t: u32) -> vec4f { return shp[P.o_hull + t * HSTR]; }
+fn hv(t: u32, k: u32) -> vec3f { return shp[P.o_hull + t * HSTR + 1u + k].xyz; }
+fn hplane(t: u32, k: u32) -> vec4f { return shp[P.o_hull + t * HSTR + 17u + k]; }
+fn hfidx(t: u32, f: u32, i: u32) -> u32 { let v = shp[P.o_hull + t * HSTR + 29u + 2u * f + i / 4u]; return u32(v[i % 4u]); }
+fn hfcnt(t: u32, f: u32) -> u32 { let v = shp[P.o_hull + t * HSTR + 77u + f / 4u]; return u32(v[f % 4u]); }
+fn hseg(t: u32, k: u32) -> vec2u { let v = shp[P.o_hull + t * HSTR + 53u + k / 2u]; return select(vec2u(u32(v.x), u32(v.y)), vec2u(u32(v.z), u32(v.w)), (k & 1u) != 0u); }
+fn hdir(t: u32, k: u32) -> vec3f { return shp[P.o_hull + t * HSTR + 65u + k].xyz; }
+struct HShape { p: vec3f, R: mat3x3f, h: vec3f, t: u32 }
+fn hw(s: HShape, k: u32) -> vec3f { return s.p + s.R * (s.h * hv(s.t, k)); }
+// the face's outward normal and plane offset in the world
+fn hface(s: HShape, f: u32) -> vec4f { let pl = hplane(s.t, f); let nw = s.R * (pl.xyz / s.h); let l = length(nw); let n = nw / l; return vec4f(n, pl.w / l + dot(n, s.p)); }
+fn hivl(s: HShape, ax: vec3f) -> vec2f {
+  let al = (transpose(s.R) * ax) * s.h; let nv = u32(hhead(s.t).x);
+  var lo = 1e30; var hi = -1e30;
+  for (var k = 0u; k < nv; k++) { let d = dot(hv(s.t, k), al); lo = min(lo, d); hi = max(hi, d); }
+  let c = dot(s.p, ax); return vec2f(c + lo, c + hi);
+}
+fn hull_ground(s: HShape, margin: f32) -> Contact {
+  var c: Contact; c.cnt = 0u; c.n = vec3f(0.0, -1.0, 0.0);
+  let nv = u32(hhead(s.t).x);
+  // the 8 lowest corners within the margin (a chunk has up to 16: taking the first 8 found can miss the lowest)
+  for (var k = 0u; k < nv; k++) {
+    let x = hw(s, k); if (x.y >= margin) { continue; }
+    let pt = vec4f(x.x, 0.5 * x.y, x.z, x.y);
+    if (c.cnt < 8u) { c.pts[c.cnt] = pt; c.cnt++; continue; }
+    var hi = 0u; for (var q = 1u; q < 8u; q++) { if (c.pts[q].w > c.pts[hi].w) { hi = q; } }
+    if (pt.w < c.pts[hi].w) { c.pts[hi] = pt; }
+  }
+  return c;
+}
+// Separating axes: the faces of both, then the cross products of their edge directions; the contact from the
+// best one: a reference face clipped against the incident face (up to 8 points, reduced to 4 later), or the
+// closest points of two edges. The normal points from A to B; w is the separation (negative: overlap).
+fn hull_hull(A: HShape, B: HShape, margin: f32) -> Contact {
+  var c: Contact; c.cnt = 0u;
+  let ha = hhead(A.t); let hb = hhead(B.t);
+  let nfa = u32(ha.y); let nfb = u32(hb.y);
+  var sa = -1e30; var fa = 0u;
+  for (var f = 0u; f < nfa; f++) { let pl = hface(A, f); let s = hivl(B, pl.xyz).x - pl.w; if (s > margin) { return c; } if (s > sa) { sa = s; fa = f; } }
+  var sb = -1e30; var fb = 0u;
+  for (var f = 0u; f < nfb; f++) { let pl = hface(B, f); let s = hivl(A, pl.xyz).x - pl.w; if (s > margin) { return c; } if (s > sb) { sb = s; fb = f; } }
+  var se = -1e30; var el = vec3f(0.0); var ei = 0u; var ej = 0u;
+  for (var i = 0u; i < u32(ha.w); i++) {
+    let da = normalize(A.R * (A.h * hdir(A.t, i)));
+    for (var j = 0u; j < u32(hb.w); j++) {
+      let db = normalize(B.R * (B.h * hdir(B.t, j)));
+      let l0 = cross(da, db); let l2 = dot(l0, l0); if (l2 < 1e-6) { continue; }
+      // (its sign: the side where B is clear of A the most; the box centres can lie outside a wedge)
+      var l = l0 * inverseSqrt(l2);
+      let ia = hivl(A, l); let ib = hivl(B, l);
+      let s1 = ib.x - ia.y; let s2 = ia.x - ib.y;
+      var s = s1; if (s2 > s1) { s = s2; l = -l; }
+      if (s > margin) { return c; }
+      if (s > se) { se = s; el = l; ei = i; ej = j; }
+    }
+  }
+  let use_b = sb > sa + 0.005;
+  let fbest = select(sa, sb, use_b);
+  if (se > fbest + 0.01) {
+    // edge against edge: the support segments along the axis
+    let da = normalize(A.R * (A.h * hdir(A.t, ei))); let db = normalize(B.R * (B.h * hdir(B.t, ej)));
+    var a0 = A.p; var a1 = A.p; var best = -1e30;
+    for (var k = 0u; k < u32(ha.z); k++) { let sg = hseg(A.t, k); let p0 = hw(A, sg.x); let p1 = hw(A, sg.y);
+      if (abs(dot(normalize(p1 - p0), da)) < 0.999) { continue; } let m = dot(p0 + p1, el); if (m > best) { best = m; a0 = p0; a1 = p1; } }
+    var b0 = B.p; var b1 = B.p; best = 1e30;
+    for (var k = 0u; k < u32(hb.z); k++) { let sg = hseg(B.t, k); let p0 = hw(B, sg.x); let p1 = hw(B, sg.y);
+      if (abs(dot(normalize(p1 - p0), db)) < 0.999) { continue; } let m = dot(p0 + p1, el); if (m < best) { best = m; b0 = p0; b1 = p1; } }
+    let d1 = a1 - a0; let d2 = b1 - b0; let r = a0 - b0;
+    let aa = dot(d1, d1); let ee = dot(d2, d2); let ff = dot(d2, r); let cc = dot(d1, r); let bb = dot(d1, d2);
+    let den = aa * ee - bb * bb;
+    var s1 = 0.0; if (den > 1e-9) { s1 = clamp((bb * ff - cc * ee) / den, 0.0, 1.0); }
+    var t1 = (bb * s1 + ff) / max(ee, 1e-9);
+    if (t1 < 0.0) { t1 = 0.0; s1 = clamp(-cc / max(aa, 1e-9), 0.0, 1.0); } else if (t1 > 1.0) { t1 = 1.0; s1 = clamp((bb - cc) / max(aa, 1e-9), 0.0, 1.0); }
+    let p1 = a0 + d1 * s1; let p2 = b0 + d2 * t1;
+    c.n = el; c.cnt = 1u; c.pts[0] = vec4f(0.5 * (p1 + p2), dot(p2 - p1, el));
+    return c;
+  }
+  // a face: reference R (the shape whose face it is), incident I (the other's face most against it)
+  var Rs = A; var Is = B; var fr = fa; if (use_b) { Rs = B; Is = A; fr = fb; }
+  let rpl = hface(Rs, fr); let n = rpl.xyz;
+  let nfi = select(nfb, nfa, use_b);
+  var fi = 0u; var bd = 1e30;
+  for (var f = 0u; f < nfi; f++) { let d = dot(hface(Is, f).xyz, n); if (d < bd) { bd = d; fi = f; } }
+  var poly: array<vec3f, 16>; var tmp: array<vec3f, 16>;
+  var pn = hfcnt(Is.t, fi);
+  for (var q = 0u; q < pn; q++) { poly[q] = hw(Is, hfidx(Is.t, fi, q)); }
+  let rn = hfcnt(Rs.t, fr);
+  var rc = vec3f(0.0); for (var q = 0u; q < rn; q++) { rc += hw(Rs, hfidx(Rs.t, fr, q)); } rc /= f32(rn);
+  for (var e = 0u; e < rn; e++) {
+    let v0 = hw(Rs, hfidx(Rs.t, fr, e)); let v1 = hw(Rs, hfidx(Rs.t, fr, (e + 1u) % rn));
+    var sn = normalize(cross(v1 - v0, n)); if (dot(sn, rc - v0) > 0.0) { sn = -sn; }
+    var tn = 0u;
+    for (var q = 0u; q < pn; q++) {
+      let p0 = poly[q]; let p1 = poly[(q + 1u) % pn];
+      let d0 = dot(p0 - v0, sn); let d1 = dot(p1 - v0, sn);
+      if (d0 <= 0.0 && tn < 16u) { tmp[tn] = p0; tn++; }
+      if ((d0 <= 0.0) != (d1 <= 0.0) && tn < 16u) { tmp[tn] = p0 + (p1 - p0) * (d0 / (d0 - d1)); tn++; }
+    }
+    pn = tn; for (var q = 0u; q < pn; q++) { poly[q] = tmp[q]; }
+    if (pn == 0u) { return c; }
+  }
+  for (var q = 0u; q < pn; q++) {
+    let p = poly[q]; let sep = dot(p, n) - rpl.w;
+    if (sep > margin) { continue; }
+    let pt = vec4f(p - n * (0.5 * sep), sep);
+    if (c.cnt < 8u) { c.pts[c.cnt] = pt; c.cnt++; continue; }
+    // (more than 8 after clipping: keep the deepest)
+    var hi = 0u; for (var r = 1u; r < 8u; r++) { if (c.pts[r].w > c.pts[hi].w) { hi = r; } }
+    if (pt.w < c.pts[hi].w) { c.pts[hi] = pt; }
+  }
+  c.n = select(n, -n, use_b);
+  return c;
+}
+
 fn reduce4(c: ptr<function, Contact>) {
   let cnt = (*c).cnt; if (cnt <= 4u) { return; }
   let n = (*c).n;
@@ -520,8 +637,22 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
   let si = ld(P.o_pairs + 2u * k); let sj = ld(P.o_pairs + 2u * k + 1u);
   let bi = sbody(si);
   let vi = S(bi, S_V).xyz;
+  let ti = u32(Hs(si, H_ID).w);
   if (sj == 0u) {
-    let gc = ground_contact(Hs(si, H_WP).xyz, Hs(si, H_WQ), Hs(si, H_H).xyz, P.spec + max(-vi.y, 0.0) * P.dt);
+    // (the margin covers how far a corner can come down in a step: the fall and the spin; a chunk spinning at
+    // 10 rad/s swung its corners 8-15 cm into the ground before the contact was there)
+    let gm = P.spec + (max(-vi.y, 0.0) + length(S(bi, S_W).xyz) * (length(Hs(si, H_LP).xyz) + length(Hs(si, H_H).xyz))) * P.dt;
+    var gc: Contact;
+    if (ti == 0u) { gc = ground_contact(Hs(si, H_WP).xyz, Hs(si, H_WQ), Hs(si, H_H).xyz, gm); }
+    else { gc = hull_ground(HShape(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), Hs(si, H_H).xyz, ti), gm); }
+    // a chunk's corners on the ground: up to 8, as two contacts of 4 (one patch of 4 left the others free to
+    // swing into the ground); the second is keyed as against ground "shape" 0x7fffffff
+    if (ti != 0u && gc.cnt > 4u) {
+      var c2: Contact; c2.n = gc.n; c2.cnt = gc.cnt - 4u;
+      for (var q = 0u; q < c2.cnt; q++) { c2.pts[q] = gc.pts[4u + q]; }
+      gc.cnt = 4u;
+      emit(si, 0x7fffffffu, bi, 0u, c2);
+    }
     if (gc.cnt > 0u) { emit(si, 0u, bi, 0u, gc); }
     return;
   }
@@ -530,7 +661,10 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
   let hi_ = Hs(si, H_H).xyz; let hj_ = Hs(sj, H_H).xyz;
   let ri = length(Hs(si, H_LP).xyz) + length(hi_); let rj = length(Hs(sj, H_LP).xyz) + length(hj_);
   let rel = length(S(bj, S_V).xyz - vi) + length(S(bi, S_W).xyz) * ri + length(S(bj, S_W).xyz) * rj;
-  let c = box_box(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), hi_, Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), hj_, P.spec + rel * P.dt);
+  let tj = u32(Hs(sj, H_ID).w);
+  var c: Contact;
+  if (ti == 0u && tj == 0u) { c = box_box(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), hi_, Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), hj_, P.spec + rel * P.dt); }
+  else { c = hull_hull(HShape(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), hi_, ti), HShape(Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), hj_, tj), P.spec + rel * P.dt); }
   if (c.cnt > 0u) {
     // a moving body wakes a sleeping one it touches (it joins the solver next step) when it moves enough to
     // matter: a piece just woken (at rest) or creeping does not wake its neighbours, so a pile wakes only as far
@@ -925,7 +1059,7 @@ const C_NCRUSH = 15u; const MAX_CRUSH = 256u;
   let ia = B(a, F_P).w; let ib = B(b, F_P).w;
   let light = select(b, a, ia > ib); let il = max(ia, ib); let ih = min(ia, ib);
   if (il < P.crush_ratio * ih) { return; }
-  if (out.y * il < max(3.0 * out.z, P.crush_dv)) { return; }
+  if (out.y * il < max(1.5 * out.z, P.crush_dv)) { return; }
   if (atomicExchange(&ints[P.o_crushed + light], 1u) != 0u) { return; }
   let k = atomicAdd(&ints[C_NCRUSH], 1u); if (k >= MAX_CRUSH) { return; }
   let o = P.o_crush + k * 12u; let p = B(light, F_P).xyz; let q = B(light, F_Q); let v = S(light, S_V).xyz;
@@ -1287,22 +1421,132 @@ function eigSym(A) {
 
 // Build GPU body + shape records from bodies given in world space:
 //   { shapes: [{ p: [x,y,z], q: [x,y,z,w], h: [hx,hy,hz], mat }], fixed?: bool, v?: [..], w?: [..] }
+// ---- convex chunks: a library of fracture patterns of the cube [-1,1]^3 (Voronoi cells of 2-6 seeds), each
+// cell a convex hull. A shape is a cell stretched to its brick (the cells of one brick tile it exactly). Each
+// cell is stored in its own bounding box, mapped to [-1,1]^3, so the shape's h is the cell's half size.
+const HULL = { V: 16, F: 12, FV: 8, S: 24, D: 12, STRIDE: 80 };   // limits, and vec4s per hull
+function hullLibrary(nPatterns = 16, seed = 7) {
+  let a = seed >>> 0;
+  const rnd = () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const sub = (p, q) => [p[0] - q[0], p[1] - q[1], p[2] - q[2]], dot = (p, q) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+  const cross = (p, q) => [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
+  const len = (p) => Math.hypot(p[0], p[1], p[2]), nrm = (p) => { const l = len(p); return [p[0] / l, p[1] / l, p[2] / l]; };
+  // a convex polytope from half-spaces n.x <= d: vertices, faces (ordered polygons), segments, edge directions
+  function polytope(planes) {
+    const V = [], eps = 1e-6;
+    for (let i = 0; i < planes.length; i++) for (let j = i + 1; j < planes.length; j++) for (let k = j + 1; k < planes.length; k++) {
+      const [a1, b1, c1] = [planes[i], planes[j], planes[k]];
+      const det = dot(a1.n, cross(b1.n, c1.n)); if (Math.abs(det) < 1e-9) continue;
+      const x = [0, 1, 2].map(q => (a1.d * cross(b1.n, c1.n)[q] + b1.d * cross(c1.n, a1.n)[q] + c1.d * cross(a1.n, b1.n)[q]) / det);
+      if (planes.every(p => dot(p.n, x) <= p.d + 1e-7) && !V.some(v => len(sub(v, x)) < 1e-6)) V.push(x);
+    }
+    const faces = [];
+    for (const p of planes) {
+      const idx = V.map((v, i) => [v, i]).filter(([v]) => Math.abs(dot(p.n, v) - p.d) < 1e-6).map(([, i]) => i);
+      if (idx.length < 3) continue;
+      const c = [0, 1, 2].map(q => idx.reduce((s, i) => s + V[i][q], 0) / idx.length);
+      const u = nrm(sub(V[idx[0]], c)), w = cross(p.n, u);
+      idx.sort((i, j) => Math.atan2(dot(sub(V[i], c), w), dot(sub(V[i], c), u)) - Math.atan2(dot(sub(V[j], c), w), dot(sub(V[j], c), u)));
+      faces.push({ n: p.n, d: p.d, v: idx });
+    }
+    const seg = [];
+    for (const f of faces) for (let k = 0; k < f.v.length; k++) { const i = f.v[k], j = f.v[(k + 1) % f.v.length]; if (!seg.some(([x, y]) => (x === i && y === j) || (x === j && y === i))) seg.push([i, j]); }
+    const dirs = [];
+    for (const [i, j] of seg) { const d = nrm(sub(V[j], V[i])); if (!dirs.some(e => Math.abs(dot(e, d)) > 0.9995)) dirs.push(d); }
+    return { V, faces, seg, dirs };
+  }
+  // volume, centroid and covariance per unit volume about the centroid (in the cell's box coordinates): from
+  // tetrahedra (centroid of the vertices, face triangle); a tetrahedron's integral of x x^T is V/20 (sum of the
+  // corners' x x^T + their sum's outer product)
+  function massProps(V, faces) {
+    const o = [0, 1, 2].map(q => V.reduce((s, v) => s + v[q], 0) / V.length);
+    let vol = 0; const m1 = [0, 0, 0], m2 = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (const f of faces) for (let t = 1; t + 1 < f.v.length; t++) {
+      const P4 = [o, V[f.v[0]], V[f.v[t]], V[f.v[t + 1]]];
+      const tv = Math.abs(dot(sub(P4[1], o), cross(sub(P4[2], o), sub(P4[3], o)))) / 6;
+      vol += tv;
+      const S = [0, 1, 2].map(q => P4.reduce((s, v) => s + v[q], 0));
+      for (let q = 0; q < 3; q++) m1[q] += tv * S[q] / 4;
+      for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) m2[r][c] += tv / 20 * (P4.reduce((s, v) => s + v[r] * v[c], 0) + S[r] * S[c]);
+    }
+    const cen = m1.map(x => x / vol);
+    const cov = m2.map((row, r) => row.map((x, c) => x / vol - cen[r] * cen[c]));
+    return { vol, cen, cov };
+  }
+  const cube = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]].map(n => ({ n, d: 1 }));
+  const hulls = [polytope(cube)], patterns = [];
+  hulls[0].box = { c: [0, 0, 0], h: [1, 1, 1] }; hulls[0].vol = 1; hulls[0].cen = [0, 0, 0]; hulls[0].cov = [[1 / 3, 0, 0], [0, 1 / 3, 0], [0, 0, 1 / 3]];
+  for (let p = 0, tries = 0; p < nPatterns && tries < 40000; tries++) {
+    const k = 2 + (p % 5);   // 2-6 cells
+    const seeds = Array.from({ length: k }, () => [0, 1, 2].map(() => rnd() * 1.6 - 0.8));
+    const cells = [];
+    let ok = true;
+    for (let i = 0; i < k && ok; i++) {
+      const planes = cube.slice();
+      for (let j = 0; j < k; j++) if (j !== i) {
+        const n = nrm(sub(seeds[j], seeds[i])), m = [0, 1, 2].map(q => (seeds[i][q] + seeds[j][q]) / 2);
+        planes.push({ n, d: dot(n, m) });
+      }
+      const P = polytope(planes);
+      const lo = [0, 1, 2].map(q => Math.min(...P.V.map(v => v[q]))), hi = [0, 1, 2].map(q => Math.max(...P.V.map(v => v[q])));
+      const c = lo.map((l, q) => (l + hi[q]) / 2), h = lo.map((l, q) => (hi[q] - l) / 2);
+      if (P.V.length > HULL.V || P.faces.length > HULL.F || P.seg.length > HULL.S || P.dirs.length > HULL.D || P.faces.some(f => f.v.length > HULL.FV) || h.some(x => x < 0.15)) { ok = false; break; }
+      // into the cell's own box, [-1,1]^3 (planes: n.(c + h x) <= d  ->  (n h).x <= d - n.c)
+      const V = P.V.map(v => v.map((x, q) => (x - c[q]) / h[q]));
+      const faces = P.faces.map(f => { const n0 = f.n.map((x, q) => x * h[q]), l = len(n0); return { n: n0.map(x => x / l), d: (f.d - dot(f.n, c)) / l, v: f.v }; });
+      const dirs = P.dirs.map(d => nrm(d.map((x, q) => x / h[q])));
+      const mp = massProps(V, faces);
+      cells.push({ V, faces, seg: P.seg, dirs, box: { c, h }, vol: mp.vol / 8, cen: mp.cen, cov: mp.cov });
+    }
+    if (!ok) continue;
+    patterns.push(cells.map(cl => { hulls.push(cl); return hulls.length - 1; }));
+    p++;
+  }
+  // packed for the GPU: per hull 80 vec4: [nv, nf, nseg, ndir] · 16 vertices · 12 planes (n, d) · 12 faces x 2
+  // (8 vertex indices) · 24 segments (2 per vec4) · 12 directions · face vertex counts
+  const data = new Float32Array(hulls.length * HULL.STRIDE * 4);
+  hulls.forEach((H, i) => {
+    const o = i * HULL.STRIDE * 4;
+    data.set([H.V.length, H.faces.length, H.seg.length, H.dirs.length], o);
+    H.V.forEach((v, k) => data.set([...v, 0], o + 4 * (1 + k)));
+    H.faces.forEach((f, k) => {
+      data.set([...f.n, f.d], o + 4 * (17 + k));
+      const ix = f.v.concat(new Array(8 - f.v.length).fill(0));
+      data.set(ix.slice(0, 4), o + 4 * (29 + 2 * k)); data.set(ix.slice(4, 8), o + 4 * (30 + 2 * k));
+    });
+    data.set([H.V.length, H.faces.length, H.seg.length, H.dirs.length], o);
+    H.seg.forEach(([x, y], k) => { data[o + 4 * (53 + (k >> 1)) + 2 * (k & 1)] = x; data[o + 4 * (53 + (k >> 1)) + 2 * (k & 1) + 1] = y; });
+    H.dirs.forEach((d, k) => data.set([...d, 0], o + 4 * (65 + k)));
+    // the face vertex counts: 12 numbers in vec4s 77..79
+    H.faces.forEach((f, k) => { data[o + 4 * 77 + k] = f.v.length; });
+  });
+  return { hulls, patterns, data, count: hulls.length };
+}
+const HULLS = hullLibrary();
+
 function buildBodies(list) {
   const bodies = [], shapes = [];
   for (const b of list) {
     let M = 0, com = [0, 0, 0];
-    const ms = b.shapes.map(s => (b.fixed ? 0 : MATERIALS[s.mat].density) * 8 * s.h[0] * s.h[1] * s.h[2]);
-    b.shapes.forEach((s, k) => { M += ms[k]; for (let i = 0; i < 3; i++) com[i] += ms[k] * s.p[i]; });
+    const ms = b.shapes.map(s => (b.fixed ? 0 : MATERIALS[s.mat].density) * 8 * s.h[0] * s.h[1] * s.h[2] * (s.hull ? HULLS.hulls[s.hull].vol : 1));
+    // where each shape's mass is: a chunk's centroid (its box centre can lie outside a wedge)
+    const mc = b.shapes.map(s => { if (!s.hull) return s.p; const c = HULLS.hulls[s.hull].cen, R = q2m(s.q), o = c.map((x, k) => x * s.h[k]);
+      return [0, 1, 2].map(i => s.p[i] + R[i][0] * o[0] + R[i][1] * o[1] + R[i][2] * o[2]); });
+    b.shapes.forEach((s, k) => { M += ms[k]; for (let i = 0; i < 3; i++) com[i] += ms[k] * mc[k][i]; });
     if (M > 0) com = com.map(c => c / M); else { com = [0, 0, 0]; b.shapes.forEach(s => { for (let i = 0; i < 3; i++) com[i] += s.p[i] / b.shapes.length; }); }
     let q = [0, 0, 0, 1], il = [0, 0, 0];
     if (M > 0) {
       const I = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
       b.shapes.forEach((s, k) => {
-        const m = ms[k], [x2, y2, z2] = s.h.map(v => 4 * v * v);
-        const D = [m * (y2 + z2) / 12, m * (x2 + z2) / 12, m * (x2 + y2) / 12];
-        const R = q2m(s.q), d = [0, 1, 2].map(i => s.p[i] - com[i]), dd = d[0] ** 2 + d[1] ** 2 + d[2] ** 2;
+        // the shape's inertia about its own mass centre, in its frame: from the covariance (a box: h^2/3), stretched
+        // by h; then turned into the body frame and moved to the body's centre of mass
+        const m = ms[k], cov = (s.hull ? HULLS.hulls[s.hull] : HULLS.hulls[0]).cov;
+        const C = cov.map((row, r) => row.map((x, c) => m * x * s.h[r] * s.h[c]));
+        const tr = C[0][0] + C[1][1] + C[2][2];
+        const Il = C.map((row, r) => row.map((x, c) => (r === c ? tr : 0) - x));
+        const R = q2m(s.q), d = [0, 1, 2].map(i => mc[k][i] - com[i]), dd = d[0] ** 2 + d[1] ** 2 + d[2] ** 2;
         for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
-          let v = 0; for (let k2 = 0; k2 < 3; k2++) v += R[r][k2] * D[k2] * R[c][k2];
+          let v = 0; for (let a2 = 0; a2 < 3; a2++) for (let b2 = 0; b2 < 3; b2++) v += R[r][a2] * Il[a2][b2] * R[c][b2];
           I[r][c] += v + m * ((r === c ? dd : 0) - d[r] * d[c]);
         }
       });
@@ -1313,7 +1557,7 @@ function buildBodies(list) {
     const bi = bodies.length + 1;
     bodies.push({ p: com, q, im: M > 0 ? 1 / M : 0, il, v: b.v || [0, 0, 0], w: b.w || [0, 0, 0], mass: M });
     for (const s of b.shapes) {
-      shapes.push({ body: bi, mat: s.mat, col: s.col ?? s.mat, lp: mtv(Rb, [0, 1, 2].map(i => s.p[i] - com[i])), lq: qmulJ(qconj(q), s.q), h: s.h });
+      shapes.push({ body: bi, mat: s.mat, col: s.col ?? s.mat, hull: s.hull || 0, lp: mtv(Rb, [0, 1, 2].map(i => s.p[i] - com[i])), lq: qmulJ(qconj(q), s.q), h: s.h });
     }
   }
   return { bodies, shapes };
@@ -1321,6 +1565,17 @@ function buildBodies(list) {
 
 class GpuWorld {
   // list: bodies as for buildBodies
+  // the convex chunk library: { hulls (vertices, faces, box, volume share), patterns (lists of hull ids that tile
+  // a brick: give each piece shape { hull, p, h } from hullPiece) }
+  static get hulls() { return HULLS; }
+  // the shapes of a brick (centre p, rotation q, half size h) broken by a pattern: one per cell, tiling it
+  static hullShapes(p, q, h, pattern, mat, col) {
+    const R = q2m(q);
+    return HULLS.patterns[pattern % HULLS.patterns.length].map(id => {
+      const bx = HULLS.hulls[id].box, o = bx.c.map((c, k) => c * h[k]);
+      return { p: [0, 1, 2].map(i => p[i] + R[i][0] * o[0] + R[i][1] * o[1] + R[i][2] * o[2]), q, h: bx.h.map((x, k) => x * h[k]), hull: id, mat, col };
+    });
+  }
   static async create(device, list, opt = {}) {
     const w = new GpuWorld();
     await w.init(device, list, opt);
@@ -1357,7 +1612,8 @@ class GpuWorld {
     this.wakeSpeed = opt.wakeSpeed ?? 0.25;   // m/s at the contact: slower bodies do not wake what they touch
     this.levels = 4;
     this.maxMan = opt.maxContacts || Math.max(64, Math.ceil((opt.manPerShape || 4) * this.capS));
-    this.maxPairs = opt.maxPairs || Math.max(128, Math.ceil((opt.pairsPerShape || 8) * this.capS));
+    // (pairs beyond capacity are lost: a lost ground pair let a chunk fall through the ground; stats.pairsLost)
+    this.maxPairs = opt.maxPairs || Math.max(128, Math.ceil((opt.pairsPerShape || 24) * this.capS));
     let G = 256; while (G < 2 * cs1) G *= 2; this.G = G;
     let T = 256; while (T < 2 * this.maxMan) T *= 2; this.T = T;
     // base cell: a typical brick with motion margin; larger shapes go to coarser levels (x4 each)
@@ -1390,13 +1646,14 @@ class GpuWorld {
     });
     shapes.forEach((s, k) => {
       const i = k + 1;
-      shp.set([s.body, s.mat, 0, 0, ...s.lp, 0, ...s.lq, ...s.h, 0], i * 32);
+      shp.set([s.body, s.mat, 0, s.hull || 0, ...s.lp, 0, ...s.lq, ...s.h, 0], i * 32);
     });
     const U = GPUBufferUsage;
     const buf = (size, usage, data) => { const b = d.createBuffer({ size, usage }); if (data) d.queue.writeBuffer(b, 0, data); return b; };
     this.bodBuf = buf(bod.byteLength, U.STORAGE | U.COPY_DST | U.COPY_SRC, bod);
     this.solBuf = buf(sol.byteLength, U.STORAGE | U.COPY_DST | U.COPY_SRC, sol);
-    this.shpBuf = buf(shp.byteLength, U.STORAGE | U.COPY_DST | U.COPY_SRC, shp);
+    this.shpBuf = buf(shp.byteLength + HULLS.data.byteLength, U.STORAGE | U.COPY_DST | U.COPY_SRC, shp);
+    d.queue.writeBuffer(this.shpBuf, shp.byteLength, HULLS.data); this.oHull = shp.byteLength / 16;
     this.intBuf = buf(this.nInts * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC);
     this.manBuf = buf(2 * this.maxMan * 17 * 16, U.STORAGE | U.COPY_SRC);
     this.coldBuf = buf(2 * this.maxMan * 6 * 16, U.STORAGE);
@@ -1488,7 +1745,8 @@ class GpuWorld {
     // the pair table sized by the contacts there were (as the grid), up to its capacity
     let tp = 1024; while (tp < 2 * ((this.stats.manifolds || 0) * 1.5 + 2048) && tp < this.TP) tp *= 2; this.TPeff = tp;
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
-    u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 4;
+    u[136] = this.oHull;
+    u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 3;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
       let pgE = 256; while (pgE < 2 * this.np && pgE < this.PG) pgE *= 2; this.PGeff = pgE;
@@ -1663,7 +1921,7 @@ class GpuWorld {
       const slot = this.freeShapes.length ? this.freeShapes.pop() : (this.ns++, this.ns1++, this.ns1 - 1);
       this.shapeGen = this.shapeGen || []; this.shapeGen[slot - 1] = (this.shapeGen[slot - 1] || 0) + 1;
       const body = bslot[s.body - 1];
-      q.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, s.mat, 0, 0, ...s.lp, 0, ...s.lq, ...s.h, 0]));
+      q.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, s.mat, 0, s.hull || 0, ...s.lp, 0, ...s.lq, ...s.h, 0]));
       this.shapes[slot - 1] = { ...s, body };
       (this.bodyShapes = this.bodyShapes || new Map());
       if (!this.bodyShapes.has(body)) this.bodyShapes.set(body, []);
@@ -1836,7 +2094,8 @@ class GpuWorld {
         for (let k = 0; k < n; k++) { const o = o0 + k * 12; this.crushes.push({ body: u[o], by: u[o + 1], p: [f[o + 2], f[o + 3], f[o + 4]], q: [f[o + 5], f[o + 6], f[o + 7], f[o + 8]], v: [f[o + 9], f[o + 10], f[o + 11]] }); } }
       if (seq < this.statLatest) return;
       this.statLatest = seq; this.statsInputs = sb.inputs;
-      this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7], pActive: u[12], pLive: u[13] };
+      this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7], pActive: u[12], pLive: u[13], pairsLost: Math.max(0, u[5] - this.maxPairs) };
+      if (u[4] > 0 || u[5] > this.maxPairs) this.lost = (this.lost || 0) + 1;   // steps that lost contacts or pairs
       this.colorLimit = Math.min(this.maxColors, 31, Math.max(4, u[2] + (u[1] > 0 ? 3 : 1)));
       // per-colour contact counts (they size the direct dispatches): keep a slowly decaying maximum
       const cc = new Uint32Array(raw, 64 + 48 * this.maxEvents, 33);

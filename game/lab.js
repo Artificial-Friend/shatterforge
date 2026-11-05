@@ -173,6 +173,7 @@ function labReport(wallS) {
     ['pieces moving further than their speed allows', L.teleports, 0, 'jumps'],
     ['read-back check: vanished / jumped', flick.vanished + flick.jumps, 0, ''],
     ['invalid poses (NaN)', L.bad, 0, ''],
+    ['steps that lost contacts or pairs (capacity)', gpu.lost || 0, 0, 'a lost ground pair lets a piece fall through'],
     ['pieces below the ground', L.below, 0, ''],
     ['rebounds over half the impact speed (while quiet)', L.bounces, 0, 'unnatural bouncing'],
     ['pieces thrown up faster than 5 m/s (while quiet)', L.launches, 0, 'launches'],

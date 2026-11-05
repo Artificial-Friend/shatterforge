@@ -147,13 +147,40 @@ Particles cut from a moving body wait (state 4) and are placed at the next step 
 
 SwiftShader runs WebGPU on the CPU, so its timings mean nothing. Throughput is measured by the bench page on real GPUs.
 
+## Contact reduction
+
+Two bodies touching through many shape pairs keep only representative contacts: per body pair with more than 32, the ones furthest out in 26 directions (the corners, edges and faces of a cube) and the deepest. The others are marked (+8 on the point count) so colouring and the solver skip them, but they keep their points and impulses for the warm start of the next step, where they may be picked again. This is what keeps the upper part of a building (thousands of bricks on a floor) out of the parallel overflow pass.
+
+GPU test `compound` (800 bricks as one body landing at 5.9 m/s on a brick floor): rebound 1.1 → 0.44 m/s (concrete restitution allows 0.59); overflow ~1,300 contacts → 0.
+
+## Crushing on contact
+
+A light piece pressed by a body at least 20 times heavier is crushed on the GPU (kernel `crush`), when the impulse it took in a step is more than 1.5 times what its own approach momentum needs (it is being squeezed against something) and it approached at 1 m/s or more. From then on it collides only with the static world, so the heavy body goes through it. The page (`takeCrushed`) turns it into rubble particles, its bricks split into cubes of at most 0.4 m, placed from its current pose.
+
+GPU test `crush`: a 7,700 t block landing on 24 pieces of 11 t crushes all 24 and comes down to the ground; a piece rammed from the side by a 600 t block is not crushed. In the lab's collapse (150 frames), launches went from 14 to 1 and bounces from 11 to 7.
+
+## Convex chunks
+
+A shape can be a convex hull instead of a box (`hull` on the shape, stored in its record's fourth word). The library (`GpuWorld.hulls`) holds 16 fracture patterns of the cube (Voronoi cells of 2–6 seeds, 63 cells); `GpuWorld.hullShapes(p, q, h, pattern)` gives the cells of a brick, which tile it exactly. Each cell is kept in its own box mapped to [-1, 1]^3, so a shape's `h` is its cell's half size and the cells need no per-shape storage. Mass and inertia come from the cell's real volume, centroid and covariance (a wedge's box centre can lie outside it).
+
+Collisions: box against box keeps its own routine. Anything with a chunk uses separating axes over both shapes' faces and the cross products of their edge directions. The contact comes from a reference face clipped against the incident face, or from the closest points of two edges, whose axis takes the sign where the shapes are most clear of each other. A chunk on the ground gives up to 8 corners, as two contacts of 4; one patch of 4 let the others swing into the ground.
+
+| GPU test | Expected | Result |
+| --- | --- | --- |
+| `hulls` (a): every cell dropped tumbling | rests on a face | rest speed 0.0001 m/s, lowest corner -0.1 mm |
+| `hulls` (b): the 6 chunks of a brick placed together | stay put | 0.3 mm |
+| `hulls` (c): heap of 300 chunks | settles, nothing under the ground at any time, no lost pairs | asleep by 5 s, lowest corner -0.6 mm |
+| `hullpairs`: 200 random chunks dropped on fixed (or resting) chunks | no corner > 3 cm inside | 0 mm |
+| `hullthrow`: 200 chunks thrown at 4–14 m/s, spinning up to 26 rad/s | no corner > 5 cm into the ground | 4 mm (11 cm with one 4-point ground contact) |
+
+Particles still collide with a chunk's box.
+
+## Capacity
+
+Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall through the ground. The default is now 24 per shape (it was 8, and a heap of chunks overflowed it: chunks fell to -7.8 m). `stats.pairsLost` and `lost` (steps that lost contacts or pairs) report it, and the lab checks it.
+
 ## Still to do
 
-- **Large bodies landing (open, found by the lab).** A body with more contacts than colours (the upper part of a building, thousands of bricks) is partly solved in the parallel overflow pass. Two Jacobi relax rounds do not take back the push-out of the biased pass: the GPU test `compound` (800 bricks as one body landing at 5.9 m/s on a brick floor) rebounds at 1.1 m/s where concrete gives 0.59, and in the lab's collapse the building's upper part rebounds at up to 3.8 m/s with the pieces under it. What was tried:
-  - 6 relax rounds fix the isolated test (0.63 m/s) but double the sub-step time, and did not fix the collapse.
-  - Mass splitting over all of a body's contacts (coloured ones included) made no difference.
-  - Restitution, push limits, sub-steps and colours do not change it.
-  The candidates are crushing on contact on the GPU (a heavy body landing on light rubble crushes it in the same step instead of four frames later in the engine), or a dedicated solver for very large bodies (all their contacts in one sequential pass). `compound` is left out of the default run until then.
 - **Mass ratio limit.** Across one contact the heavier body responds as if at most 20 times heavier (GPU test `sandwich`: a 7,700 t block landing on 11 t rubble went from a 2.52 m/s rebound to 0.37 m/s).
 - **Depenetration** is at most 1 m/s (it was 3; pieces made overlapping the slab they were crushing into popped out).
 
