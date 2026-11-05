@@ -10,7 +10,7 @@ const readLag = +opt('--read-lag', 2), jobLag = +opt('--job-lag', 4), outDir = o
 const frames = opt('--frames', null), trace = opt('--trace', null);
 const root = path.join(__dirname, '..');
 const page0 = fs.readFileSync(path.join(root, 'dist/tower.html'), 'utf8');
-const SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'rubble'] };
+const SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'rubble'] };
 const names = args.length ? args.flatMap(a => SUITES[a] || [a]) : SUITES.quick;
 (async () => {
   fs.mkdirSync(outDir, { recursive: true });

@@ -50,7 +50,7 @@ button:disabled { opacity: .5; cursor: default; }
 </div>
 <div class="settings" id="settings" hidden>
   <h2>Settings</h2>
-  <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
+  <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option><option value="3">mixed: brick, steel, concrete, timber · 5 storeys</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
   <label>Quality <select id="s-preset"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">sets the debris budgets, physics sub-steps, solver colours and shadows; the sliders below fine-tune</span></label>
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
@@ -114,18 +114,19 @@ const LAB_SCENARIOS = {
   ball: { kind: 0, storeys: 3, frames: 360, title: 'concrete frame, 3 storeys: two steel balls into the facade', script: [[10, 'ball', [-4, 4, -30, 0.15, 0.02]], [130, 'ball', [3, 2.5, -30, -0.1, 0.0]]], expect: {} },
   masonry: { kind: 1, storeys: 3, frames: 600, title: 'masonry, 3 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
   timber: { kind: 2, storeys: 3, frames: 600, title: 'mass timber, 3 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
+  mixed: { kind: 3, storeys: 5, frames: 600, title: 'mixed (brick, steel, concrete, timber), 5 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
   rubble: { kind: 0, storeys: 3, frames: 720, title: 'concrete frame, 3 storeys: cut, then a blast into the rubble', script: [[0, 'cut'], [480, 'blast', [-14, 6, -14, 1, -0.45, 1, 2.5]]], expect: { settle: true } },
 };
-const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'rubble'] };
+const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'rubble'] };
 let LABSTATE = null; try { LABSTATE = JSON.parse(localStorage.getItem('sf-lab') || 'null'); } catch (e) {}
 if (LABSTATE && !(LABSTATE.queue && LABSTATE.queue.length && LAB_SCENARIOS[LABSTATE.queue[0]])) LABSTATE = null;
 const LAB = { on: false, t: 0, f: 0 };
 // game time: the real clock, or the lab's virtual one
 const clock = () => (LAB.on ? LAB.t : performance.now());
 let KIND = 0; try { KIND = +(JSON.parse(localStorage.getItem('sf-settings') || '{}').kind || 0); } catch (e) {}
-if (![0, 1, 2].includes(KIND)) KIND = 0;
+if (![0, 1, 2, 3].includes(KIND)) KIND = 0;
 if (LABSTATE) KIND = LAB_SCENARIOS[LABSTATE.queue[0]].kind;
-const STOREYS = LABSTATE ? LAB_SCENARIOS[LABSTATE.queue[0]].storeys : [12, 5, 6][KIND];
+const STOREYS = LABSTATE ? LAB_SCENARIOS[LABSTATE.queue[0]].storeys : [12, 5, 6, 5][KIND];
 let E = null, gpu = null, dev = null, slots = new Map(), debrisFrom = 2;
 let radius = 0.7, fly = false, locked = false, yaw = Math.PI, pitch = 0, physicsPaused = true, lastActive = -1e9;
 const keys = new Set();
@@ -219,7 +220,7 @@ const PAINTCOL = [[0.62, 0.61, 0.58], [0.56, 0.56, 0.54], [0.79, 0.77, 0.71], [0
 const colTmp = new THREE.Color();
 function debrisColour(code, k) {
   const m = code & 15, paint = code >> 4;
-  const c = m === GLASS ? [0.36, 0.50, 0.58] : m === 1 ? [0.60, 0.36, 0.28] : m === TIMBER ? [0.86, 0.84, 0.79] : m === 2 ? [0.22, 0.23, 0.25] : (PAINTCOL[paint] || [0.7, 0.7, 0.7]);
+  const c = m === GLASS ? [0.36, 0.50, 0.58] : m === 1 ? [0.60, 0.36, 0.28] : m === TIMBER ? (paint === 8 ? [0.62, 0.46, 0.30] : [0.86, 0.84, 0.79]) : m === 2 ? [0.36, 0.40, 0.44] : (PAINTCOL[paint] || [0.7, 0.7, 0.7]);
   const h = ((Math.imul(k, 2654435761) >>> 24) & 255) / 255, s = 0.96 + 0.06 * h;
   // the tower mesh is sRGB-like vertex colour: keep the same space
   return colTmp.setRGB(c[0] * s, c[1] * s, c[2] * s);
@@ -517,7 +518,7 @@ onmessage = async (m) => {
   const out = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
   let snap = null;
   if (n > 0) { const len = E.snap_save(); snap = new Uint8Array(E.memory.buffer, E.snap_ptr(), len).slice(); }
-  const r = { op: d.op, n, out, snap, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), dust: E.dust_bricks(), ms: performance.now() - t0 };
+  const r = { op: d.op, n, out, snap, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), ms: performance.now() - t0 };
   postMessage(r, snap ? [out.buffer, snap.buffer] : [out.buffer]);
 };`;
 let worker = null, busy = null;
@@ -541,13 +542,13 @@ function runInline(job) {
   else if (job.op === 'structure') { if (job.rest) for (let k = 0; k < job.rest.length; k += 4) E.rest_load(job.rest[k], job.rest[k + 1], job.rest[k + 2], job.rest[k + 3]); n = E.structure_step(job.max); }
   else if (job.op === 'pblast') n = E.piece_blast(job.piece, job.x, job.y, job.z, job.r);
   else { const p = E.impacts_in(job.recs.length / 11); new Float32Array(E.memory.buffer, p, job.recs.length).set(job.recs); n = E.impacts(job.dt); }
-  return { op: job.op, n, out: new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), dust: E.dust_bricks(), ms: performance.now() - t0, inline: true };
+  return { op: job.op, n, out: new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), ms: performance.now() - t0, inline: true };
 }
 // Rubble lying on the building weighs on it: once a second the weight of the debris at rest (bodies slower than
 // 0.5 m/s and particles asleep) goes to the engine with a structure check, binned in 0.5 m cells; the engine
 // puts each on the standing brick under it, and a floor heaped too high gives way.
 const REST_EVERY = 1.0;
-let restNext = 0, restSent = 0;
+let restNext = 0, restSent = 0, restOnFloors = 0, crackedJoints = 0;
 const DENS = [2400, 1900, 7850, 2500, 500];
 function restLoads() {
   const bins = new Map();
@@ -598,6 +599,8 @@ function finish(r) {
 function finishInner(r) {
   const job = busy; busy = null;
   workerMs = r.ms; dustBricks = r.dust; structRatio = r.ratio;
+  if (r.cracked !== undefined) crackedJoints = r.cracked;
+  if (r.op === 'structure' && job && job.rest) restOnFloors = r.restOn || 0;
   // the page's copy of the store
   if (r.snap) { const p = E.snap_in(r.snap.length); new Uint8Array(E.memory.buffer, p, r.snap.length).set(r.snap); E.snap_load(r.lo, r.hi); }
   if (r.op === 'blast') onBlast(job, r);
@@ -1061,7 +1064,7 @@ function benchShow(done) {
   const r = BENCH.rows, last = r[r.length - 1] || {};
   const fm = BENCH.frameMs.slice().sort((a, b) => a - b), pct = (q) => fm.length ? fm[Math.min(fm.length - 1, Math.floor(q * fm.length))] : 0;
   const lines = [];
-  lines.push(`Shatterforge benchmark · ${['concrete frame', 'masonry', 'mass timber'][KIND]}, ${STOREYS} storeys · ${new Date().toISOString().slice(0, 19)}Z`);
+  lines.push(`Shatterforge benchmark · ${['concrete frame', 'masonry', 'mass timber', 'mixed'][KIND]}, ${STOREYS} storeys · ${new Date().toISOString().slice(0, 19)}Z`);
   lines.push(`${navigator.userAgent}`);
   lines.push(`settings: quality ${setting.preset || 'custom'} · crush depth ${setting.crush} m · crumbs ${setting.crumbs} (${setting.particles ? 'particles' : 'rigid'}) · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
   lines.push(`cut: 36 blasts in ${(BENCH.cutMs / 1000).toFixed(1)} s`);
@@ -1155,7 +1158,7 @@ function hud() {
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'} · ${gpu.substeps} sub-steps${gpu.skipped ? ` · ${gpu.skipped.toLocaleString()} steps skipped at rest` : ''}` : '',
     gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">flicker check</span> ${flick.vanished} vanished, ${flick.jumps} jumps · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
-    `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · rubble resting on it ${(restSent / 9810).toFixed(0)} t · ${breaks} pieces broke on impact · ${crushedBodies} crushed · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
+    `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${crackedJoints} cracked and holding · rubble on its floors ${(restOnFloors / 9810).toFixed(0)} t · ${breaks} pieces broke on impact · ${crushedBodies} crushed · ${dustBricks} bricks to dust · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
     lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,
   ].filter(Boolean).join('<br>');
 }
@@ -1167,7 +1170,7 @@ __LAB_JS__
     const bytes = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
     E = (await WebAssembly.instantiate(bytes, {})).instance.exports;
     E.game_new_kind(STOREYS, KIND);
-    $('title').textContent = ['A 12-storey concrete-frame tower at real scale', 'A 5-storey masonry building at real scale', 'A 6-storey mass-timber building at real scale'][KIND];
+    $('title').textContent = ['A 12-storey concrete-frame tower at real scale', 'A 5-storey masonry building at real scale', 'A 6-storey mass-timber building at real scale', 'A 5-storey building of brick, steel, concrete and timber at real scale'][KIND];
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
     if (!LABSTATE) await startWorker(bytes);   // (the lab runs the engine inline, its jobs delayed by whole frames)
     initSettings(); initDiag(); initPreset();
