@@ -197,8 +197,9 @@ impl Game {
         if !rest.is_empty() {
             let mut idx = vec![NONE; self.b.len()];
             for (k, &i) in set.iter().enumerate() { idx[i as usize] = k as u32; }
+            // (not on the ground slab: it rests on the ground, and debris lying there loads nothing)
             for r in &rest {
-                if let Some(i) = self.brick_below(v3(r[0], r[1], r[2]), 4.0) { let k = idx[i as usize]; if k != NONE { point.push((k, r[0] / TICK, r[2] / TICK, r[3])); self.rest_applied += r[3]; } }
+                if let Some(i) = self.brick_below(v3(r[0], r[1], r[2]), 4.0) { let k = idx[i as usize]; if k != NONE && self.b.y[i as usize] > 0 { point.push((k, r[0] / TICK, r[2] / TICK, r[3])); self.rest_applied += r[3]; } }
             }
         }
         let _ = &mut load;

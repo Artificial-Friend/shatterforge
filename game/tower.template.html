@@ -547,8 +547,8 @@ function runInline(job) {
 // Rubble lying on the building weighs on it: once a second the weight of the debris at rest (bodies slower than
 // 0.5 m/s and particles asleep) goes to the engine with a structure check, binned in 0.5 m cells; the engine
 // puts each on the standing brick under it, and a floor heaped too high gives way.
-const REST_EVERY = 1.0;
-let restNext = 0, restSent = 0, restOnFloors = 0, crackedJoints = 0;
+const REST_EVERY = 1000;   // ms (clock() is in ms, real or the lab's virtual one)
+let restNext = 0, restSent = 0, restOnFloors = 0, crackedJoints = 0, restParts = 0, restBodies = 0;
 const DENS = [2400, 1900, 7850, 2500, 500];
 function restLoads() {
   const bins = new Map();
@@ -564,16 +564,19 @@ function restLoads() {
     add(lastBodies[o], lastBodies[o + 1], lastBodies[o + 2], b.mass * 9.81);
   }
   const pr = snapCur && snapCur.parts;
+  let partW = 0;
   if (pr && pr.list) for (const i of pr.list) {
     const d = pr.data, inf = pInfo[i];
     if (d[i * 12 + 10] !== 2 || !inf) continue;
     const m = 8 * inf.h[0] * inf.h[1] * inf.h[2] * (DENS[(inf.col || 0) & 15] || 2000);
+    if (d[i * 12 + 1] > 1) partW += m * 9.81;
     add(d[i * 12], d[i * 12 + 1], d[i * 12 + 2], m * 9.81);
   }
   const out = [];
   let total = 0;
   for (const e of bins.values()) { out.push(e[0] / e[3], e[1], e[2] / e[3], e[3]); total += e[3]; }
   restSent = total;
+  restParts = partW; restBodies = total - partW;
   return out;
 }
 function pump() {

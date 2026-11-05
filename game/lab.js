@@ -143,7 +143,7 @@ function labOnRead(r, pr) {
   if (pr) for (let i = 0; i < pr.n; i++) { const st = pr.data[i * 12 + 10]; if (st === 1 || st === 2) { if (!Number.isFinite(pr.data[i * 12 + 1])) bad++; else if (pr.data[i * 12 + 1] < -0.5) below++; } }
   L.bad = Math.max(L.bad, bad); L.below = Math.max(L.below, below);
   if (bad) labEvent('nan', f, { count: bad });
-  L.restMax = Math.max(L.restMax || 0, restOnFloors); L.cracked = crackedJoints;
+  if (restOnFloors > (L.restMax || 0)) { L.restMax = restOnFloors; L.restSplit = [Math.round(restBodies / 9810), Math.round(restParts / 9810)]; } L.cracked = crackedJoints;
   // the energy (kinetic + height) of the bodies present at both read-backs can only fall, unless pushed
   // (energy the page gave parts it cut free is allowed for, used up as it shows and fading over ~30 read-backs)
   const given = L.given || 0; L.given = Math.max(0, given - Math.max(0, gain)) * 0.97;
@@ -217,7 +217,7 @@ function labReport(wallS) {
     scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: ['concrete frame', 'masonry', 'mass timber', 'mixed'][S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
     pass: checks.every(c => c.pass), checks,
-    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), joints_cracked: L.cracked || 0 },
+    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0 },
     perf: {
       wall_s: +wallS.toFixed(1), steps: stepsDone, steps_skipped: gpu.skipped || 0,
       gpu_ms: { median: +med(gpuMs).toFixed(2), p95: +p95(gpuMs).toFixed(2), max: +Math.max(0, ...gpuMs).toFixed(2) },
