@@ -1138,6 +1138,7 @@ fn acc_add(i: u32, dv: vec3f, dw: vec3f) {
 // restitution after the sub-steps (Box2D v3 style): points that approached faster than the threshold get
 // their normal velocity reflected by the pair's restitution
 fn restitute_man(m: u32) {
+  if ((P.dbg & 8u) != 0u) { return; }
   let base = m * MS;
   // only contacts that pushed during the step (the last sub-step may already be separating)
   let out = man[base + M_OUT]; let rest = out.x; if (rest == 0.0 || out.y == 0.0) { return; }
