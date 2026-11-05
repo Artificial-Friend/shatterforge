@@ -52,6 +52,8 @@ The rebound, launch and energy checks do not count during those windows.
 
 **Energy given to parts cut free.** When the engine breaks a falling body, the parts cut free keep falling at their own velocity: the speed before the hit, less the energy the section that gave way took to crush. The GPU had already stopped the whole body rigidly by then (the engine answers a few frames later), so this energy comes from the page, not the solver. The lab counts it (`energy_given_by_cuts_J`, 58 MJ in the first 60 frames of `collapse`). The energy check allows for it while it spreads to the bodies those parts hit, used up as it shows and fading by 3% per read-back. Without it, the check counted the upper part (cut free at −5 m/s at frame 53) landing on the pieces under it as 0.6–0.9 MJ made from nothing. The rebound and launch checks are unchanged.
 
+**Flight recorder.** The lab keeps every body's pose, velocity, spin and sleep state at the last 4 read-backs, and the last 3 frames of impact events. The first 2 bursts of a run (a launch, or an energy gain over 1 MJ, while quiet) keep a copy, under `bursts` in the report. A rare burst can then be read from any full run, without knowing beforehand where to trace.
+
 ## Report
 
 Each scenario gives:

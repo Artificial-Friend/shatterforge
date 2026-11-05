@@ -27,6 +27,8 @@ function labInstall() {
   const takeE = gpu.takeEvents.bind(gpu);
   gpu.takeEvents = () => {
     const evs = takeE(), tr = L.traceWin;
+    // (the last 3 frames of impact events, for the flight recorder)
+    L.recentImpacts = (L.recentImpacts || []).filter(e => e.f >= L.f - 3).concat(evs.slice(0, 200).map(e => ({ f: L.f, a: e.a, b: e.b, J: Math.round(e.impulse || 0), approach: +(e.approach || 0).toFixed(2), n: e.n && e.n.map(x => +x.toFixed(2)), p: e.p && e.p.map(x => +x.toFixed(2)) })));
     if (tr && L.f >= tr[0] && L.f <= tr[1]) for (const e of evs) {
       const ga = gpu.bodies[e.a - 1], gb = gpu.bodies[e.b - 1];
       const inWin = (g) => g && g.labF >= tr[0] - 15;
@@ -146,6 +148,14 @@ function labOnRead(r, pr) {
   const given = L.given || 0; L.given = Math.max(0, given - Math.max(0, gain)) * 0.97;
   if (quiet && L.prevBodies && gain > 0.05 * ekPrev + 2000 + given) { L.energyGains++; L.energyGainMax = Math.max(L.energyGainMax, ekPrev > 0 ? gain / ekPrev : 0); labEvent('energy_gain', f, { gain_J: Math.round(gain), kinetic_before_J: Math.round(ekPrev) }); }
   L.prevBodies = now;
+  // flight recorder: every body at the last 4 read-backs; the first 2 bursts (a launch or a gain over 1 MJ while
+  // quiet) keep it, with the impact events of those frames, so a rare burst can be read from any full run
+  const snap = { f, bodies: [] };
+  for (const [b, x] of now) { const o = (b - 1) * 7, wo = (b - 1) * 3; snap.bodies.push({ b, made: x.gb.labF, size: x.gb.labH, p: [r.body[o], r.body[o + 1], r.body[o + 2]].map(z => +z.toFixed(3)), v: x.v.map(z => +z.toFixed(2)), w: r.ang ? [r.ang[wo], r.ang[wo + 1], r.ang[wo + 2]].map(z => +z.toFixed(2)) : null, asleep: r.sleeping ? r.sleeping[b - 1] : null }); }
+  L.ring = (L.ring || []).concat([snap]).slice(-4);
+  const burst = quiet && ((L.launches || 0) > (L.launchesSeen || 0) || gain > 1e6 + 0.05 * ekPrev + given);
+  L.launchesSeen = L.launches;
+  if (burst && (L.bursts = L.bursts || []).length < 2) L.bursts.push({ f, gain_J: Math.round(gain), ring: L.ring.slice(), impacts: (L.recentImpacts || []).slice() });
   // optional trace: every body made in the window, and the biggest one, at each read-back within it
   const tr = L.traceWin;
   if (tr && f >= tr[0] && f <= tr[1]) {
@@ -215,7 +225,7 @@ function labReport(wallS) {
       peak: { bodies: Math.max(0, ...se.map(x => x.bodies)), awake: Math.max(0, ...se.map(x => x.awake)), contacts: Math.max(0, ...se.map(x => x.contacts)), particles: Math.max(0, ...se.map(x => x.parts)), particles_moving: Math.max(0, ...se.map(x => x.pAwake)), drawn: Math.max(0, ...se.map(x => x.drawn)) },
       work: { contact_substeps: L.work.cs, particle_substeps: L.work.ps },
     },
-    events: L.events, timeline: L.timeline, trace: L.trace.length ? L.trace : undefined, traceEvents: L.traceEv.length ? L.traceEv : undefined,
+    events: L.events, timeline: L.timeline, trace: L.trace.length ? L.trace : undefined, bursts: L.bursts || undefined, traceEvents: L.traceEv.length ? L.traceEv : undefined,
     series: se,
   };
 }
