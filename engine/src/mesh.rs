@@ -1,6 +1,6 @@
 //! Render mesh of a brick store: every brick face minus the parts covered by touching neighbours (exact, from
 //! the joint graph), as quads. Faces resting on the ground are dropped.
-use crate::brick::{mat, Bricks, NONE, TICK};
+use crate::brick::{mat, Bricks, TBox, NONE, TICK};
 use alloc::vec::Vec;
 
 /// Interleaved vertices (position m, normal, colour) and triangle indices.
@@ -28,6 +28,8 @@ pub fn colour(b: &Bricks, i: u32) -> [f32; 3] {
     let base = match (b.mat[iu], b.paint[iu]) {
         (mat::GLASS, _) => [0.36, 0.50, 0.58],
         (mat::MASONRY, _) => [0.60, 0.36, 0.28],   // brick
+        (mat::STEEL, _) => [0.36, 0.40, 0.44],
+        (mat::TIMBER, 8) => [0.62, 0.46, 0.30],   // timber floor
         (mat::TIMBER, _) => [0.86, 0.84, 0.79],
         (_, 0) => [0.62, 0.61, 0.58],   // slab
         (_, 1) => [0.56, 0.56, 0.54],   // column
@@ -52,6 +54,21 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
         if !b.alive(i) || b.flags[i as usize] & crate::brick::F_DYNAMIC != 0 || !keep(b, i) { continue; }
         let tb = b.tbox(i);
         let col = colour(b, i);
+        // cracked joints of this brick (axis, plane, overlap box): drawn as dark seams where they meet its faces
+        let mut cracks: Vec<(usize, i32, TBox)> = Vec::new();
+        let mut j = b.jhead[i as usize];
+        while j != NONE {
+            let ju = j as usize;
+            if b.jdmg[ju] > 0 {
+                let a = b.jaxis[ju] as usize;
+                let o = b.tbox(b.joint_other(j, i));
+                let mut ov = TBox { min: [0; 3], max: [0; 3] };
+                for d in 0..3 { ov.min[d] = tb.min[d].max(o.min[d]); ov.max[d] = tb.max[d].min(o.max[d]); }
+                let plane = if b.ja[ju] == i { tb.max[a] } else { tb.min[a] };
+                cracks.push((a, plane, ov));
+            }
+            j = b.joint_next(j, i);
+        }
         for ax in 0..3 {
             let (u, w) = ((ax + 1) % 3, (ax + 2) % 3);
             for side in 0..2 {
@@ -81,12 +98,32 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
                     if side == 1 { m.i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]); }
                     else { m.i.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]); }
                     m.quads += 1;
+                    // seams of cracked joints across this face rect: a dark strip 2 cm wide inside this brick along the
+                    // joint's edge, a few mm proud of the face
+                    for &(a, cp, ov) in &cracks {
+                        if a == ax || ov.min[ax] > plane || ov.max[ax] < plane { continue; }
+                        let (lo_w, hi_w, along) = if a == u { (ov.min[w].max(r[1]), ov.max[w].min(r[3]), w) } else { (ov.min[u].max(r[0]), ov.max[u].min(r[2]), u) };
+                        if hi_w <= lo_w { continue; }
+                        let inward = if cp == tb.max[a] { -CRACK_W } else { CRACK_W };
+                        let base = (m.v.len() / 9) as u32;
+                        let off = n[ax] * 0.004;
+                        for (ca, cl) in [(0.0f32, lo_w), (inward, lo_w), (inward, hi_w), (0.0, hi_w)] {
+                            let mut p = [0.0f32; 3];
+                            p[ax] = plane as f32 * TICK + off; p[a] = cp as f32 * TICK + ca; p[along] = cl as f32 * TICK;
+                            m.v.extend_from_slice(&[p[0], p[1], p[2], n[0], n[1], n[2], 0.13, 0.11, 0.10]);
+                        }
+                        // (two-sided: the strip's winding depends on its axes)
+                        m.i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3, base, base + 2, base + 1, base, base + 3, base + 2]);
+                        m.quads += 1;
+                    }
                 }
             }
         }
     }
     m
 }
+/// width of a drawn crack seam (m)
+const CRACK_W: f32 = 0.02;
 
 #[cfg(test)]
 mod tests {
@@ -108,6 +145,16 @@ mod tests {
         let m = build(&c);
         // top brick: top, 4 sides, bottom minus middle = 2 strips -> 7; lower brick: 4 sides + top covered -> 4
         assert_eq!(m.quads, 11);
+    }
+    #[test] fn a_cracked_joint_shows_as_seams() {
+        // two bricks side by side on the ground, their joint cracked: 8 faces as before, plus a seam on each of
+        // the three visible faces of each brick that meet the joint (top, front, back)
+        let mut b = Bricks::new();
+        b.add([0, 0, 0], [4, 2, 2], mat::MASONRY, 0, 0);
+        b.add([4, 0, 0], [4, 2, 2], mat::MASONRY, 0, 0);
+        b.build_joints();
+        b.jdmg[b.jhead[0] as usize] = 1;
+        assert_eq!(build(&b).quads, 8 + 6);
     }
     #[test] fn tower_mesh() {
         let t = std::time::Instant::now();

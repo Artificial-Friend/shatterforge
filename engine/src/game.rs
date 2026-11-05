@@ -28,6 +28,8 @@ pub struct Game {
     pub side_failed: usize,
     /// worst floor panel under resting loads at the last structure_step (load / capacity)
     pub panel_ratio: f32,
+    /// joints cracked (reinforced concrete, masonry) and still holding
+    pub cracked_total: usize,
     pub player: Player,
     pub chunks: Vec<Mesh>,
     pub out: Vec<f32>,
@@ -74,7 +76,7 @@ impl Game {
     pub fn new_kind(storeys: i32, kind: u8) -> Self {
         let b = tower::build_kind(storeys, 1, kind);
         let n = (storeys + 2) as usize;
-        let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
+        let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
                            out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH };
         for k in 0..n as i32 { g.remesh(k); }
         g
@@ -233,13 +235,14 @@ impl Game {
                 let t = self.b.tbox(c.brick);
                 if c.at <= t.min[c.axis] || c.at >= t.max[c.axis] { continue; }
                 cracked.push(c.brick);
-                let reinf = self.b.flags[c.brick as usize] & crate::brick::F_REINF != 0;
+                // reinforced concrete and masonry crack and hold on (rebar; mortar in compression); others separate
+                let reinf = self.b.flags[c.brick as usize] & crate::brick::F_REINF != 0 || self.b.mat[c.brick as usize] == crate::brick::mat::MASONRY;
                 let n = self.b.split(c.brick, c.axis, c.at);
                 let mut jj = self.b.jhead[n as usize];
                 while jj != NONE {
                     if self.b.joint_other(jj, n) == c.brick {
                         // reinforced concrete cracks but the steel holds the two halves: the joint stays, cracked
-                        if reinf { self.b.jdmg[jj as usize] = self.b.jdmg[jj as usize].max(1); } else { self.b.remove_joint(jj); }
+                        if reinf { self.b.jdmg[jj as usize] = self.b.jdmg[jj as usize].max(1); self.cracked_total += 1; } else { self.b.remove_joint(jj); }
                         break;
                     }
                     jj = self.b.joint_next(jj, n);
@@ -250,7 +253,10 @@ impl Game {
                 let (x, y) = (self.b.ja[j as usize], self.b.jb[j as usize]);
                 // reinforced on both sides and not yet cracked: it cracks; cracked already: it separates
                 let reinf = (self.b.flags[x as usize] & self.b.flags[y as usize]) & crate::brick::F_REINF != 0;
-                if reinf && self.b.jdmg[j as usize] == 0 { self.b.jdmg[j as usize] = 1; done.push(j); continue; }
+                // brick laid in mortar (to brick, or bedded on a slab or a lintel): the mortar cracks first (the joint
+                // still bears, without tension), then parts
+                let masonry = self.b.mat[x as usize] == crate::brick::mat::MASONRY || self.b.mat[y as usize] == crate::brick::mat::MASONRY;
+                if (reinf || masonry) && self.b.jdmg[j as usize] == 0 { self.b.jdmg[j as usize] = 1; self.b.log.push(x); self.b.log.push(y); self.cracked_total += 1; done.push(j); continue; }
                 self.b.remove_joint(j);
                 self.b.log.push(x); self.b.log.push(y);
                 done.push(j);
@@ -900,6 +906,27 @@ mod tests {
             assert_eq!(fell > 0, expect, "{kpa} kPa");
         }
     }
+    #[test] fn the_mixed_buildings_timber_floor_gives_way_under_rubble_and_its_brick_cracks() {
+        // a timber floor bay of the third storey (joists, 2.4 MPa over 0.25 m: m_p = 25 kNm/m) between the brick
+        // wall and the steel beam at x = -7.5 m (3.25 m clear, beams on both sides): 3 kPa is carried; 40 kPa
+        // (q L^2 / 8 = 41 x 3.25^2 / 8 = 54 kNm/m against 2 m_p = 50) is not
+        for (kpa, expect) in [(3.0f32, false), (40.0, true)] {
+            let mut g = Game::new_kind(5, 3);
+            assert_eq!(g.structure_step(64), 0, "the mixed building stands");
+            let y = 3.0 * 3.75 + 0.3;
+            let push = |g: &mut Game| { let mut x = -10.75f32; while x <= -7.75 { let mut z = -10.75f32; while z <= -7.75 { g.rest.push([x, y, z, kpa * 1000.0 * 0.25]); z += 0.5; } x += 0.5; } };
+            let mut fell = 0;
+            for _ in 0..40 { push(&mut g); let n = g.structure_step(64); for (id, sz) in bodies_in(&g.out) { if id >= 0 { fell += sz; } } if n == 0 { break; } }
+            std::println!("mixed, timber floor bay with {kpa} kPa: panel ratio {:.2}, {fell} bricks fell", g.panel_ratio);
+            assert_eq!(fell > 0, expect, "{kpa} kPa on the timber floor");
+        }
+        // a hit on a brick pier of the second storey: the mortar cracks first
+        let mut g = Game::new_kind(5, 3);
+        g.inp = vec![-1.0, -7.5, 5.5, -11.2, 0.0, 0.0, 1.0, 6000.0, 6.0, 0.0, 0.0];
+        g.impacts(1.0 / 60.0);
+        std::println!("mixed, sideways hit on a brick pier: {} cracked, {} failed sideways", g.cracked_total, g.side_failed);
+        assert!(g.cracked_total > 0, "the brick cracks");
+    }
     #[test] fn a_sideways_hit_knocks_bricks_out_of_a_wall() {
         // a 1 t piece swinging into a masonry pier of the second storey at 6 m/s (J = 6 kN s over a frame):
         // 360 kN sideways on a few bricks of mortar (0.3 MPa in tension, 0.5 in shear). Before, only the
@@ -907,11 +934,19 @@ mod tests {
         let mut g = Game::new_kind(4, 1);
         assert_eq!(g.structure_step(64), 0);
         // contact on the south facade (z = -11.25 m) at 5.5 m up, pushing the wall north (into the building)
-        g.inp = vec![-1.0, -6.0, 5.5, -11.2, 0.0, 0.0, 1.0, 6000.0, 6.0, 0.0, 0.0];
-        g.impacts(1.0 / 60.0);
-        let mut fell = 0; for (id, sz) in bodies_in(&g.out) { if id >= 0 { fell += sz; } }
-        std::println!("sideways hit on a masonry pier: {} joints failed by the sideways load, {fell} bricks came loose", g.side_failed);
+        // The mortar cracks first and the pier still stands (it bears in compression); a second hit where it is
+        // cracked knocks bricks out.
+        let mut fell = [0usize; 2]; let mut cracked = [0usize; 2];
+        for k in 0..2 {
+            g.inp = vec![-1.0, -6.0, 5.5, -11.2, 0.0, 0.0, 1.0, 6000.0, 6.0, 0.0, 0.0];
+            g.impacts(1.0 / 60.0);
+            for (id, sz) in bodies_in(&g.out) { if id >= 0 { fell[k] += sz; } }
+            cracked[k] = g.cracked_total;
+            for _ in 0..10 { if g.structure_step(64) == 0 { break; } for (id, sz) in bodies_in(&g.out) { if id >= 0 { fell[k] += sz; } } }
+        }
+        std::println!("sideways hits on a masonry pier: {} joints failed by sideways loads, cracked after each hit {cracked:?}, bricks loose after each {fell:?}", g.side_failed);
         assert!(g.side_failed > 0, "the sideways load fails joints");
+        assert!(cracked[0] > 0, "the first hit cracks the mortar");
     }
     #[test] fn a_falling_slab_cracks_on_impact() {
         // a free piece: a 4 m x 4 m slab of 1 m x 0.25 m planks joined edge to edge, hitting the ground on a corner
@@ -1031,7 +1066,7 @@ mod tests {
         assert!(n > 5, "crumbs and the rest");
     }
     #[test] fn each_kind_of_building_stands_at_its_height() {
-        for (kind, storeys, name) in [(0u8, 12, "concrete frame"), (1, 5, "masonry"), (2, 6, "timber")] {
+        for (kind, storeys, name) in [(0u8, 12, "concrete frame"), (1, 5, "masonry"), (2, 6, "timber"), (3, 5, "mixed")] {
             let mut g = Game::new_kind(storeys, kind);
             {
                 let set: std::vec::Vec<u32> = (0..g.b.len() as u32).filter(|&i| g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
@@ -1041,7 +1076,8 @@ mod tests {
                 let mut w: std::vec::Vec<_> = a.failed.iter().map(|&(j, r)| { let (x, y) = (g.b.ja[j as usize] as usize, g.b.jb[j as usize] as usize); (r, g.b.paint[x], g.b.mat[x], g.b.paint[y], g.b.mat[y], g.b.jaxis[j as usize], g.b.y[x]) }).collect();
                 w.sort_by(|p, q| q.0.partial_cmp(&p.0).unwrap());
                 for f in w.iter().take(6) { std::println!("  joint {:.2}: paint/mat {}/{} - {}/{}, axis {}, y {}", f.0, f.1, f.2, f.3, f.4, f.5, f.6); }
-                for c in a.cracks.iter().take(6) { std::println!("  crack {:.2}: paint/mat {}/{}, axis {}", c.ratio, g.b.paint[c.brick as usize], g.b.mat[c.brick as usize], c.axis); }
+                for &(j, r) in a.failed.iter().take(12) { let (x, y) = (g.b.ja[j as usize], g.b.jb[j as usize]); std::println!("    {:.1}: {:?}-{:?} / {:?}-{:?}", r, g.b.tbox(x).min, g.b.tbox(x).max, g.b.tbox(y).min, g.b.tbox(y).max); }
+                for c in a.cracks.iter().take(6) { std::println!("  crack {:.2}: paint/mat {}/{}, axis {} at {} in {:?}-{:?}", c.ratio, g.b.paint[c.brick as usize], g.b.mat[c.brick as usize], c.axis, c.at, g.b.tbox(c.brick).min, g.b.tbox(c.brick).max); }
             }
             let n = g.structure_step(64);
             std::println!("{name}, {storeys} storeys: worst joint at {:.0}% of strength, {n} failures", g.max_ratio * 100.0);

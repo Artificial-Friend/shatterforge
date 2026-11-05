@@ -190,6 +190,15 @@ mod tests {
 }
 
 /// Flexural strength (Pa) for bending of a brick: reinforced concrete gets its rebar.
+/// Bending strength of brick `i` (Pa over its own depth). A timber floor (paint 8) is boards on joists
+/// (50 x 225 mm at 400 mm, 24 MPa), not solid wood: per metre of width it carries 2.5 x 0.05 x 0.225^2 / 6 x
+/// 24 MPa = 25 kNm, which over the plate's 0.25 m depth is 2.4 MPa. As solid timber (20 MPa) a floor bay
+/// carried 300 kPa of rubble.
+pub fn flexural_of(b: &Bricks, i: usize) -> f32 { if b.mat[i] == mat::TIMBER && b.paint[i] == 8 { 2.4e6 } else { flexural(b.mat[i]) } }
+/// A joint at which a timber floor meets another material (the core's concrete, a brick wall): the joists bear on a
+/// ledger or in pockets, a hinge. It carries shear but no bending (checked as one plate, it failed under the
+/// floor's own weight).
+fn hinge(b: &Bricks, x: usize, y: usize) -> bool { let tf = |i: usize| b.mat[i] == mat::TIMBER && b.paint[i] == 8; (tf(x) || tf(y)) && b.mat[x] != b.mat[y] }
 pub fn flexural(m: u8) -> f32 {
     match m { mat::CONCRETE => 12e6, mat::MASONRY => 0.5e6, mat::STEEL => 250e6, mat::GLASS => 40e6, _ => 20e6 }
 }
@@ -457,11 +466,17 @@ pub fn analyse_at(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32
                         if hi[d] <= lo[d] { ok = false; }
                     }
                     if !ok { continue; }
+                    // (two materials in series: the harmonic mean of their moduli)
                     let cond = stiffness(ax, lo, hi, p, q);
                     // infill carries its own weight only; a stair flight is an inclined slab, far more flexible
                     // than its stepped bricks suggest, so it does not take floor loads either
                     let mono = (b.flags[i as usize] | b.flags[o as usize]) & crate::brick::F_MONO != 0;
-                    let k = if infill { 0.02 } else if mono { 0.05 } else { 1.0 };
+                    // steel set into brick (a lintel or beam end in its pocket) bears on the brick below it; there is
+                    // no bond at its sides, which carry next to nothing (as conducting, they drew the wall's load
+                    // sideways into the lintel ends: 5-10 times their shear strength)
+                    let (mi, mo) = (b.mat[i as usize], b.mat[o as usize]);
+                    let pocket = ax != 1 && ((mi == mat::STEEL && mo == mat::MASONRY) || (mi == mat::MASONRY && mo == mat::STEEL));
+                    let k = if infill || pocket { 0.02 } else if mono { 0.05 } else { 1.0 };
                     links.push(Link { a: ia, b: ib, cond: cond * k, joint: j, axis: ax, face_lo: lo, face_hi: hi });
                 }
             }
@@ -585,14 +600,16 @@ pub fn analyse_at(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32
         // bending across a joint between two bricks of one plate (side by side): the face is the section
         let mono = (b.flags[b.ja[ju] as usize] | b.flags[b.jb[ju] as usize]) & crate::brick::F_MONO != 0;
         // a cracked reinforced joint has half its strength left (the steel across the crack)
-        let residual = if b.jdmg[ju] > 0 { 0.5 } else { 1.0 };
-        if gravity && ax != 1 && !infill && !mono {
+        // (cracked masonry bears in compression but has no tension left and less shear: friction on the crack)
+        let cracked_masonry = ma == mat::MASONRY || mb == mat::MASONRY;
+        let residual = if b.jdmg[ju] == 0 { 1.0 } else if cracked_masonry { [1.0, 0.05, 0.4][mode] } else { 0.5 };
+        if gravity && ax != 1 && !infill && !mono && !hinge(b, b.ja[ju] as usize, b.jb[ju] as usize) {
             let depth = (hi[1] - lo[1]) as f32 * TICK;
             let mc = if ax == 0 { m[0] } else { m[1] };
             let (ta, tb) = (b.tbox(b.ja[ju]), b.tbox(b.jb[ju]));
             let extent = ((ta.max[2 - ax] - ta.min[2 - ax]).min(tb.max[2 - ax] - tb.min[2 - ax])) as f32 * TICK;
             let width = spread((hi[2 - ax] - lo[2 - ax]) as f32 * TICK, mc, f, extent);
-            ratio = ratio.max(fabs(mc) / (width * depth * depth / 6.0) / flexural(ma).min(flexural(mb)));
+            ratio = ratio.max(fabs(mc) / (width * depth * depth / 6.0) / flexural_of(b, b.ja[ju] as usize).min(flexural_of(b, b.jb[ju] as usize)));
         }
         ratio /= residual;
         if ratio > out.max_ratio { out.max_ratio = ratio; }
@@ -615,7 +632,7 @@ pub fn analyse_at(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32
             let mc = if k.axis == 0 { mlink[l][0] } else { mlink[l][1] };
             let t = b.tbox(i);
             let width = spread((k.face_hi[2 - k.axis] - k.face_lo[2 - k.axis]) as f32 * TICK, mc, flow[l], (t.max[2 - k.axis] - t.min[2 - k.axis]) as f32 * TICK);
-            ratio = ratio.max(fabs(mc) / (width * depth * depth / 6.0) / flexural(m));
+            ratio = ratio.max(fabs(mc) / (width * depth * depth / 6.0) / flexural_of(b, i as usize));
             if ratio > out.worst_in.0 { out.worst_in = (ratio, i, k.axis, flow[l], mc, width); }
         }
         if ratio > out.max_ratio { out.max_ratio = ratio; }
@@ -679,7 +696,7 @@ fn overturning(b: &Bricks, nodes: &[Node], links: &[Link], live: &[bool]) -> Vec
                 for (x, z) in [(l.face_lo[0], l.face_lo[2]), (l.face_hi[0], l.face_lo[2]), (l.face_lo[0], l.face_hi[2]), (l.face_hi[0], l.face_hi[2])] { pts.push((x as f64, z as f64)); }
                 let (bx, bz) = ((l.face_hi[0] - l.face_lo[0]) as f32 * TICK, (l.face_hi[2] - l.face_lo[2]) as f32 * TICK);
                 let (p, q) = (nodes[l.a as usize].brick as usize, nodes[l.b as usize].brick as usize);
-                let f = flexural(b.mat[p]).min(flexural(b.mat[q])) * if b.jdmg[l.joint as usize] > 0 { 0.5 } else { 1.0 };
+                let f = flexural_of(b, p).min(flexural_of(b, q)) * if b.jdmg[l.joint as usize] > 0 { 0.5 } else { 1.0 };
                 // the weaker way of bending the face
                 mcap += (f * bx.max(bz) * bx.min(bz) * bx.min(bz) / 6.0) as f64;
             }
@@ -698,7 +715,8 @@ fn overturning(b: &Bricks, nodes: &[Node], links: &[Link], live: &[bool]) -> Vec
 /// How far (in the units of the points) (x, z) lies outside the convex hull of `pts`; 0 inside.
 fn outside_hull(pts: &mut Vec<(f64, f64)>, x: f64, z: f64) -> f64 {
     pts.sort_by(|a, c| a.partial_cmp(c).unwrap_or(core::cmp::Ordering::Equal)); pts.dedup();
-    if pts.len() == 1 { let d = ((pts[0].0 - x).powi(2) + (pts[0].1 - z).powi(2)).sqrt(); return d; }
+    let hyp = |a: f64, c: f64| sqrt((a * a + c * c) as f32) as f64;
+    if pts.len() == 1 { return hyp(pts[0].0 - x, pts[0].1 - z); }
     let cross = |o: (f64, f64), a: (f64, f64), c: (f64, f64)| (a.0 - o.0) * (c.1 - o.1) - (a.1 - o.1) * (c.0 - o.0);
     let mut h: Vec<(f64, f64)> = Vec::new();
     for &p in pts.iter() { while h.len() >= 2 && cross(h[h.len() - 2], h[h.len() - 1], p) <= 0.0 { h.pop(); } h.push(p); }
@@ -706,7 +724,7 @@ fn outside_hull(pts: &mut Vec<(f64, f64)>, x: f64, z: f64) -> f64 {
     for &p in pts.iter().rev().skip(1) { while h.len() >= lower && cross(h[h.len() - 2], h[h.len() - 1], p) <= 0.0 { h.pop(); } h.push(p); }
     h.pop();
     // distance to the hull: 0 if inside (counter-clockwise hull: all edges have the point on their left)
-    let seg = |a: (f64, f64), c: (f64, f64)| { let (dx, dz) = (c.0 - a.0, c.1 - a.1); let l2 = dx * dx + dz * dz; let t = if l2 > 0.0 { (((x - a.0) * dx + (z - a.1) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 }; ((a.0 + t * dx - x).powi(2) + (a.1 + t * dz - z).powi(2)).sqrt() };
+    let seg = |a: (f64, f64), c: (f64, f64)| { let (dx, dz) = (c.0 - a.0, c.1 - a.1); let l2 = dx * dx + dz * dz; let t = if l2 > 0.0 { (((x - a.0) * dx + (z - a.1) * dz) / l2).clamp(0.0, 1.0) } else { 0.0 }; hyp(a.0 + t * dx - x, a.1 + t * dz - z) };
     if h.len() < 3 { return if h.len() == 2 { seg(h[0], h[1]) } else { 0.0 }; }
     let inside = (0..h.len()).all(|i| cross(h[i], h[(i + 1) % h.len()], (x, z)) >= 0.0);
     if inside { return 0.0; }
@@ -803,7 +821,7 @@ pub fn panels(b: &Bricks, point: &[(u32, f32, f32, f32)]) -> (Vec<Crack>, f32) {
             }
             j = b.joint_next(j, i);
         }
-        let mp = flexural(b.mat[iu]) * depth * depth / 6.0;
+        let mp = flexural_of(b, iu) * depth * depth / 6.0;
         let selfw = mat::density(b.mat[iu]) * depth * 9.81;   // Pa
         let band = 6.0 / TICK;
         // each loaded point picks its bay; points in one bay are checked once
@@ -811,12 +829,23 @@ pub fn panels(b: &Bricks, point: &[(u32, f32, f32, f32)]) -> (Vec<Crack>, f32) {
         for p in point.iter().filter(|p| p.0 == i) {
             let (x, z) = (p.1, p.2);
             // x span: supports within the band across (z)
-            let near_z = |s: &[i32; 4]| (s[1] as f32) <= z + band && (s[3] as f32) >= z - band;
-            let near_x = |s: &[i32; 4]| (s[0] as f32) <= x + band && (s[2] as f32) >= x - band;
-            let left = sup.iter().filter(|s| near_z(s) && (s[2] as f32) <= x).map(|s| s[2]).max();
-            let right = sup.iter().filter(|s| near_z(s) && (s[0] as f32) >= x).map(|s| s[0]).min();
-            let lo = sup.iter().filter(|s| near_x(s) && (s[3] as f32) <= z).map(|s| s[3]).max();
-            let hi = sup.iter().filter(|s| near_x(s) && (s[1] as f32) >= z).map(|s| s[1]).min();
+            // a support bounds the span along x if it crosses the load's line (a wall or beam running across it)
+            // or is a post within the band (a column at a corner of the bay); a wall alongside does not
+            // (supports that cross the load's line first; only without one on a side, posts within the band: a
+            // flat plate on columns. Taking the nearest of either, a piece of wall pier at the bay's edge
+            // shortened the span to the beam by a metre.)
+            let cross_z = |s: &[i32; 4]| (s[1] as f32) <= z && (s[3] as f32) >= z;
+            let cross_x = |s: &[i32; 4]| (s[0] as f32) <= x && (s[2] as f32) >= x;
+            let band_z = |s: &[i32; 4]| (s[1] as f32) <= z + band && (s[3] as f32) >= z - band;
+            let band_x = |s: &[i32; 4]| (s[0] as f32) <= x + band && (s[2] as f32) >= x - band;
+            let side = |f: &dyn Fn(&[i32; 4]) -> bool, g: &dyn Fn(&[i32; 4]) -> bool, key: &dyn Fn(&[i32; 4]) -> Option<i32>, max: bool| {
+                let pick = |h: &dyn Fn(&[i32; 4]) -> bool| { let it = sup.iter().filter(|s| h(s)).filter_map(|s| key(s)); if max { it.max() } else { it.min() } };
+                pick(f).or_else(|| pick(g))
+            };
+            let left = side(&cross_z, &band_z, &|s| if (s[2] as f32) <= x { Some(s[2]) } else { None }, true);
+            let right = side(&cross_z, &band_z, &|s| if (s[0] as f32) >= x { Some(s[0]) } else { None }, false);
+            let lo = side(&cross_x, &band_x, &|s| if (s[3] as f32) <= z { Some(s[3]) } else { None }, true);
+            let hi = side(&cross_x, &band_x, &|s| if (s[1] as f32) >= z { Some(s[1]) } else { None }, false);
             let bay = [left.unwrap_or(t.min[0]), lo.unwrap_or(t.min[2]), right.unwrap_or(t.max[0]), hi.unwrap_or(t.max[2])];
             if seen.contains(&bay) { continue; }
             seen.push(bay);
@@ -827,6 +856,7 @@ pub fn panels(b: &Bricks, point: &[(u32, f32, f32, f32)]) -> (Vec<Crack>, f32) {
             let rx = ratio_dir(bay[2] - bay[0], left.is_some() && right.is_some());
             let rz = ratio_dir(bay[3] - bay[1], lo.is_some() && hi.is_some());
             let r = rx.max(rz);
+            #[cfg(test)] { extern crate std; if std::env::var("SF_PANEL").is_ok() { std::println!("panel brick {i} {:?}-{:?}: bay {bay:?} sides {:?} q {:.0} Pa rx {rx:.2} rz {rz:.2} supports {:?}", t.min, t.max, [left.is_some(), right.is_some(), lo.is_some(), hi.is_some()], q, sup.iter().filter(|s| (s[0] - (x as i32)).abs() < 40 && (s[1] - (z as i32)).abs() < 40).collect::<std::vec::Vec<_>>()); } }
             worst = worst.max(r);
             if r <= 1.0 { continue; }
             // it comes down along its support lines

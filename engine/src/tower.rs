@@ -38,11 +38,19 @@ pub mod el {
     pub const PARTITION: u16 = 10;
     pub const PARAPET: u16 = 11;
     pub const STAIR2: u16 = 12;   // alternate steps, so neighbouring steps stay separate bricks
-    pub const COUNT: usize = 13;
+    // the mixed building (kind 3)
+    pub const BRICK: u16 = 13;     // load-bearing brick wall, laid in running bond
+    pub const SCOL: u16 = 14;      // steel column
+    pub const BEAM: u16 = 15;      // steel beam under a floor
+    pub const LINTEL: u16 = 16;    // steel lintel over an opening, steel transfer beam over the shopfront
+    pub const TFLOOR: u16 = 17;    // timber floor (boards on joists, as one plate)
+    pub const SILL: u16 = 18;      // brick under a window: carries its own weight only (as the masonry spandrels)
+    pub const COUNT: usize = 19;
 }
 /// What the tower is built of: 0 a reinforced-concrete frame, 1 load-bearing masonry piers and facade with a concrete
 /// core and floors,
-/// 2 mass timber (floors, posts, core and stairs of timber).
+/// 2 mass timber (floors, posts, core and stairs of timber),
+/// 3 mixed (see `paint_mixed`): brick walls, steel columns and beams, a concrete first floor, timber floors above.
 pub fn element_in(e: u16, kind: u8) -> Element {
     use el::*;
     let mut k = element(e);
@@ -64,6 +72,10 @@ pub fn element(e: u16) -> Element {
         SPANDREL | HEADER | MULLION => (mat::CONCRETE, 2, true),
         PARAPET => (mat::CONCRETE, 2, false),
         GLASS => (mat::GLASS, 0, true),
+        BRICK => (mat::MASONRY, 6, false),
+        SILL => (mat::MASONRY, 6, true),
+        SCOL | BEAM | LINTEL => (mat::STEEL, 7, false),
+        TFLOOR => (mat::TIMBER, 8, false),
         CORE => (mat::CONCRETE, 3, false),
         STAIR | STAIR2 | LANDING => (mat::CONCRETE, 4, false),
         _ => (mat::TIMBER, 5, true),   // partitions: stud walls
@@ -91,14 +103,48 @@ impl Storey {
             let e = self.at(x, y, z);
             if e == 0 || done[idx(x, y, z)] { continue; }
             let free = |x: i32, y: i32, z: i32| self.at(x, y, z) == e && !done[idx(x, y, z)];
-            let mut x1 = x + 1;
+            let (mut x1, mut y1, mut z1) = (x + 1, y + 1, z + 1);
+            if e == el::BRICK {
+                // brick walls merge upward first, into piers of the full height they have: as long horizontal bands
+                // (merged along the wall first) they carried the load sideways, round the corners of the building
+                while y1 < STOREY && free(x, y1, z) { y1 += 1; }
+                // (and only over columns of exactly that height: a band under the windows must not take the feet
+                // of the piers beside it)
+                let same = |xx: i32, zz: i32| (y..y1).all(|yy| free(xx, yy, zz)) && !(y1 < STOREY && free(xx, y1, zz));
+                while x1 < W && x1 - x < 255 && same(x1, z) { x1 += 1; }
+                'zb: while z1 < W && z1 - z < 255 { for xx in x..x1 { if !same(xx, z1) { break 'zb; } } z1 += 1; }
+            } else {
             while x1 < W && x1 - x < 255 && free(x1, y, z) { x1 += 1; }
-            let mut z1 = z + 1;
             'zl: while z1 < W && z1 - z < 255 { for xx in x..x1 { if !free(xx, y, z1) { break 'zl; } } z1 += 1; }
-            let mut y1 = y + 1;
             'yl: while y1 < STOREY { for zz in z..z1 { for xx in x..x1 { if !free(xx, y1, zz) { break 'yl; } } } y1 += 1; }
+            }
             for yy in y..y1 { for zz in z..z1 { for xx in x..x1 { done[idx(xx, yy, zz)] = true; } } }
             let ek = element_in(e, self.kind);
+            if e == el::BRICK && RUNNING_BOND {
+                // brick laid in courses: units 1 m long (8 ticks) and 0.75 m high (6), each course offset by half a
+                // unit (running bond), on the world grid so courses line up across pieces of wall. A wall cracks
+                // along its mortar joints: between these units.
+                let along = if x1 - x >= z1 - z { 0 } else { 2 };
+                let (wx, wy, wz) = (x - HALF, y + self.y0, z - HALF);
+                let (ex, ey, ez) = (x1 - HALF, y1 + self.y0, z1 - HALF);
+                let mut yy = wy;
+                while yy < ey {
+                    let c = yy.div_euclid(COURSE_H);
+                    let y2 = ((c + 1) * COURSE_H).min(ey);
+                    let off = if c % 2 == 0 { 0 } else { UNIT / 2 };
+                    let (a0, a1) = if along == 0 { (wx, ex) } else { (wz, ez) };
+                    let mut a = a0;
+                    while a < a1 {
+                        let next = ((a - off).div_euclid(UNIT) + 1) * UNIT + off;
+                        let a2 = next.min(a1);
+                        let (mn, sz) = if along == 0 { ([a, yy, wz], [a2 - a, y2 - yy, ez - wz]) } else { ([wx, yy, a], [ex - wx, y2 - yy, a2 - a]) };
+                        out.add(mn, sz, ek.material, ek.paint, structure);
+                        a = a2;
+                    }
+                    yy = y2;
+                }
+                continue;
+            }
             let b = out.add([x - HALF, y + self.y0, z - HALF], [x1 - x, y1 - y, z1 - z], ek.material, ek.paint, structure);
             if ek.infill { out.flags[b as usize] |= F_INFILL; }
             if ek.material == mat::CONCRETE && !ek.infill { out.flags[b as usize] |= crate::brick::F_REINF; }
@@ -118,8 +164,108 @@ const STAIR_X2: (i32, i32) = (18, 28);
 /// Stair opening in the slab above.
 const HOLE: ((i32, i32), (i32, i32)) = ((8, 28), (-20, 2));
 
+/// brick units of the mixed building: 1 m long, 0.75 m courses (in ticks)
+const UNIT: i32 = 8;
+/// lay brick walls unit by unit (else merged into piers like the other masonry, splitting on the course grid when they crack)
+const RUNNING_BOND: bool = false;
+const COURSE_H: i32 = 6;
+
+/// The mixed building (kind 3), 5 storeys by default, on the same 22.5 m footprint and concrete core:
+/// - ground storey: a shop. Brick walls; on the south and north fronts three shop windows between brick piers,
+///   each under a steel beam; four steel columns inside at (+-7.5, +-7.5) m
+/// - first floor: a 0.25 m concrete slab
+/// - upper storeys: load-bearing brick walls 0.375 m thick all round, with 1.5 x 1.75 m windows every 3.75 m
+///   under steel lintels; floors of timber (0.25 m) on steel beams along both axes at +-7.5 m (on the columns
+///   where they cross), so the timber spans 3.75 m between beams, walls and the core; a timber roof with a brick
+///   parapet; timber stud partitions as in the other kinds
+fn paint_mixed(s: &mut Storey, k: i32, storeys: i32) {
+    use el::*;
+    let y0 = s.y0;
+    let floor = y0 + SLAB_T;
+    let top = y0 + STOREY;
+    let roof = k == storeys;
+    s.fill((-HALF, HALF), (y0, floor), (-HALF, HALF), if k <= 1 { SLAB } else { TFLOOR });
+    // inside the concrete core the floor is concrete too (the stair landings and the lobby)
+    s.fill((-CORE_H, CORE_H), (y0, floor), (-CORE_H, CORE_H), SLAB);
+    if k > 0 { s.fill(HOLE.0, (y0, floor), HOLE.1, 0); }
+    const T: i32 = 3;   // brick wall thickness (0.375 m)
+    if roof {
+        for (x, z) in [((-HALF, HALF), (-HALF, -HALF + T)), ((-HALF, HALF), (HALF - T, HALF)), ((-HALF, -HALF + T), (-HALF, HALF)), ((HALF - T, HALF), (-HALF, HALF))] {
+            s.fill(x, (floor, floor + 6), z, SILL);   // (a parapet carries only itself)
+        }
+        core_walls(s, floor, top, true);
+        return;
+    }
+    let south = ((-HALF, HALF), (-HALF, -HALF + T));
+    let north = ((-HALF, HALF), (HALF - T, HALF));
+    let west = ((-HALF, -HALF + T), (-HALF + T, HALF - T));
+    let east = ((HALF - T, HALF), (-HALF + T, HALF - T));
+    // beams under the floor above (timber floors: storeys 2 and up), in this storey's top 2 ticks
+    let beams = k + 1 >= 2;
+    let wall_top = top;
+    if k == 0 {
+        // shop: brick walls all round; on the south and north fronts three shop windows between brick piers
+        // (2 m at the corners and between windows), each under a steel beam 0.375 m deep bearing 0.25 m on the
+        // piers. (Glass shopfronts on slender posts under one transfer beam were too soft a path: the walls above
+        // sent their load round the corners into the side walls.)
+        for (x, z) in [south, north, west, east] { s.fill(x, (floor, wall_top), z, BRICK); }
+        for (a, b) in [(-74, -38), (-22, 22), (38, 74)] {
+            for zz in [south.1, north.1] {
+                s.fill((a - 2, b + 2), (top - 3, top), zz, LINTEL);
+                s.fill((a, b), (floor, top - 3), zz, 0);
+            }
+            s.fill((a, b), (floor, top - 3), (-HALF + 1, -HALF + 2), GLASS);
+            s.fill((a, b), (floor, top - 3), (HALF - 2, HALF - 1), GLASS);
+        }
+        // the shop door, in the middle window
+        s.fill((-7, 7), (floor, floor + 20), (-HALF, -HALF + T), 0);
+    } else {
+        // brick walls with windows under steel lintels
+        for (x, z) in [south, north, west, east] { s.fill(x, (floor, wall_top), z, BRICK); }
+        for c in [-75, -45, -15, 15, 45, 75] {
+            let (a, b) = (c - 6, c + 6);
+            let (sill, head) = (floor + 7, floor + 21);
+            // the brick over the window (to the floor above) sits on its lintel and, like the brick under the
+            // window, is no load path between the piers; so the lintel carries only that, between the piers
+            s.fill((a, b), (head + 2, top), south.1, SILL); s.fill((a, b), (head + 2, top), north.1, SILL);
+            s.fill(west.0, (head + 2, top), (a, b), SILL); s.fill(east.0, (head + 2, top), (a, b), SILL);
+            s.fill((a, b), (head, head + 2), south.1, LINTEL); s.fill((a, b), (head, head + 2), north.1, LINTEL);
+            s.fill(west.0, (head, head + 2), (a, b), LINTEL); s.fill(east.0, (head, head + 2), (a, b), LINTEL);
+            // the brick under the window carries only itself (it is not a load path from pier to pier)
+            s.fill((a, b), (floor, sill), south.1, SILL); s.fill((a, b), (floor, sill), north.1, SILL);
+            s.fill(west.0, (floor, sill), (a, b), SILL); s.fill(east.0, (floor, sill), (a, b), SILL);
+            s.fill((a, b), (sill, head), south.1, 0); s.fill((a, b), (sill, head), north.1, 0);
+            s.fill(west.0, (sill, head), (a, b), 0); s.fill(east.0, (sill, head), (a, b), 0);
+            s.fill((a, b), (sill, head), (-HALF + 1, -HALF + 2), GLASS); s.fill((a, b), (sill, head), (HALF - 2, HALF - 1), GLASS);
+            s.fill((-HALF + 1, -HALF + 2), (sill, head), (a, b), GLASS); s.fill((HALF - 2, HALF - 1), (sill, head), (a, b), GLASS);
+        }
+        // timber stud partitions round a corridor, as in the other kinds
+        let c = CORRIDOR;
+        s.fill((-HALF + T, HALF - T), (floor, top), (c, c + 1), PARTITION);
+        s.fill((-HALF + T, HALF - T), (floor, top), (-c - 1, -c), PARTITION);
+        for &d in &[-40, -20, 10, 34] {
+            s.fill((d, d + 7), (floor, floor + 17), (c, c + 1), 0);
+            s.fill((d, d + 7), (floor, floor + 17), (-c - 1, -c), 0);
+        }
+    }
+    core_walls(s, floor, top, false);
+    // steel columns at (+-7.5, +-7.5) m, 2 ticks square, up to the beams (or the slab)
+    for &cx in &[-60, 60] { for &cz in &[-60, 60] {
+        s.fill((cx - 1, cx + 1), (floor, top), (cz - 1, cz + 1), SCOL);
+    } }
+    if beams {
+        // steel beams 0.25 m square under the timber floor above, along x at z = +-7.5 m and along z at x = +-7.5 m,
+        // bearing on the brick walls at their ends (through the wall's thickness), on the columns where they
+        // cross
+        for &cz in &[-60, 60] { s.fill((-HALF, HALF), (top - 2, top), (cz - 1, cz + 1), BEAM); }
+        for &cx in &[-60, 60] { s.fill((cx - 1, cx + 1), (top - 2, top), (-HALF, HALF), BEAM); }
+    }
+    stair(s, floor);
+}
+
 fn paint_storey(s: &mut Storey, k: i32, storeys: i32) {
     use el::*;
+    if s.kind == 3 { paint_mixed(s, k, storeys); return; }
     let y0 = s.y0;
     let floor = y0 + SLAB_T;           // top of this storey's slab
     let top = y0 + STOREY;           // underside of the next slab
