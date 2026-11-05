@@ -376,21 +376,35 @@ fn hull_ground(s: HShape, margin: f32) -> Contact {
 fn hull_hull(A: HShape, B: HShape, margin: f32) -> Contact {
   var c: Contact; c.cnt = 0u;
   let ha = hhead(A.t); let hb = hhead(B.t);
-  let nfa = u32(ha.y); let nfb = u32(hb.y);
+  let nfa = u32(ha.y); let nfb = u32(hb.y); let nva = u32(ha.x); let nvb = u32(hb.x);
+  // both hulls' corners and edge directions in the world, read once (every axis projects all corners: read
+  // from the shape buffer each time that was ~5,000 reads per pair)
+  var VA: array<vec3f, 16>; var VB: array<vec3f, 16>; var DA: array<vec3f, 12>; var DB: array<vec3f, 12>;
+  for (var k = 0u; k < nva; k++) { VA[k] = hw(A, k); }
+  for (var k = 0u; k < nvb; k++) { VB[k] = hw(B, k); }
+  let nda = u32(ha.w); let ndb = u32(hb.w);
+  for (var k = 0u; k < nda; k++) { DA[k] = normalize(A.R * (A.h * hdir(A.t, k))); }
+  for (var k = 0u; k < ndb; k++) { DB[k] = normalize(B.R * (B.h * hdir(B.t, k))); }
   var sa = -1e30; var fa = 0u;
-  for (var f = 0u; f < nfa; f++) { let pl = hface(A, f); let s = hivl(B, pl.xyz).x - pl.w; if (s > margin) { return c; } if (s > sa) { sa = s; fa = f; } }
+  for (var f = 0u; f < nfa; f++) {
+    let pl = hface(A, f); var lo = 1e30; for (var k = 0u; k < nvb; k++) { lo = min(lo, dot(VB[k], pl.xyz)); }
+    let s = lo - pl.w; if (s > margin) { return c; } if (s > sa) { sa = s; fa = f; }
+  }
   var sb = -1e30; var fb = 0u;
-  for (var f = 0u; f < nfb; f++) { let pl = hface(B, f); let s = hivl(A, pl.xyz).x - pl.w; if (s > margin) { return c; } if (s > sb) { sb = s; fb = f; } }
+  for (var f = 0u; f < nfb; f++) {
+    let pl = hface(B, f); var lo = 1e30; for (var k = 0u; k < nva; k++) { lo = min(lo, dot(VA[k], pl.xyz)); }
+    let s = lo - pl.w; if (s > margin) { return c; } if (s > sb) { sb = s; fb = f; }
+  }
   var se = -1e30; var el = vec3f(0.0); var ei = 0u; var ej = 0u;
-  for (var i = 0u; i < u32(ha.w); i++) {
-    let da = normalize(A.R * (A.h * hdir(A.t, i)));
-    for (var j = 0u; j < u32(hb.w); j++) {
-      let db = normalize(B.R * (B.h * hdir(B.t, j)));
-      let l0 = cross(da, db); let l2 = dot(l0, l0); if (l2 < 1e-6) { continue; }
+  for (var i = 0u; i < nda; i++) {
+    for (var j = 0u; j < ndb; j++) {
+      let l0 = cross(DA[i], DB[j]); let l2 = dot(l0, l0); if (l2 < 1e-6) { continue; }
       // (its sign: the side where B is clear of A the most; the box centres can lie outside a wedge)
       var l = l0 * inverseSqrt(l2);
-      let ia = hivl(A, l); let ib = hivl(B, l);
-      let s1 = ib.x - ia.y; let s2 = ia.x - ib.y;
+      var alo = 1e30; var ahi = -1e30; var blo = 1e30; var bhi = -1e30;
+      for (var k = 0u; k < nva; k++) { let d = dot(VA[k], l); alo = min(alo, d); ahi = max(ahi, d); }
+      for (var k = 0u; k < nvb; k++) { let d = dot(VB[k], l); blo = min(blo, d); bhi = max(bhi, d); }
+      let s1 = blo - ahi; let s2 = alo - bhi;
       var s = s1; if (s2 > s1) { s = s2; l = -l; }
       if (s > margin) { return c; }
       if (s > se) { se = s; el = l; ei = i; ej = j; }
