@@ -1043,11 +1043,13 @@ fn ovf_item(g: u32) -> u32 { let r = ovf_range(); if (r.x + g >= r.y) { return 0
 }
 
 // Crushing: a light piece pressed by a body many times heavier (a building's upper part landing on rubble cut
-// from its own base) is crushed, as concrete is. The sign: the impulse it took this step is far more than its own
-// momentum could need (it is squeezed against something), with a real approach speed. It then collides only with
+// from its own base) is crushed, as concrete is, when the stress at the contact passes its crushing strength. It then collides only with
 // the static world (the heavy body goes through it, no rubble shot out sideways at 5-9 m/s) and is listed for
 // the page, which turns it into rubble particles where it is.
 const C_NCRUSH = 15u; const MAX_CRUSH = 256u;
+// crushing strength (MPa) by material: concrete, masonry, steel, glass, timber (across the grain), test, ground,
+// reference
+const CRUSH_MPA = array<f32, 8>(30.0, 10.0, 250.0, 50.0, 8.0, 1.0, 1e9, 10.0);
 @compute @workgroup_size(64) fn crush(@builtin(global_invocation_id) g: vec3u) {
   let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
   let m = P.cur_base + mi; let base = m * MS;
@@ -1059,7 +1061,20 @@ const C_NCRUSH = 15u; const MAX_CRUSH = 256u;
   let ia = B(a, F_P).w; let ib = B(b, F_P).w;
   let light = select(b, a, ia > ib); let il = max(ia, ib); let ih = min(ia, ib);
   if (il < P.crush_ratio * ih) { return; }
-  if (out.y * il < max(1.5 * out.z, P.crush_dv)) { return; }
+  // squeezed: the impulse it took is well beyond what its own motion needs (a free piece hit by a heavy one is
+  // only knocked away, about 1.1 x its approach)
+  if (out.y * il < 1.5 * out.z) { return; }
+  // and the stress on it: this step's normal impulse over the step, over the contact patch (radius kept in the
+  // manifold), against the material's crushing strength. A building's upper part landing on rubble gives
+  // hundreds of MPa; a steel beam set down on blocks a few, and they hold it.
+  let side = select(cold[m * CS + 5u].w, cold[m * CS + 4u].w, light == a);
+  let mat = u32(Hs(u32(side), H_ID).y);
+  let rad = max(man[base + M_JT].w, 0.05);
+  // (the solver limits the mass ratio to P_RATIO, so the impulse it took is that much smaller than what really
+  // stops the heavy body: the real one is scaled back)
+  let real = out.y * max(1.0, il / (P_RATIO * ih));
+  let stress = real / P.dt / (3.14159 * rad * rad);
+  if (stress < CRUSH_MPA[min(mat, 7u)] * 1e6) { return; }
   if (atomicExchange(&ints[P.o_crushed + light], 1u) != 0u) { return; }
   let k = atomicAdd(&ints[C_NCRUSH], 1u); if (k >= MAX_CRUSH) { return; }
   let o = P.o_crush + k * 12u; let p = B(light, F_P).xyz; let q = B(light, F_Q); let v = S(light, S_V).xyz;

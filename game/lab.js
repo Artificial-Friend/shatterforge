@@ -17,7 +17,7 @@ function labInstall() {
       if (b <= 0) return;
       const gb = gpu.bodies[b - 1];
       if (L.ballNext) { L.balls.add(b); if (gb) gb.labBall = true; return; }
-      const v = list[k].shapes.reduce((s, sh) => s + labBoxVol(sh.h), 0); L.bodyVol.set(b, v); L.gpuVol += v;
+      const v = list[k].shapes.reduce((s, sh) => s + labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1), 0); L.bodyVol.set(b, v); L.gpuVol += v;
       if (gb) { gb.labVol = v; gb.labH = list[k].shapes.length === 1 ? list[k].shapes[0].h.map(x => +x.toFixed(2)) : `${list[k].shapes.length} boxes`; gb.labF = L.f; }
     });
     L.ballNext = false; return idx;

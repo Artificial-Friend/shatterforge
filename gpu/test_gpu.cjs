@@ -266,6 +266,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       // (the block weighs 2400 kg/m^3 x 3200 m^3 = 7,700 t; scaled to the case seen, 1,900 t, by its density)
       const w = await GpuWorld.create(dev, [...pieces, block], { substeps: +(globalThis.SAND_SUB || 12), sleep: false });
       if (globalThis.SAND_PUSH) w.maxPush = +globalThis.SAND_PUSH;
+      w.crushing = false;   // (this tests the solver's mass ratio limit; crushing is the crush test)
       if (globalThis.SAND_COL) { w.maxColors = +globalThis.SAND_COL; w.colorLimit = +globalThis.SAND_COL; }
       const statsAt = [];
       const bi = w.n;   // the block is the last body
@@ -416,10 +417,12 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       // colliding with the static world only), the block comes down on the ground, nothing is thrown up; a light
       // piece merely hit from the side by a heavy one is not crushed
       const pieces = [];
-      for (let i = 0; i < 6; i++) for (let k = 0; k < 4; k++) pieces.push({ shapes: [{ p: [-7.5 + i * 3, 0.6, -6 + k * 4], q: [0, 0, 0, 1], h: [1.0, 0.6, 1.0], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
-      const side = { shapes: [{ p: [30, 0.6, 0], q: [0, 0, 0, 1], h: [1.0, 0.6, 1.0], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] };
-      const ram = { shapes: [{ p: [36.05, 3.0, 0], q: [0, 0, 0, 1], h: [5, 3, 5], mat: MAT.concrete }], v: [-6, 0, 0], w: [0, 0, 0] };
-      const block = { shapes: [{ p: [0, 1.2 + 0.001 + 4, 0], q: [0, 0, 0, 1], h: [10, 4, 10], mat: MAT.concrete }], v: [0, -5.7, 0], w: [0, 0, 0] };
+      // (rubble-sized pieces, 0.5 m: the stress under the block passes concrete's 30 MPa; the 2 m blocks of the
+      // sandwich test would hold it, 17 MPa)
+      for (let i = 0; i < 6; i++) for (let k = 0; k < 4; k++) pieces.push({ shapes: [{ p: [-7.5 + i * 3, 0.25, -6 + k * 4], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
+      const side = { shapes: [{ p: [30, 0.25, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] };
+      const ram = { shapes: [{ p: [35.3, 3.0, 0], q: [0, 0, 0, 1], h: [5, 3, 5], mat: MAT.concrete }], v: [-6, 0, 0], w: [0, 0, 0] };
+      const block = { shapes: [{ p: [0, 0.5 + 0.001 + 4, 0], q: [0, 0, 0, 1], h: [10, 4, 10], mat: MAT.concrete }], v: [0, -5.7, 0], w: [0, 0, 0] };
       const w = await GpuWorld.create(dev, [...pieces, side, ram, block], { substeps: 12, sleep: false });
       const bi = w.n, sideI = 25;
       let crushed = new Set(), pmax = -1e9;
