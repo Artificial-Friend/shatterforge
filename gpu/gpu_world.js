@@ -50,7 +50,7 @@ struct Params {
   blast: array<vec4f, 6>,   // particle blasts: (centre, reach), (speed, -, -, -)
   o_ptab: u32, ptab_mask: u32, o_big: u32, o_mslot: u32,   // contact reduction (see red_count)
   o_crushed: u32, o_crush: u32, crush_ratio: f32, crush_dv: f32,   // crushing (see crush)
-  o_hull: u32, o_hl: u32, pad11: u32, pad12: u32,   // the convex chunk library, in the shape buffer
+  o_hull: u32, o_hl: u32, pad11: u32, pad12: f32,   // the convex chunk library, in the shape buffer
 }
 struct ColorU { c: u32 }
 
@@ -801,11 +801,17 @@ fn man_centre(mi: u32) -> vec4f {
 
 // ---------------------------------------------------------------- colouring
 fn mhdr(m: u32) -> vec2u { let h = man[m * MS]; return vec2u(u32(h.x), u32(h.y)); }
-@compute @workgroup_size(64) fn color(@builtin(global_invocation_id) g: vec3u) {
-  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+// Contacts with the static world (or a resting body) are coloured first, in their own pass: they hold the
+// bodies up, and a body's supports left to the parallel overflow pass (a slab under hundreds of pieces) did not
+// converge and pushed it up (GPU test stumps).
+@compute @workgroup_size(64) fn color_support(@builtin(global_invocation_id) g: vec3u) { color_one(g.x, true); }
+@compute @workgroup_size(64) fn color(@builtin(global_invocation_id) g: vec3u) { color_one(g.x, false); }
+fn color_one(mi: u32, support: bool) {
+  if (mi >= min(ld(C_MAN), P.max_man)) { return; }
   if (u32(man[(P.cur_base + mi) * MS].z) >= 8u) { st(P.o_mcolor + mi, 0xffffffffu); return; }   // (reduced away)
   let ab = mhdr(P.cur_base + mi); let a = ab.x; let b = ab.y;
   let da = dyn_awake(a); let db = dyn_awake(b);
+  if (support != (!da || !db)) { return; }
   var col = P.color_limit;
   for (var c = 0u; c < P.color_limit; c++) {
     let bit = 1u << c;
@@ -895,6 +901,17 @@ fn ratio_scale(ia: f32, ib: f32) -> vec2f {
   if (ib * P_RATIO < ia) { return vec2f(1.0, ia / (P_RATIO * ib)); }
   return vec2f(1.0);
 }
+// The limit may only take energy from the heavy body, never give it: its response at the limited mass (sc
+// times its real one) is kept where that slowed it down; where it sped it up, the heavy body takes the change
+// at its real mass. Applied both ways, the limit made momentum: a slab landing on stumps with pieces on it
+// rose at 8 m/s and threw the pieces at 15 (GPU test stumps); in the lab collapse the upper part of the
+// building rose 0.5 m after landing.
+fn limited(v0: vec3f, w0: vec3f, v: ptr<function, vec3f>, w: ptr<function, vec3f>, sc: f32) {
+  if (sc == 1.0) { return; }
+  if (dot(*v, *v) > dot(v0, v0) || dot(*w, *w) > dot(w0, w0)) {
+    *v = v0 + (*v - v0) / sc; *w = w0 + (*w - w0) / sc;
+  }
+}
 fn solve_man(m: u32, use_bias: bool, split: bool) {
   let base = m * MS;
   let hd = man[base]; let a = u32(hd.x); let b = u32(hd.y); let cnt = u32(hd.z);
@@ -903,7 +920,10 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
   let va0 = va; let wa0 = wa; let vb0 = vb; let wb0 = wb;
   var ka = 1.0; var kb = 1.0;
   if (split) { ka = f32(max(ld(P.o_ocount + a), 1u)); kb = f32(max(ld(P.o_ocount + b), 1u)); }
-  let sc = ratio_scale(va4.w, vb4.w);
+  // (the ratio is limited between the masses as split: limited first, a body split over k contacts acted as
+  // 20/k times the light body, lighter than it; a slab landing with 100 pieces on it was thrown up at 8 m/s,
+  // GPU test stumps)
+  let sc = ratio_scale(va4.w * ka, vb4.w * kb);
   let rec = split || sc.x != 1.0 || sc.y != 1.0;   // effective masses recomputed
   let ima = va4.w * ka * sc.x; let imb = vb4.w * kb * sc.y;
   let A0 = S(a, S_I0) * ka * sc.x; let A1 = S(a, S_I1) * ka * sc.x; let B0 = S(b, S_I0) * kb * sc.y; let B1 = S(b, S_I1) * kb * sc.y;
@@ -919,7 +939,7 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
     let s = pa.w + dn + dot(thb, rbxn) - dot(tha, raxn);
     var bias = 0.0; var ms = 1.0; var is_ = 0.0;
     if (s > 0.0) { bias = s * P.inv_h; }
-    else if (use_bias) { bias = max(P.bias_rate * s, -P.max_push); ms = P.mass_scale; is_ = P.imp_scale; }
+    else if (use_bias) { bias = max(P.bias_rate * s, -P.max_push * select(1.0, P.pad12, split)); ms = P.mass_scale; is_ = P.imp_scale; }
     let vn = dot(vb - va, n) + dot(wb, rbxn) - dot(wa, raxn);
     let j0 = jn[k];
     var nm = pb.w;
@@ -972,6 +992,7 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
   if (stick != hd.w) { man[base] = vec4f(hd.xyz, stick); }
   // the relax pass ends each sub-step: its normal impulses are what the sub-step applied
   if (!use_bias) { let o = man[base + M_OUT]; man[base + M_OUT] = vec4f(o.x, o.y + tot, o.zw); }
+  limited(va0, wa0, &va, &wa, sc.x); limited(vb0, wb0, &vb, &wb, sc.y);
   if (split) {
     // (each change divided by the count here, not after summing: a large body has thousands of overflow
     // contacts, and their changes against a share of its mass (several m/s each) can overflow the 32-bit sum)
@@ -1034,6 +1055,7 @@ fn restitute_man(m: u32) {
     vb += n * (imp * imb); wb += imul(B0, B1, rbxn) * imp;
   } }
   man[base + M_JN] = jn;
+  limited(va4.xyz, S(a, S_W).xyz, &va, &wa, sc.x); limited(vb4.xyz, S(b, S_W).xyz, &vb, &wb, sc.y);
   if (ima > 0.0) { setS(a, S_V, vec4f(va, va4.w)); setS(a, S_W, vec4f(wa, 0.0)); }
   if (imb > 0.0) { setS(b, S_V, vec4f(vb, vb4.w)); setS(b, S_W, vec4f(wb, 0.0)); }
 }
@@ -1059,8 +1081,14 @@ fn ovf_range() -> vec2u { let c = P.color_limit; let s = ld(P.o_cstart + c); ret
 // overflow contacts (a body with more contacts than colours, e.g. a big falling piece): all in parallel,
 // with mass splitting; ovf_apply then averages the velocity changes per body
 fn ovf_item(g: u32) -> u32 { let r = ovf_range(); if (r.x + g >= r.y) { return 0xffffffffu; } return ld(P.o_order + r.x + g); }
-@compute @workgroup_size(64) fn solve_ovf(@builtin(global_invocation_id) g: vec3u) { let m = ovf_item(g.x); if (m != 0xffffffffu) { solve_man(m, true, true); } }
-@compute @workgroup_size(64) fn relax_ovf(@builtin(global_invocation_id) g: vec3u) { let m = ovf_item(g.x); if (m != 0xffffffffu) { solve_man(m, false, true); } }
+// (grid-stride, sized by the recent overflow count like the colours; sized by the contact capacity every
+// round of every sub-step ran a thread per possible contact)
+@compute @workgroup_size(64) fn solve_ovf(@builtin(global_invocation_id) g: vec3u, @builtin(num_workgroups) nw: vec3u) {
+  var k = g.x; loop { let m = ovf_item(k); if (m == 0xffffffffu) { break; } solve_man(m, true, true); k += nw.x * 64u; }
+}
+@compute @workgroup_size(64) fn relax_ovf(@builtin(global_invocation_id) g: vec3u, @builtin(num_workgroups) nw: vec3u) {
+  var k = g.x; loop { let m = ovf_item(k); if (m == 0xffffffffu) { break; } solve_man(m, false, true); k += nw.x * 64u; }
+}
 @compute @workgroup_size(1) fn restitute_ovf(@builtin(workgroup_id) wg: vec3u) {
   if (wg.x != 0u) { return; }
   let r = ovf_range(); for (var k = r.x; k < r.y; k++) { restitute_man(ld(P.o_order + k)); }
@@ -1766,7 +1794,7 @@ class GpuWorld {
     const mod = await compile(WGSL, 'WGSL'), modA = await compile(WGSL_ARGS, 'WGSL args');
     const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
-    const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
+    const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color_support', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
                    'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_score', 'red_pick', 'red_apply', 'crush'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
@@ -1808,7 +1836,7 @@ class GpuWorld {
     // the pair table sized by the contacts there were (as the grid), up to its capacity
     let tp = 1024; while (tp < 2 * ((this.stats.manifolds || 0) * 1.5 + 2048) && tp < this.TP) tp *= 2; this.TPeff = tp;
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
-    u[136] = this.oHull; u[137] = L.hl;
+    u[136] = this.oHull; u[137] = L.hl; f[139] = this.ovfPush ?? 1;
     u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 3;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
@@ -1891,7 +1919,7 @@ class GpuWorld {
     p = pass(null, true); run(p, 'man_args', 1); p.end();
     p = pass('colour');
     if (this.reduce !== false) for (const k of ['red_count', 'red_score', 'red_pick', 'red_apply']) ind(p, k, 96 * 4);
-    ind(p, 'color', 96 * 4); run(p, 'adj_scan', 1); p.end();
+    ind(p, 'color_support', 96 * 4); ind(p, 'color', 96 * 4); run(p, 'adj_scan', 1); p.end();
     p = pass(null, true); run(p, 'color_scan', 1); p.end();
     p = pass('sub-steps');
     ind(p, 'color_scatter', 96 * 4);
@@ -1902,7 +1930,11 @@ class GpuWorld {
       p.setBindGroup(1, this.bg1, [0]);
       if (k === 'restitute') { ind(p, 'restitute_ovf', C * 12); return; }
       // overflow contacts: two Jacobi rounds with mass splitting
-      for (let it = 0; it < (k === 'relax' ? (this.relaxRounds ?? 2) : 2); it++) { ind(p, k + '_ovf', C * 12); run(p, 'ovf_apply', nb); }
+      const ovfWg = Math.min(perMan, wgCap(this.colCounts[C] * 1.5 + 256));
+      for (let it = 0; it < (k === 'relax' ? (this.relaxRounds ?? 2) : 2); it++) {
+        if (this.indirect) ind(p, k + '_ovf', C * 12); else run(p, k + '_ovf', ovfWg);
+        run(p, 'ovf_apply', nb);
+      }
     };
     for (let s = 0; s < this.substeps; s++) {
       run(p, 'integrate_warm', nb);

@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'hulls', 'hullpairs', 'hullthrow'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'stumps', 'hulls', 'hullpairs', 'hullthrow'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -16,7 +16,8 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
   fs.writeFileSync('/tmp/sf_blank.html', '<html><body></body></html>');
   await p.goto('file:///tmp/sf_blank.html');
   await p.addScriptTag({ path: path.join(__dirname, 'gpu_world.js') });
-  const res = await p.evaluate(async ({ wasm, scenes, SUB, SAND_PUSH, SAND_MAT, SAND_SUB, SAND_COL, SAND_FALL, COMP_N, COMP_FLOOR, RELAX, HNOSLEEP, HBOX, HNOCRUSH, HNORED, HONLY, HPDYN, HRANDOM, HBIG }) => {
+  const res = await p.evaluate(async ({ wasm, scenes, SUB, SAND_PUSH, SAND_MAT, SAND_SUB, SAND_COL, SAND_FALL, COMP_N, COMP_FLOOR, RELAX, HNOSLEEP, HBOX, HNOCRUSH, HNORED, HONLY, HPDYN, HRANDOM, HBIG, KN }) => {
+    Object.assign(globalThis, KN || {});
     if (SAND_PUSH) globalThis.SAND_PUSH = SAND_PUSH; if (SAND_MAT) globalThis.SAND_MAT = SAND_MAT; if (SAND_SUB) globalThis.SAND_SUB = SAND_SUB; if (SAND_COL) globalThis.SAND_COL = SAND_COL; if (SAND_FALL) globalThis.SAND_FALL = 1; if (COMP_N) globalThis.COMP_N = COMP_N; if (COMP_FLOOR) globalThis.COMP_FLOOR = 1; if (RELAX) globalThis.RELAX = RELAX; if (HNOSLEEP) globalThis.HNOSLEEP = 1; if (HBOX) globalThis.HBOX = 1; if (HNOCRUSH) globalThis.HNOCRUSH = 1; if (HNORED) globalThis.HNORED = 1; if (HONLY) globalThis.HONLY = HONLY; if (HPDYN) globalThis.HPDYN = 1; if (HRANDOM) globalThis.HRANDOM = 1; if (HBIG) globalThis.HBIG = 1;
     // SF_SUB=n forces n sub-steps everywhere (to see what fewer cost in accuracy)
     if (SUB) { const c0 = GpuWorld.create; GpuWorld.create = (d, l, o = {}) => c0.call(GpuWorld, d, l, { ...o, substeps: SUB }); }
@@ -459,6 +460,45 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       check('compound', vmax < 0.8, { hitAt: hit, maxUp_ms: +vmax.toFixed(2), vy: vs, stats: st });
     }
+    if (scenes.includes('stumps')) {
+      // the upper building landing on the stumps of its cut columns with rubble on it (lab collapse, frame 50: a
+      // 1,554-brick body at 6.3 m/s on 5 static stumps, touching dozens of pieces: it went from -6.34 to +1.11
+      // m/s, then up again from 0.44 to 0.64 m/s). Here: a slab of 16 x 16 bricks with 6 columns on 5 stumps, two
+      // layers of 225 pieces riding on it. Concrete (e 0.1) allows 0.63 m/s of rebound; after that nothing may
+      // push the slab up, and the pieces may not be thrown (they land on it at 7.6 m/s).
+      // Before the fixes (the mass-ratio limit applied before mass splitting and both ways, the slab's supports
+      // left to the parallel pass): slab up at 2.1-8.7 m/s, pieces at up to 15 m/s, varying run to run. After:
+      // slab 0.11-0.17 m/s, pieces 1.5 m/s, in three runs.
+      const sh = [], fl = [], B = 0.25;
+      for (let i = 0; i < 16; i++) for (let k = 0; k < 16; k++) sh.push({ p: [-4 + i * 0.5 + B, 4.25, -4 + k * 0.5 + B], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete });
+      const cols = [[-3.75, -3.75], [-3.75, 3.75], [3.75, 3.75], [3.75, -3.75], [-3.75, 0.25], [3.75, 0.25]];
+      for (const [x, z] of cols) for (let j = 0; j < 6; j++) sh.push({ p: [x, 3.75 - j * 0.5, z], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete });
+      cols.forEach(([x, z], c) => { if (c !== 3) fl.push({ p: [x, 0.25, z], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete }); });
+      // starts 5 cm above the stumps, falling at 6.3 m/s
+      for (const q of sh) q.p[1] += 0.55;
+      // with loose pieces riding on the slab (in the collapse the body touched dozens of pieces, so its contacts
+      // went past the colours to the parallel pass)
+      const NP = +(globalThis.STUMP_PIECES ?? 450), pcs = [];
+      for (let k = 0; k < NP; k++) pcs.push({ shapes: [{ p: [-3.5 + (k % 15) * 0.5, 5.3 + Math.floor(k / 225) * 0.5, -3.5 + Math.floor(k / 15) % 15 * 0.5], q: [0, 0, 0, 1], h: [0.2, 0.2, 0.2], mat: MAT.concrete }], v: [0, -6.3, 0], w: [0, 0, 0] });
+      const w = await GpuWorld.create(dev, [{ fixed: true, shapes: fl }, { shapes: sh, v: [0, -6.3, 0], w: [0, 0, 0] }, ...pcs], { substeps: 12, sleep: false, maxShapes: 1000 });
+      if (globalThis.STUMP_OP) w.ovfPush = +globalThis.STUMP_OP; if (globalThis.SAND_PUSH) w.maxPush = +globalThis.SAND_PUSH; if (globalThis.RELAX) w.relaxRounds = +globalThis.RELAX; if (globalThis.SAND_COL) { w.maxColors = +globalThis.SAND_COL; w.colorLimit = +globalThis.SAND_COL; }
+      const bi = 2; let vmax = -1e9, hit = -1, later = -1e9; const vs = [];
+      for (let f = 1; f <= 40; f++) {
+        w.step(1 / 60);
+        await dev.queue.onSubmittedWorkDone(); await settle();
+        const r = await w.readPose(); const vy = r.vel[(bi - 1) * 3 + 1];
+        if (hit < 0 && vy > -5) hit = f;
+        if (hit > 0 && f <= hit + 1) vmax = Math.max(vmax, vy);
+        if (hit > 0 && f > hit + 1) later = Math.max(later, vy);
+        if (f <= 16) vs.push(+vy.toFixed(2));
+        if (NP && hit > 0 && f <= hit + 4) { let pu = -1e9, pd = 1e9; for (let b = 3; b <= w.n; b++) { const v = r.vel[(b - 1) * 3 + 1]; pu = Math.max(pu, v); pd = Math.min(pd, v); } (globalThis.pcv = globalThis.pcv || []).push([+pu.toFixed(2), +pd.toFixed(2)]); }
+        if (f === hit + 2 && w.gpuMs) var stg = Object.fromEntries(Object.entries(w.gpuMs).map(([k, v]) => [k, +v.toFixed(1)]));
+      }
+      const ovf = w.colCounts[w.colorLimit];
+      w.destroy();
+      const pmax = Math.max(...(globalThis.pcv || [[0]]).map(x => x[0]));
+      check('stumps', vmax < 0.7 && later < 0.7 && pmax < 2.5, { hitAt: hit, reboundUp_ms: +vmax.toFixed(2), laterUp_ms: +later.toFixed(2), vy: vs, overflow: ovf, stages: stg, piecesUpDown: globalThis.pcv });
+    }
     if (scenes.includes('particles')) {
       // granular crumbs poured on a fixed table: they pile up on it and around it on the ground, never inside it
       // or under the ground, come to rest and sleep (then the world costs nothing); a box dropped on the pile
@@ -543,7 +583,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   // the results for docs/STATUS.md (tools/status.py): full runs only (a run of a few scenes is not the state)

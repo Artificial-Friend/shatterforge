@@ -183,7 +183,10 @@ Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall throu
 
 ## Still to do
 
-- **Mass ratio limit.** Across one contact the heavier body responds as if at most 20 times heavier (GPU test `sandwich`: a 7,700 t block landing on 11 t rubble went from a 2.52 m/s rebound to 0.37 m/s).
+- **Mass ratio limit.** Across one contact the heavier body responds as if at most 20 times heavier (GPU test `sandwich`: a 7,700 t block landing on 11 t rubble went from a 2.52 m/s rebound to 0.37 m/s). The limit only takes energy from the heavy body: where its response at the limited mass would speed it up, it takes the change at its real mass. The limit is between the masses as split over a body's overflow contacts, so a split body is never made lighter than the light one. Applied both ways and before splitting, it made momentum.
+- **Supports first.** Contacts with the static world or a resting body are coloured in their own pass before the others, so a body's supports are solved in sequence, not left to the parallel overflow pass.
+- GPU test `stumps` covers all three: a slab with columns lands at 6.3 m/s on 5 stumps carrying 450 pieces. Before, the slab rose at 2.1–8.7 m/s and the pieces were thrown at up to 15 m/s, varying from run to run. After, the slab rose at 0.11–0.17 m/s (rebound 0.63 m/s, as concrete's e = 0.1 gives) and the pieces at 1.5 m/s, over three runs. In the lab collapse (frame 50), the upper part of the building had gone from −6.34 to +1.11 m/s on landing and then kept rising.
+- **Overflow passes** are sized by the recent overflow count and loop, like the colours (they were sized by the contact capacity, every round of every sub-step).
 - **Depenetration** is at most 1 m/s (it was 3; pieces made overlapping the slab they were crushing into popped out).
 
 - **Contact sag.** Stiffer contacts are still needed. A 20-high stack sags 7 mm (0.35 mm per contact), within budget but not the micron level of real masonry.
