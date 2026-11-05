@@ -42,6 +42,8 @@ At every read-back, against the physics:
 | Launches: pieces thrown up faster than 5 m/s | 0 |
 | Energy gains: the kinetic plus height energy of the bodies present at both read-backs rises by more than 5% (+2 kJ), beyond the energy the page gave parts it cut free (below) | 0 |
 | Roof fall, for cut scenarios | at least one storey |
+
+Also reported: the most rubble lying on the building's floors at once (t, from the weight the page sends the engine each second) and the joints cracked (brick and reinforced concrete crack first and hold; impacts refine bricks, so this counts the new joints too).
 | Settled: everything asleep before the end | yes |
 
 Pushes from outside are exempt for a while:
@@ -86,9 +88,10 @@ Each scenario gives:
 | `ball` | concrete frame, 3 storeys: two steel balls into the facade (360) |
 | `masonry` | masonry, 3 storeys: ground storey cut (600) |
 | `timber` | mass timber, 3 storeys: ground storey cut (600) |
+| `mixed` | the mixed building (brick, steel, concrete, timber), 5 storeys: ground storey cut (600) |
 | `rubble` | concrete frame, 3 storeys: cut, then a blast into the rubble (720) |
 
-Suites: `quick` (collapse, ball) and `full` (all five).
+Suites: `quick` (collapse, ball) and `full` (all six).
 
 ## Running it
 

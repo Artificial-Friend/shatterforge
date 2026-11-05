@@ -221,7 +221,11 @@ impl Game {
 
     /// Apply the worst `max` failures of an analysis: failed joints are removed, cracked bricks are split at
     /// the failing section and the new joint across the cut is left out. Returns how many were applied.
-    fn apply_failures(&mut self, a: &structure::Analysis, max: usize) -> Vec<u32> {
+    fn apply_failures(&mut self, a: &structure::Analysis, max: usize) -> Vec<u32> { self.apply_failures_as(a, max, true) }
+    /// `standing`: the standing structure, where brick cracks and holds; in a falling piece hit by an impact, brick
+    /// parts at once (holding there, each impact re-cracked the same pieces: 10,889 cracks in 240 frames of the lab's
+    /// mixed scenario, 4 times the building's joints)
+    fn apply_failures_as(&mut self, a: &structure::Analysis, max: usize, standing: bool) -> Vec<u32> {
         let mut work: Vec<(f32, u32, Option<usize>)> = a.failed.iter().map(|&(j, r)| (r, j, None)).collect();
         for (k, c) in a.cracks.iter().enumerate() { work.push((c.ratio, NONE, Some(k))); }
         work.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(core::cmp::Ordering::Equal));
@@ -235,8 +239,9 @@ impl Game {
                 let t = self.b.tbox(c.brick);
                 if c.at <= t.min[c.axis] || c.at >= t.max[c.axis] { continue; }
                 cracked.push(c.brick);
-                // reinforced concrete and masonry crack and hold on (rebar; mortar in compression); others separate
-                let reinf = self.b.flags[c.brick as usize] & crate::brick::F_REINF != 0 || self.b.mat[c.brick as usize] == crate::brick::mat::MASONRY;
+                                // (a crack through a brick pier parts it: held, its halves cracked again at the next section, round after
+                // round: 7,159 cracks in 240 frames of the mixed scenario. Brick cracks and holds at its joints.)
+                let reinf = self.b.flags[c.brick as usize] & crate::brick::F_REINF != 0;
                 let n = self.b.split(c.brick, c.axis, c.at);
                 let mut jj = self.b.jhead[n as usize];
                 while jj != NONE {
@@ -255,7 +260,7 @@ impl Game {
                 let reinf = (self.b.flags[x as usize] & self.b.flags[y as usize]) & crate::brick::F_REINF != 0;
                 // brick laid in mortar (to brick, or bedded on a slab or a lintel): the mortar cracks first (the joint
                 // still bears, without tension), then parts
-                let masonry = self.b.mat[x as usize] == crate::brick::mat::MASONRY || self.b.mat[y as usize] == crate::brick::mat::MASONRY;
+                let masonry = standing && (self.b.mat[x as usize] == crate::brick::mat::MASONRY || self.b.mat[y as usize] == crate::brick::mat::MASONRY);
                 if (reinf || masonry) && self.b.jdmg[j as usize] == 0 { self.b.jdmg[j as usize] = 1; self.b.log.push(x); self.b.log.push(y); self.cracked_total += 1; done.push(j); continue; }
                 self.b.remove_joint(j);
                 self.b.log.push(x); self.b.log.push(y);
@@ -305,7 +310,7 @@ impl Game {
             if !sink.iter().any(|&s| s) { let k = (0..set.len()).min_by(|&x, &y| dist2(&self.b, set[x], pt).partial_cmp(&dist2(&self.b, set[y], pt)).unwrap()).unwrap(); sink[k] = true; }
             let before = self.b.len();
             let a = structure::analyse(&self.b, &set, &load, &sink, -d);
-            cracked = self.apply_failures(&a, usize::MAX).len();
+            cracked = self.apply_failures_as(&a, usize::MAX, false).len();
             // bricks split off by cracks belong to the piece too
             for i in before..self.b.len() { set.push(i as u32); }
         }
@@ -524,7 +529,7 @@ impl Game {
                         self.dbg.clear();
                         for &(j, _) in &a.failed { let (p, q) = (self.b.ja[j as usize], self.b.jb[j as usize]); if p != NONE { self.dbg.push(((self.b.y[p as usize] as i32).max(self.b.y[q as usize] as i32)) as f32); self.dbg.push(self.b.jaxis[j as usize] as f32); } }
                     }
-                    cracked = self.apply_failures(&a, usize::MAX).len();
+                    cracked = self.apply_failures_as(&a, usize::MAX, false).len();
                     self.piece_ratio = a.max_ratio; self.piece_info = [a.failed.len() as f32, a.cracks.len() as f32, sink.iter().filter(|&&s| s).count() as f32, set.len() as f32];
                     for i in before..self.b.len() { set.push(i as u32); }
                 }
