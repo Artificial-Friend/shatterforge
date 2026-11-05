@@ -54,6 +54,7 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Quality <select id="s-preset"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">sets the debris budgets, physics sub-steps, solver colours and shadows; the sliders below fine-tune</span></label>
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
+  <label>Irregular chunks <b id="v-chunks"></b><input type="range" id="s-chunks" min="0" max="1" step="1"><span class="hint">on: loose bricks too big for particles break into convex chunks (real shapes, they tumble and pile); off: they stay boxes</span></label>
   <label>Crumbs as particles <b id="v-particles"></b><input type="range" id="s-particles" min="0" max="1" step="1"><span class="hint">on: loose bricks up to 0.5 m are granular particles (pile and slide, much cheaper; they do not push larger pieces); off: every crumb is a rigid body</span></label>
   <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
   <label>Physics sub-steps <b id="v-substeps"></b><input type="range" id="s-substeps" min="4" max="16" step="1"><span class="hint">per 1/60 s step: more = stiffer, more accurate stacks, slower</span></label>
@@ -1144,11 +1145,13 @@ fn ovf_item(g: u32) -> u32 { let r = ovf_range(); if (r.x + g >= r.y) { return 0
 }
 
 // Crushing: a light piece pressed by a body many times heavier (a building's upper part landing on rubble cut
-// from its own base) is crushed, as concrete is. The sign: the impulse it took this step is far more than its own
-// momentum could need (it is squeezed against something), with a real approach speed. It then collides only with
+// from its own base) is crushed, as concrete is, when the stress at the contact passes its crushing strength. It then collides only with
 // the static world (the heavy body goes through it, no rubble shot out sideways at 5-9 m/s) and is listed for
 // the page, which turns it into rubble particles where it is.
 const C_NCRUSH = 15u; const MAX_CRUSH = 256u;
+// crushing strength (MPa) by material: concrete, masonry, steel, glass, timber (across the grain), test, ground,
+// reference
+const CRUSH_MPA = array<f32, 8>(30.0, 10.0, 250.0, 50.0, 8.0, 1.0, 1e9, 10.0);
 @compute @workgroup_size(64) fn crush(@builtin(global_invocation_id) g: vec3u) {
   let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
   let m = P.cur_base + mi; let base = m * MS;
@@ -1160,7 +1163,20 @@ const C_NCRUSH = 15u; const MAX_CRUSH = 256u;
   let ia = B(a, F_P).w; let ib = B(b, F_P).w;
   let light = select(b, a, ia > ib); let il = max(ia, ib); let ih = min(ia, ib);
   if (il < P.crush_ratio * ih) { return; }
-  if (out.y * il < max(1.5 * out.z, P.crush_dv)) { return; }
+  // squeezed: the impulse it took is well beyond what its own motion needs (a free piece hit by a heavy one is
+  // only knocked away, about 1.1 x its approach)
+  if (out.y * il < 1.5 * out.z) { return; }
+  // and the stress on it: this step's normal impulse over the step, over the contact patch (radius kept in the
+  // manifold), against the material's crushing strength. A building's upper part landing on rubble gives
+  // hundreds of MPa; a steel beam set down on blocks a few, and they hold it.
+  let side = select(cold[m * CS + 5u].w, cold[m * CS + 4u].w, light == a);
+  let mat = u32(Hs(u32(side), H_ID).y);
+  let rad = max(man[base + M_JT].w, 0.05);
+  // (the solver limits the mass ratio to P_RATIO, so the impulse it took is that much smaller than what really
+  // stops the heavy body: the real one is scaled back)
+  let real = out.y * max(1.0, il / (P_RATIO * ih));
+  let stress = real / P.dt / (3.14159 * rad * rad);
+  if (stress < CRUSH_MPA[min(mat, 7u)] * 1e6) { return; }
   if (atomicExchange(&ints[P.o_crushed + light], 1u) != 0u) { return; }
   let k = atomicAdd(&ints[C_NCRUSH], 1u); if (k >= MAX_CRUSH) { return; }
   let o = P.o_crush + k * 12u; let p = B(light, F_P).xyz; let q = B(light, F_Q); let v = S(light, S_V).xyz;
@@ -2362,6 +2378,31 @@ dMesh.frustumCulled = false; dMesh.castShadow = true; dMesh.receiveShadow = true
 // the per-instance colour buffer, sized for every instance (setColorAt would size it by the current count, 0)
 dMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(MAXD * 3).fill(1), 3); dMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
 scene.add(dMesh);
+// convex chunks: one instanced mesh per cell of the library (made when first needed), drawn from the same
+// read-backs; a chunk's instance is its cell in [-1,1]^3, scaled by the shape's h
+const hullMeshes = new Map(), HULL_CAP = 16384;
+function hullMesh(id) {
+  let m = hullMeshes.get(id); if (m) return m;
+  const H = GpuWorld.hulls.hulls[id], pos = [];
+  for (const f of H.faces) for (let t = 1; t + 1 < f.v.length; t++) for (const i of [f.v[0], f.v[t], f.v[t + 1]]) pos.push(...H.V[i]);
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.computeVertexNormals();
+  m = new THREE.InstancedMesh(g, dMesh.material, HULL_CAP);
+  m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.count = 0; m.frustumCulled = false; m.castShadow = true; m.receiveShadow = true;
+  m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(HULL_CAP * 3).fill(1), 3); m.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  scene.add(m); hullMeshes.set(id, m); return m;
+}
+// where each read-back shape is drawn: box (-1) or a chunk mesh, and its instance there
+function drawTargets(r) {
+  const n = r.pose.length / 10, tgt = new Int32Array(n), idx = new Int32Array(n), cnt = new Map();
+  let nb = 0;
+  for (let k = 0; k < n; k++) {
+    const sh = gpu.shapes[r.slots[k] - 1], h = sh && sh.hull ? sh.hull : 0;
+    if (!h) { tgt[k] = -1; idx[k] = nb++; continue; }
+    const c = cnt.get(h) || 0; if (c >= HULL_CAP) { tgt[k] = -2; continue; }
+    tgt[k] = h; idx[k] = c; cnt.set(h, c + 1);
+  }
+  r.tgt = tgt; r.tidx = idx; r.nBox = nb; r.hullCount = cnt;
+}
 // the same colours as the tower mesh (engine/src/mesh.rs colour): by material and paint, a little variation
 const GLASS = 3, TIMBER = 4;
 const PAINTCOL = [[0.62, 0.61, 0.58], [0.56, 0.56, 0.54], [0.79, 0.77, 0.71], [0.67, 0.65, 0.61], [0.58, 0.57, 0.55]];
@@ -2447,11 +2488,13 @@ function pullDebris() {
     }
     if (LAB.on) labOnRead(r, pr);
     velHist.unshift({ v: r.vel, frame: r.frame }); if (velHist.length > 4) velHist.pop(); lastReadFrame = r.frame; lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
-    const n = Math.min(MAXD, r.pose.length / 10);
-    for (let k = 0; k < n; k++) dMesh.setColorAt(k, debrisColour(r.cols[k], r.slots[k]));
-    const np = pr ? Math.min(MAXD - n, pr.list.length) : 0;
-    for (let k = 0; k < np; k++) dMesh.setColorAt(n + k, debrisColour(pInfo[pr.list[k]].col, 7919 * pr.list[k] + 1));
-    if (dMesh.instanceColor) { dMesh.instanceColor.updateRange.count = (n + np) * 3; dMesh.instanceColor.needsUpdate = true; }
+    drawTargets(r);
+    const n = Math.min(MAXD, r.pose.length / 10), nb = Math.min(MAXD, r.nBox);
+    for (let k = 0; k < n; k++) { const t = r.tgt[k]; if (t === -2) continue; (t < 0 ? dMesh : hullMesh(t)).setColorAt(r.tidx[k], debrisColour(r.cols[k], r.slots[k])); }
+    const np = pr ? Math.min(MAXD - nb, pr.list.length) : 0;
+    for (let k = 0; k < np; k++) dMesh.setColorAt(nb + k, debrisColour(pInfo[pr.list[k]].col, 7919 * pr.list[k] + 1));
+    if (dMesh.instanceColor) { dMesh.instanceColor.updateRange.count = (nb + np) * 3; dMesh.instanceColor.needsUpdate = true; }
+    for (const [h, c] of r.hullCount) { const m = hullMesh(h); m.instanceColor.updateRange.count = c * 3; m.instanceColor.needsUpdate = true; }
     perfAdd('read', performance.now() - t0 + (r.jsMs || 0));
   }, () => { reading = Math.max(0, reading - 1); });
 }
@@ -2476,18 +2519,22 @@ function drawDebris(now) {
       PP.set(r.pose[o], r.pose[o + 1], r.pose[o + 2]); QQ.set(r.pose[o + 3], r.pose[o + 4], r.pose[o + 5], r.pose[o + 6]);
     }
     SS.set(r.pose[o + 7], r.pose[o + 8], r.pose[o + 9]);
-    M4.compose(PP, QQ, SS); dMesh.setMatrixAt(k, M4);
+    M4.compose(PP, QQ, SS);
+    const tg = r.tgt ? r.tgt[k] : -1;
+    if (tg === -1) dMesh.setMatrixAt(r.tidx ? r.tidx[k] : k, M4); else if (tg > 0) hullMesh(tg).setMatrixAt(r.tidx[k], M4);
     if (lab) {
       const sh = gpu.shapes[r.slots[k] - 1], b = sh ? sh.body : 0, vo = (b - 1) * 3;
       const sp = r.vel && vo >= 0 && vo + 2 < r.vel.length ? Math.hypot(r.vel[vo], r.vel[vo + 1], r.vel[vo + 2]) : 0;
-      labDrawn(r.gens[k] * 1048576 + r.slots[k], PP.x, PP.y, PP.z, sp, LAB.balls.has(b) ? 0 : 8 * SS.x * SS.y * SS.z);
+      const hv = tg > 0 ? GpuWorld.hulls.hulls[tg].vol : 1;
+      labDrawn(r.gens[k] * 1048576 + r.slots[k], PP.x, PP.y, PP.z, sp, LAB.balls.has(b) || tg === -2 ? 0 : 8 * SS.x * SS.y * SS.z * hv);
     }
   }
   // particles, blended the same way (matched by slot and generation)
   let np = 0;
+  const nb = r.tgt ? Math.min(MAXD, r.nBox) : n;
   const pr = r.parts, pp = p && p.parts;
   if (pr && pr.list) {
-    np = Math.min(MAXD - n, pr.list.length);
+    np = Math.min(MAXD - nb, pr.list.length);
     const d = pr.data, pd = pp && pp.data;
     for (let k = 0; k < np; k++) {
       const i = pr.list[k], o = i * 12, inf = pInfo[i];
@@ -2499,12 +2546,13 @@ function drawDebris(now) {
         QQ.copy(QA).slerp(QB, a);
       } else { PP.set(d[o], d[o + 1], d[o + 2]); QQ.set(d[o + 6], d[o + 7], d[o + 8], d[o + 9]); }
       SS.set(inf.h[0], inf.h[1], inf.h[2]);
-      M4.compose(PP, QQ, SS); dMesh.setMatrixAt(n + k, M4);
+      M4.compose(PP, QQ, SS); dMesh.setMatrixAt(nb + k, M4);
       if (lab) labDrawn(-(pr.gens[k] * 1048576 + i) - 1, PP.x, PP.y, PP.z, Math.hypot(d[o + 3], d[o + 4], d[o + 5]), 8 * SS.x * SS.y * SS.z);
     }
   }
-  dMesh.count = n + np; debrisShapes = n; particlesDrawn = np;
-  dMesh.instanceMatrix.updateRange.count = (n + np) * 16; dMesh.instanceMatrix.needsUpdate = true;
+  dMesh.count = nb + np; debrisShapes = n; particlesDrawn = np;
+  dMesh.instanceMatrix.updateRange.count = (nb + np) * 16; dMesh.instanceMatrix.needsUpdate = true;
+  for (const [h, m] of hullMeshes) { const c = r.hullCount ? r.hullCount.get(h) || 0 : 0; m.count = c; if (c) { m.instanceMatrix.updateRange.count = c * 16; m.instanceMatrix.needsUpdate = true; } }
 }
 
 // ---- the static tower, falling pieces and their breaking
@@ -2581,7 +2629,22 @@ function addPieces(list, xf, vel, cool) {
   while (k < list.length && room > 0 && sroom >= list[k].boxes.length) { sroom -= list[k].boxes.length; room--; k++; }
   if (k < list.length) { dropped += list.length - k; list = list.slice(0, k); }
   const R = xf ? xf.R : [[1, 0, 0], [0, 1, 0], [0, 0, 1]], qs = xf ? m2q(R) : [0, 0, 0, 1], C = xf ? xf.C : [0, 0, 0], T = xf ? xf.T : [0, 0, 0];
+  // Loose bricks too big to be particles break into the chunks of a random fracture pattern (convex cells that
+  // tile the brick), each its own body flying with the brick's velocity. Not for pieces cut from a moving one
+  // (xf): those are placed on the GPU one for one.
+  if (!xf && setting.chunks && GpuWorld.hulls) {
+    const out = [];
+    for (const b of list) {
+      if (b.id >= 0 || b.boxes.length !== 1) { out.push(b); continue; }
+      const s0 = boxShape(b.boxes[0], 0);
+      if (Math.max(...s0.h) < 0.15) { out.push(b); continue; }
+      const pat = Math.floor(Math.random() * GpuWorld.hulls.patterns.length);
+      for (const sh of GpuWorld.hullShapes(s0.p, [0, 0, 0, 1], s0.h, pat, s0.mat, s0.col)) out.push({ id: -1, boxes: b.boxes, chunk: sh, of: b });
+    }
+    list = out;
+  }
   const bodies = list.map(b => {
+    if (b.chunk) { const v = vel ? vel(b.chunk.p, b.of) : { v: [0, 0, 0], w: [0, 0, 0] }; return { shapes: [{ ...b.chunk }], v: v.v, w: v.w }; }
     let m = 0, c = [0, 0, 0];
     const shapes = b.boxes.map(bx => {
       const s = boxShape(bx, 0);
@@ -2830,9 +2893,11 @@ function crushBodies() {
     for (const slot of gpu.bodyShapes.get(idx) || []) {
       const sh = gpu.shapes[slot - 1]; if (!sh || sh.dead) continue;
       const qs = qmul(c.q, sh.lq || [0, 0, 0, 1]), cen = vadd(c.p, qrot(c.q, sh.lp));
-      const n = sh.h.map(h => Math.max(1, Math.ceil(2 * h / 0.4))), hs = sh.h.map((h, k) => h / n[k]);
+      const n = sh.h.map(h => Math.max(1, Math.ceil(2 * h / 0.4))), hs0 = sh.h.map((h, k) => h / n[k]);
+      // (a chunk fills only part of its box: its rubble cubes are shrunk to its volume)
+      const shrink = sh.hull ? Math.cbrt(GpuWorld.hulls.hulls[sh.hull].vol) : 1, hs = hs0.map(x => x * shrink);
       for (let i = 0; i < n[0]; i++) for (let j = 0; j < n[1]; j++) for (let k = 0; k < n[2]; k++) {
-        const lp = [(2 * i + 1 - n[0]) * hs[0], (2 * j + 1 - n[1]) * hs[1], (2 * k + 1 - n[2]) * hs[2]];
+        const lp = [(2 * i + 1 - n[0]) * hs0[0], (2 * j + 1 - n[1]) * hs0[1], (2 * k + 1 - n[2]) * hs0[2]];
         list.push({ p: vadd(cen, qrot(qs, lp)), v: [0, 0, 0], q: qs, r: Math.cbrt(6 * hs[0] * hs[1] * hs[2] / Math.PI), mat: sh.mat, wait: true });
         info.push({ h: hs, col: sh.col ?? sh.mat });
       }
@@ -3014,6 +3079,7 @@ function setRadius(r) { radius = r; document.querySelectorAll('#tool span').forE
 const SETTINGS = {
   crush: { el: 's-crush', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: v => setParam(2, v) },
   adaptive: { el: 's-adaptive', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: v => { if (gpu && !+v) gpu.substeps = setting.substeps || 12; } },
+  chunks: { el: 's-chunks', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
   particles: { el: 's-particles', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
   crumbs: { el: 's-crumbs', def: 384, fmt: v => `${v}`, apply: v => setParam(0, v) },
   rubble: { el: 's-rubble', def: 64, fmt: v => `${v}`, apply: v => setParam(1, v) },
@@ -3269,7 +3335,7 @@ function labInstall() {
       if (b <= 0) return;
       const gb = gpu.bodies[b - 1];
       if (L.ballNext) { L.balls.add(b); if (gb) gb.labBall = true; return; }
-      const v = list[k].shapes.reduce((s, sh) => s + labBoxVol(sh.h), 0); L.bodyVol.set(b, v); L.gpuVol += v;
+      const v = list[k].shapes.reduce((s, sh) => s + labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1), 0); L.bodyVol.set(b, v); L.gpuVol += v;
       if (gb) { gb.labVol = v; gb.labH = list[k].shapes.length === 1 ? list[k].shapes[0].h.map(x => +x.toFixed(2)) : `${list[k].shapes.length} boxes`; gb.labF = L.f; }
     });
     L.ballNext = false; return idx;

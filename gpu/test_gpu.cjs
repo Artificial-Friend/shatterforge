@@ -499,7 +499,8 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       await look(570, bp);
       w.destroy();
       const last = rows[rows.length - 1];
-      check('particles', bad.below === 0 && bad.inside === 0 && rows[6].onTable > 300 && asleep && skips > 20 && woke > 0 && last.inBox < 5,
+      const perSecond = rows.filter(r => r.t !== undefined && r.onTable !== undefined);   // (probe rows are mixed in)
+      check('particles', bad.below === 0 && bad.inside === 0 && perSecond[6].onTable > 300 && asleep && skips > 20 && woke > 0 && last.inBox < 5,
         { bad, asleepAt7s: asleep, skippedSteps: skips, wokeByBox: woke, box: bp.map(v => +v.toFixed(2)), rows });
     }
     if (scenes.includes('rubble')) {
@@ -541,8 +542,8 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
   }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
-  // the results for docs/STATUS.md (tools/status.py)
-  try {
+  // the results for docs/STATUS.md (tools/status.py): full runs only (a run of a few scenes is not the state)
+  if (process.argv.length <= 2) try {
     const out = process.env.SF_GPU_OUT || require('path').join(__dirname, '..', 'lab-results', 'gpu.json');
     require('fs').mkdirSync(require('path').dirname(out), { recursive: true });
     require('fs').writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), scenes: process.argv.slice(2), results: res }));
