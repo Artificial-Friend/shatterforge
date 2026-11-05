@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'stumps', 'hulls', 'hullpairs', 'hullthrow'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'stumps', 'wakeup', 'hulls', 'hullpairs', 'hullthrow'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -543,6 +543,87 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       check('particles', bad.below === 0 && bad.inside === 0 && perSecond[6].onTable > 300 && asleep && skips > 20 && woke > 0 && last.inBox < 5,
         { bad, asleepAt7s: asleep, skippedSteps: skips, wokeByBox: woke, box: bp.map(v => +v.toFixed(2)), rows });
     }
+    if (scenes.includes('wakeup')) {
+      // small pieces asleep on the ground, a heavy slab (307 t) set down on them, then the pieces woken from
+      // outside: their contacts with the slab were made while they slept (held as static) and carry the slab's
+      // weight share into the woken pieces. A suspect for the lab burst (collapse frame 138: a 2-brick piece under
+      // the upper part, woken, went from rest to 2,800 m/s); it does not reproduce here (0.16 m/s). Nothing may
+      // move faster than 2 m/s.
+      const B = 0.25, list = [];
+      for (const [x, z] of [[-2, -2], [2, -2], [-2, 2], [2, 2], [0, 0]]) list.push({ shapes: [{ p: [x - B, B, z], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete }, { p: [x + B, B, z], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
+      const w = await GpuWorld.create(dev, list, { substeps: 12, sleep: true, maxShapes: 1200, maxBodies: 16 });
+      for (let f = 0; f < 150; f++) w.step(1 / 60);
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      let r = await w.readPose(); const asleepBefore = Array.from(r.sleeping.slice(0, 5)).reduce((a, b) => a + b, 0);
+      const slab = []; for (let i = 0; i < 16; i++) for (let k = 0; k < 16; k++) for (let j = 0; j < 4; j++) slab.push({ p: [-3.75 + i * 0.5, 0.5 + B + 0.005 + j * 0.5, -3.75 + k * 0.5], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete });
+      // set down gently (it does not wake them), then 40 frames later one piece is woken from outside
+      for (const q of slab) q.p[1] -= 0.003;
+      w.addBodies([{ shapes: slab, v: [0, 0, 0], w: [0, 0, 0] }]);
+      let vmax = 0, at = -1; const vs = []; let asleepAt40 = -1;
+      for (let f = 1; f <= 90; f++) {
+        if (f === 40) {
+          await dev.queue.onSubmittedWorkDone(); await settle(); const r0 = await w.readPose();
+          asleepAt40 = Array.from(r0.sleeping.slice(0, 5)).reduce((a, b) => a + b, 0);
+          for (const b of [1, 2, 3, 4, 5]) w.setVelocity(b, [0, 0.01, 0], [0, 0, 0], [...r0.body.slice((b - 1) * 7, (b - 1) * 7 + 3)], [...r0.body.slice((b - 1) * 7 + 3, (b - 1) * 7 + 7)]);
+        }
+        w.step(1 / 60);
+        await dev.queue.onSubmittedWorkDone(); await settle();
+        r = await w.readPose();
+        for (let i = 0; i < w.n; i++) { const v = speed(r.vel, i); if (v > vmax) { vmax = v; at = f; } }
+        if (f <= 12) vs.push(+Math.max(...[0, 1, 2, 3, 4].map(i => speed(r.vel, i))).toFixed(2));
+      }
+      w.destroy();
+      check('wakeup', asleepBefore === 5 && vmax < 2, { asleepBefore, asleepAt40, fastest_ms: +vmax.toFixed(2), at, piecesMax: vs });
+    }
+    if (scenes.includes('stress')) {
+      // Collapse-like rubble at rest must stay at rest: compound pieces of 1-12 bricks piled between stumps, a
+      // heavy slab (288 bricks) landing on them, then 900 frames. Lab collapse (run 3 of 3 full runs): at frame 138
+      // a 2-brick piece at rest went to 2,800 m/s and 20,000 rad/s in one frame and threw the pile apart (575 MJ).
+      // No body may pass 15 m/s after the landing settles (frame 150 on).
+      let rnd = +(globalThis.STRESS_SEED || 7); const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const B = 0.25, fl = [], list = [];
+      for (let i = -3; i <= 3; i += 2) for (let k = -3; k <= 3; k += 2) fl.push({ p: [i * 1.25, 0.5, k * 1.25], q: [0, 0, 0, 1], h: [0.25, 0.5, 0.25], mat: MAT.concrete });
+      for (let n = 0; n < +(globalThis.STRESS_N || 120); n++) {
+        // (on a grid, none overlapping: placed at random, overlapping pieces were thrown out at 18 m/s on the first
+        // frames, which is not what this test is about)
+        const nb = 1 + Math.floor(rand() * 12), sh = [], ax = 2 * Math.floor(rand() * 2);
+        for (let j = 0; j < nb; j++) { const p = [0, 0, 0]; p[ax] = (j % 6) * 0.5; p[1] = Math.floor(j / 6) * 0.5; sh.push({ p, q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete }); }
+        const c = [-4.5 + (n % 3) * 3.25, 1.5 + Math.floor(n / 9) * 1.1, -4.5 + (Math.floor(n / 3) % 3) * 3.25];
+        for (const q of sh) for (let a = 0; a < 3; a++) q.p[a] += c[a];
+        list.push({ shapes: sh, v: [0, -3, 0], w: [(rand() - 0.5) * 2, (rand() - 0.5) * 2, (rand() - 0.5) * 2] });
+      }
+      // chunks too (single convex cells, as the page makes from loose bricks)
+      const top = 1.5 + Math.ceil(+(globalThis.STRESS_N || 120) / 9) * 1.1 + 0.5;
+      for (let n = 0; n < (globalThis.STRESS_NOCHUNK ? 0 : 60); n++) { const c = [-4.5 + (n % 6) * 1.8, top + Math.floor(n / 36) * 0.8, -4.5 + (Math.floor(n / 6) % 6) * 1.8]; for (const s of GpuWorld.hullShapes(c, [0, 0, 0, 1], [B, B, B], n % 16, MAT.concrete).slice(0, 1)) list.push({ shapes: [s], v: [0, -3, 0], w: [0, 0, 0] }); }
+      const slab = []; for (let i = 0; i < 12; i++) for (let k = 0; k < 12; k++) for (let j = 0; j < 2; j++) slab.push({ p: [-2.75 + i * 0.5, top + 2.5 + j * 0.5, -2.75 + k * 0.5], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete });
+      list.push({ shapes: slab, v: [0, -5, 0], w: [0, 0, 0] });
+      const w = await GpuWorld.create(dev, [{ fixed: true, shapes: fl }, ...list], { substeps: 12, sleep: true, maxShapes: 4000, maxBodies: list.length + 64 });
+      if (globalThis.SAND_COL) { w.maxColors = +globalThis.SAND_COL; w.colorLimit = +globalThis.SAND_COL; } if (globalThis.RELAX) w.relaxRounds = +globalThis.RELAX; if (globalThis.STRESS_NORED) w.reduce = false;
+      let vmax = 0, wmax = 0, at = -1, nan = 0; const rows = []; const nOrig = w.n;   // (the dropped pieces fall fast; not counted)
+      const F = +(globalThis.STRESS_F || 900);
+      // the pile asleep by frame 450 is woken by pieces dropped on it (the lab burst came one frame after a body woke)
+      const drop = []; for (let n = 0; n < 12; n++) drop.push({ shapes: [{ p: [(rand() - 0.5) * 6, top + 6 + n * 0.6, (rand() - 0.5) * 6], q: [0, 0, 0, 1], h: [B, B, B], mat: MAT.concrete }], v: [0, -4, 0], w: [0, 0, 0] });
+      for (let f = 1; f <= F; f++) {
+        if (f === 450) { w.addBodies(drop); }
+        w.step(1 / 60);
+        if (f % 5 === 0) {
+          await dev.queue.onSubmittedWorkDone(); await settle();
+          const r = await w.readPose();
+          let fv = 0, fw = 0, fb = 0;
+          // phantom velocity: bodies reported faster than 2 m/s that moved under 2 cm since the last read (5 frames)
+          if (globalThis.prevPose && f >= 150) for (let i = 1; i < nOrig; i++) { const v = speed(r.vel, i); if (v > 2 && Math.hypot(r.body[i * 7] - prevPose[i * 7], r.body[i * 7 + 1] - prevPose[i * 7 + 1], r.body[i * 7 + 2] - prevPose[i * 7 + 2]) < 0.02) { globalThis.phantom = (globalThis.phantom || 0) + 1; } }
+          globalThis.prevPose = r.body.slice();
+          for (let i = 1; i < nOrig; i++) { const v = speed(r.vel, i); const ww = r.ang ? Math.hypot(r.ang[i * 3], r.ang[i * 3 + 1], r.ang[i * 3 + 2]) : 0; if (!Number.isFinite(v)) { nan++; continue; } if (v > fv) { fv = v; fb = i; } fw = Math.max(fw, ww); }
+          if (globalThis.fastPend) { const q = globalThis.fastPend; q.after = [0, 1, 2].map(k => +r.body[q.body * 7 + k].toFixed(3)); q.moved = +Math.hypot(...q.after.map((x, k) => x - q.p[k])).toFixed(3); q.expected = +(q.v * 5 / 60).toFixed(3); globalThis.fastPend = null; }
+          if (f >= 150 && fv > vmax) { vmax = fv; at = f; globalThis.fastInfo = globalThis.fastPend = { body: fb, f, v: +fv.toFixed(2), p: [0, 1, 2].map(k => +r.body[fb * 7 + k].toFixed(3)), vel: [0, 1, 2].map(k => +r.vel[fb * 3 + k].toFixed(2)), w: [0, 1, 2].map(k => +r.ang[fb * 3 + k].toFixed(1)), asleep: r.sleeping[fb] }; }
+          if (f >= 150) wmax = Math.max(wmax, fw);
+          if (f % 60 === 0) rows.push({ f, fastest: +fv.toFixed(2), body: fb, spin: +fw.toFixed(1) });
+          const wb = +(globalThis.STRESS_WATCH || 0); if (wb && f % 10 === 0) (globalThis.watch = globalThis.watch || []).push([f, ...[0, 1, 2].map(k => +r.body[wb * 7 + k].toFixed(2)), ...[0, 1, 2].map(k => +r.vel[wb * 3 + k].toFixed(2)), ...[0, 1, 2].map(k => +r.ang[wb * 3 + k].toFixed(1)), r.sleeping[wb]]);
+        }
+      }
+      w.destroy();
+      check('stress', vmax < 15 && nan === 0, { fastest_ms: +vmax.toFixed(2), at, spin_max: +wmax.toFixed(1), nan, rows, phantom: globalThis.phantom || 0, fastest: globalThis.fastInfo, watch: globalThis.watch });
+    }
     if (scenes.includes('rubble')) {
       // a heap of mixed rubble falls and must come to rest: awake bodies per second, and of those how many are
       // still because they themselves are at rest (kept awake by others in their island) or moving
@@ -583,7 +664,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   // the results for docs/STATUS.md (tools/status.py): full runs only (a run of a few scenes is not the state)
