@@ -3443,7 +3443,25 @@ function labInstall() {
     }
     return evs;
   };
-  gpu.breakBody = (parent, ...rest) => { const v = L.bodyVol.get(parent) || 0; L.gpuVol -= v; L.bodyVol.delete(parent); return brk(parent, ...rest); };
+  gpu.breakBody = (parent, ...rest) => {
+    const v = L.bodyVol.get(parent) || 0; L.gpuVol -= v; L.bodyVol.delete(parent);
+    // the pieces handed over must be the ones just made: an older body among them would be moved to the parent's
+    // pose and given the pieces' velocity
+    (rest[0] || []).forEach((kid, k) => { const gb = kid > 0 && gpu.bodies[kid - 1]; if (gb && gb.labF !== undefined && gb.labF < L.f) { L.badKids = (L.badKids || 0) + 1; labEvent('break_gives_old_body', L.f, { parent, kid, k, made_at: gb.labF, size: gb.labH }); } });
+    // Parts cut free keep a velocity of their own (the page's crush-down: they fall on, slowed by the energy the
+    // section that gave way took), above the parent's, which the GPU had stopped rigidly. That energy comes from
+    // the page, not the solver: it is counted as given, and the energy check allows for it while it spreads to
+    // the bodies they hit (in the collapse at frame 54 the upper part, cut free at -5 m/s, hit the pieces under
+    // it: 0.6-0.9 MJ "gained" by bodies that were there before).
+    const pw = L.prevBodies && L.prevBodies.get(parent), vp = pw ? pw.v : [0, 0, 0];
+    (rest[0] || []).forEach((kid, k) => {
+      const d = (rest[3] || [])[k], gb = kid > 0 && gpu.bodies[kid - 1];
+      if (!gb || !d || Array.isArray(d) || !d.v) return;
+      const m = (gb.labVol || 0) * 2400, e = 0.5 * m * (d.v[0] ** 2 + d.v[1] ** 2 + d.v[2] ** 2 - vp[0] ** 2 - vp[1] ** 2 - vp[2] ** 2);
+      if (e > 0) { L.given = (L.given || 0) + e; L.givenTotal = (L.givenTotal || 0) + e; }
+    });
+    return brk(parent, ...rest);
+  };
   gpu.addParticles = (list) => { const s = addP(list); L.pendingParts = (L.pendingParts || []).concat(s); return s; };
   gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); return killP(i); };
 }
@@ -3519,7 +3537,7 @@ function labOnRead(r, pr) {
     if (y < -1) { below++; labEvent('below_ground_body', f, { body: b, y: +y.toFixed(2), size: gb.labH, made_at: gb.labF }); }
     if (gb.labBall) continue;
     const m = (gb.labVol || 0) * 2400, ek = 0.5 * m * (vx * vx + vy * vy + vz * vz), e = ek + m * 9.81 * y;
-    now.set(b, { gb, vy, e, ek });
+    now.set(b, { gb, vy, e, ek, v: [vx, vy, vz] });
     // the same body as at the last read-back (a reused slot holds another one)
     const was = L.prevBodies && L.prevBodies.get(b);
     if (!was || was.gb !== gb) continue;
@@ -3533,7 +3551,9 @@ function labOnRead(r, pr) {
   L.bad = Math.max(L.bad, bad); L.below = Math.max(L.below, below);
   if (bad) labEvent('nan', f, { count: bad });
   // the energy (kinetic + height) of the bodies present at both read-backs can only fall, unless pushed
-  if (quiet && L.prevBodies && gain > 0.05 * ekPrev + 2000) { L.energyGains++; L.energyGainMax = Math.max(L.energyGainMax, ekPrev > 0 ? gain / ekPrev : 0); labEvent('energy_gain', f, { gain_J: Math.round(gain), kinetic_before_J: Math.round(ekPrev) }); }
+  // (energy the page gave parts it cut free is allowed for, used up as it shows and fading over ~30 read-backs)
+  const given = L.given || 0; L.given = Math.max(0, given - Math.max(0, gain)) * 0.97;
+  if (quiet && L.prevBodies && gain > 0.05 * ekPrev + 2000 + given) { L.energyGains++; L.energyGainMax = Math.max(L.energyGainMax, ekPrev > 0 ? gain / ekPrev : 0); labEvent('energy_gain', f, { gain_J: Math.round(gain), kinetic_before_J: Math.round(ekPrev) }); }
   L.prevBodies = now;
   // optional trace: every body made in the window, and the biggest one, at each read-back within it
   const tr = L.traceWin;
@@ -3595,7 +3615,7 @@ function labReport(wallS) {
     scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: ['concrete frame', 'masonry', 'mass timber'][S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
     pass: checks.every(c => c.pass), checks,
-    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3) },
+    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0) },
     perf: {
       wall_s: +wallS.toFixed(1), steps: stepsDone, steps_skipped: gpu.skipped || 0,
       gpu_ms: { median: +med(gpuMs).toFixed(2), p95: +p95(gpuMs).toFixed(2), max: +Math.max(0, ...gpuMs).toFixed(2) },
@@ -3612,7 +3632,7 @@ function labSummary(rep) {
   const lines = [`${rep.pass ? 'PASS' : 'FAIL'} ${rep.scenario}: ${rep.title}`];
   for (const c of rep.checks) lines.push(`  ${c.pass ? 'ok  ' : 'FAIL'} ${c.name}: ${c.value} (limit ${c.limit})${!c.pass && rep.events ? '' : ''}`);
   const p = rep.physics, q = rep.perf;
-  lines.push(`  physics: roof ${p.roof_m[0]} -> ${p.roof_m[1]} m · dust ${(p.dust_of_building * 100).toFixed(1)}% · breaks ${p.breaks} · crushed ${p.bodies_crushed} · particles ${p.particles_made} (${p.particles_crushed} crushed) · settled ${p.settled_s ?? 'no'} s`);
+  lines.push(`  physics: roof ${p.roof_m[0]} -> ${p.roof_m[1]} m · dust ${(p.dust_of_building * 100).toFixed(1)}% · breaks ${p.breaks} · crushed ${p.bodies_crushed} · particles ${p.particles_made} (${p.particles_crushed} crushed) · settled ${p.settled_s ?? 'no'} s · energy given to parts cut free ${((p.energy_given_by_cuts_J || 0) / 1e6).toFixed(2)} MJ`);
   lines.push(`  perf: ${q.steps} steps (${q.steps_skipped} skipped) in ${q.wall_s} s · GPU ms median ${q.gpu_ms.median} / p95 ${q.gpu_ms.p95} / max ${q.gpu_ms.max} · JS ms median ${q.js_ms.median} / p95 ${q.js_ms.p95} · peak awake ${q.peak.awake}, contacts ${q.peak.contacts}, particles ${q.peak.particles}`);
   if (q.gpu_stages_ms_at_peak) lines.push(`  GPU stages at the slowest step (ms): ${Object.entries(q.gpu_stages_ms_at_peak).map(([k, v]) => `${k} ${v}`).join(' · ')}`);
   for (const [k, e] of Object.entries(rep.events)) lines.push(`  events ${k}: ${e.n} · first ${JSON.stringify(e.first.slice(0, 3))}`);

@@ -40,7 +40,7 @@ At every read-back, against the physics:
 | Pieces below the ground (centre under −1 m) | 0 |
 | Rebounds over half the impact speed. A piece falling faster than 2 m/s moves up at more than half that speed at the next read-back. | 0 (concrete restitution is 0.1) |
 | Launches: pieces thrown up faster than 5 m/s | 0 |
-| Energy gains: the kinetic plus height energy of the bodies present at both read-backs rises by more than 5% (+2 kJ) | 0 |
+| Energy gains: the kinetic plus height energy of the bodies present at both read-backs rises by more than 5% (+2 kJ), beyond the energy the page gave parts it cut free (below) | 0 |
 | Roof fall, for cut scenarios | at least one storey |
 | Settled: everything asleep before the end | yes |
 
@@ -49,6 +49,8 @@ Pushes from outside are exempt for a while:
 - after a ball is fired: 120 frames
 
 The rebound, launch and energy checks do not count during those windows.
+
+**Energy given to parts cut free.** When the engine breaks a falling body, the parts cut free keep falling at their own velocity: the speed before the hit, less the energy the section that gave way took to crush. The GPU had already stopped the whole body rigidly by then (the engine answers a few frames later), so this energy comes from the page, not the solver. The lab counts it (`energy_given_by_cuts_J`, 58 MJ in the first 60 frames of `collapse`). The energy check allows for it while it spreads to the bodies those parts hit, used up as it shows and fading by 3% per read-back. Without it, the check counted the upper part (cut free at −5 m/s at frame 53) landing on the pieces under it as 0.6–0.9 MJ made from nothing. The rebound and launch checks are unchanged.
 
 ## Report
 
