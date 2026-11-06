@@ -4,7 +4,7 @@
 // same frames. Read-backs arrive LAB.readLag frames after they were issued and engine jobs LAB.jobLag frames
 // after they were sent, as on a real machine. What would be drawn is checked every frame; the physics at every
 // read-back. The result is a report of checks (pass/fail with limits), events and a time series.
-function labTruthStatic() { let v = 0; for (let k = 0; k < E.chunk_count(); k++) v += E.chunk_volume(k); return v + staticCellVol; }
+function labTruthStatic() { let v = 0; for (let k = 0; k < E.chunk_count(); k++) v += E.chunk_volume(k); return v; }
 function labBoxVol(h) { return 8 * h[0] * h[1] * h[2]; }
 function labInstall() {
   // the volume of everything the GPU holds, kept as it changes (the ball is not part of the building)
@@ -55,6 +55,15 @@ function labInstall() {
     });
     return brk(parent, ...rest);
   };
+  // a piece broken on the GPU: the spare takes its part's volume from the piece; a spare given up loses it
+  const snp = gpu.snapped.bind(gpu), kill = gpu.killBody.bind(gpu);
+  gpu.snapped = (i, j, imp) => {
+    const r = snp(i, j, imp);
+    const moved = (gpu.bodyShapes.get(j) || []).reduce((t, k) => { const sh = gpu.shapes[k - 1]; return t + (sh ? labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1) : 0); }, 0);
+    if (L.bodyVol.has(i) && moved > 0) { L.bodyVol.set(i, L.bodyVol.get(i) - moved); L.bodyVol.set(j, moved); const gb = gpu.bodies[j - 1]; if (gb) { gb.labVol = moved; gb.labF = L.f; gb.labH = 'spare'; } }
+    return r;
+  };
+  gpu.killBody = (b) => { const v = L.bodyVol.get(b) || 0; L.gpuVol -= v; L.bodyVol.delete(b); return kill(b); };
   gpu.addParticles = (list) => { const s = addP(list); L.pendingParts = (L.pendingParts || []).concat(s); return s; };
   gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); return killP(i); };
 }
@@ -114,7 +123,7 @@ function labFrameChecks() {
       if (j !== undefined) {
         const dx = d.pos[k * 3] - prev.pos[j * 3], dy = d.pos[k * 3 + 1] - prev.pos[j * 3 + 1], dz = d.pos[k * 3 + 2] - prev.pos[j * 3 + 2];
         const m = Math.hypot(dx, dy, dz), lim = 0.25 + 2 * Math.max(d.bound[k], prev.bound[j]) / 60;
-        if (m > lim) { L.teleports++; labEvent('teleport', f, { key, moved_m: +m.toFixed(2), limit_m: +lim.toFixed(2) }); }
+        if (m > lim) { L.teleports++; const sh = key >= 0 ? gpu.shapes[(key % 1048576) - 1] : null, gb = sh ? gpu.bodies[sh.body - 1] : null; labEvent('teleport', f, { key, moved_m: +m.toFixed(2), limit_m: +lim.toFixed(2), body: sh ? sh.body : null, made: gb && gb.labF, size: gb && gb.labH, from: [prev.pos[j * 3], prev.pos[j * 3 + 1], prev.pos[j * 3 + 2]].map(v => +v.toFixed(2)), to: [d.pos[k * 3], d.pos[k * 3 + 1], d.pos[k * 3 + 2]].map(v => +v.toFixed(2)) }); }
       } else {
         const gone = L.goneAt.get(key);
         if (gone !== undefined && f - gone <= 30) { L.flickers++; labEvent('flicker', f, { key, absent_frames: f - gone }); }
@@ -137,6 +146,8 @@ function labOnRead(r, pr) {
     const o = (b - 1) * 7, y = r.body[o + 1], vo = (b - 1) * 3;
     const vx = r.vel[vo], vy = r.vel[vo + 1], vz = r.vel[vo + 2];
     if (![r.body[o], y, r.body[o + 2], vx, vy, vz].every(Number.isFinite)) { bad++; continue; }
+    // (a spare body parked for a break on the GPU: not there yet; once placed, it counts as new)
+    if (gb.spare !== undefined && y < -500) continue;
     if (y < -1) { below++; labEvent('below_ground_body', f, { body: b, y: +y.toFixed(2), size: gb.labH, made_at: gb.labF }); }
     if (gb.labBall) continue;
     const m = (gb.labVol || 0) * 2400, ek = 0.5 * m * (vx * vx + vy * vy + vz * vz), e = ek + m * 9.81 * y;
@@ -227,12 +238,13 @@ function labReport(wallS) {
     scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: ['concrete frame', 'masonry', 'mass timber', 'mixed'][S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
     pass: checks.every(c => c.pass), checks,
-    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0 },
+    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps },
     perf: {
       wall_s: +wallS.toFixed(1), steps: stepsDone, steps_skipped: gpu.skipped || 0,
       gpu_ms: { median: +med(gpuMs).toFixed(2), p95: +p95(gpuMs).toFixed(2), max: +Math.max(0, ...gpuMs).toFixed(2) },
       gpu_stages_ms_at_peak: L.peakStages,
       js_ms: { median: +med(jsMs).toFixed(2), p95: +p95(jsMs).toFixed(2), max: +Math.max(0, ...jsMs).toFixed(2) },
+      engine_ms: { jobs: engineMsLog.length, median: +med(engineMsLog.slice()).toFixed(1), p95: +p95(engineMsLog.slice()).toFixed(1), max: +Math.max(0, ...engineMsLog).toFixed(1) },
       peak: { bodies: Math.max(0, ...se.map(x => x.bodies)), awake: Math.max(0, ...se.map(x => x.awake)), contacts: Math.max(0, ...se.map(x => x.contacts)), particles: Math.max(0, ...se.map(x => x.parts)), particles_moving: Math.max(0, ...se.map(x => x.pAwake)), drawn: Math.max(0, ...se.map(x => x.drawn)) },
       work: { contact_substeps: L.work.cs, particle_substeps: L.work.ps },
     },
@@ -244,8 +256,8 @@ function labSummary(rep) {
   const lines = [`${rep.pass ? 'PASS' : 'FAIL'} ${rep.scenario}: ${rep.title}`];
   for (const c of rep.checks) lines.push(`  ${c.pass ? 'ok  ' : 'FAIL'} ${c.name}: ${c.value} (limit ${c.limit})${!c.pass && rep.events ? '' : ''}`);
   const p = rep.physics, q = rep.perf;
-  lines.push(`  physics: roof ${p.roof_m[0]} -> ${p.roof_m[1]} m · dust ${(p.dust_of_building * 100).toFixed(1)}% · breaks ${p.breaks} · crushed ${p.bodies_crushed} · particles ${p.particles_made} (${p.particles_crushed} crushed) · settled ${p.settled_s ?? 'no'} s · energy given to parts cut free ${((p.energy_given_by_cuts_J || 0) / 1e6).toFixed(2)} MJ · rubble on floors up to ${p.rubble_on_floors_max_t} t · ${p.joints_cracked} joints cracked`);
-  lines.push(`  perf: ${q.steps} steps (${q.steps_skipped} skipped) in ${q.wall_s} s · GPU ms median ${q.gpu_ms.median} / p95 ${q.gpu_ms.p95} / max ${q.gpu_ms.max} · JS ms median ${q.js_ms.median} / p95 ${q.js_ms.p95} · peak awake ${q.peak.awake}, contacts ${q.peak.contacts}, particles ${q.peak.particles}`);
+  lines.push(`  physics: roof ${p.roof_m[0]} -> ${p.roof_m[1]} m · dust ${(p.dust_of_building * 100).toFixed(1)}% · breaks ${p.breaks} · crushed ${p.bodies_crushed} · particles ${p.particles_made} (${p.particles_crushed} crushed) · settled ${p.settled_s ?? 'no'} s · energy given to parts cut free ${((p.energy_given_by_cuts_J || 0) / 1e6).toFixed(2)} MJ · rubble on floors up to ${p.rubble_on_floors_max_t} t · ${p.joints_cracked} joints cracked · ${p.gpu_breaks} broken on the GPU`);
+  lines.push(`  perf: ${q.steps} steps (${q.steps_skipped} skipped) in ${q.wall_s} s · GPU ms median ${q.gpu_ms.median} / p95 ${q.gpu_ms.p95} / max ${q.gpu_ms.max} · JS ms median ${q.js_ms.median} / p95 ${q.js_ms.p95} · engine jobs ${q.engine_ms.jobs}, ms median ${q.engine_ms.median} / p95 ${q.engine_ms.p95} / max ${q.engine_ms.max} · peak awake ${q.peak.awake}, contacts ${q.peak.contacts}, particles ${q.peak.particles}`);
   if (q.gpu_stages_ms_at_peak) lines.push(`  GPU stages at the slowest step (ms): ${Object.entries(q.gpu_stages_ms_at_peak).map(([k, v]) => `${k} ${v}`).join(' · ')}`);
   for (const [k, e] of Object.entries(rep.events)) lines.push(`  events ${k}: ${e.n} · first ${JSON.stringify(e.first.slice(0, 3))}`);
   return lines.join('\n');
@@ -258,7 +270,7 @@ async function labRun() {
     draw: { n: 0, vol: 0, keys: new Float64Array(4096), pos: new Float32Array(4096 * 3), bound: new Float32Array(4096) },
     Thist: [], holeFrames: 0, holeMax: 0, inHole: false, holesRecovered: 0, dupFrames: 0, dupMax: 0, flickers: 0, teleports: 0, goneAt: new Map(), prevDraw: null,
     bad: 0, below: 0, bounces: 0, bounceMax: 0, launches: 0, launchMax: 0, energyGains: 0, energyGainMax: 0, prevBodies: null, quietFrom: -1,
-    injectedAt: -1000, settledAt: null, timeline: [], trace: [], traceEv: [], traceWin: st.trace || null, events: {}, series: [], jsMs: [], work: { cs: 0, ps: 0 }, peakStages: null, peakGpu: 0, volTol: 0.05,
+    injectedAt: -1000, settledAt: null, timeline: [], trace: [], traceEv: [], traceWin: st.trace || null, events: {}, series: [], jsMs: [], work: (engineMsLog.length = 0, { cs: 0, ps: 0 }), peakStages: null, peakGpu: 0, volTol: 0.05,
   });
   // the defaults, whatever this browser has saved (the report lists them)
   for (const [k, d] of Object.entries(SETTINGS)) { setting[k] = d.def; d.apply(d.def); }
@@ -270,7 +282,7 @@ async function labRun() {
   $('start').hidden = true; physicsPaused = false;
   $('bench').hidden = false; $('bench-title').textContent = `Lab: ${name} (${st.done.length + 1} of ${st.done.length + st.queue.length})`;
   labInstall();
-  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0) + staticCellPubVol;
+  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
   try { const info = dev.adapterInfo || (dev.adapter && dev.adapter.info); L.adapter = info ? `${info.vendor} ${info.architecture} ${info.description || ''}`.trim() : ''; } catch (e) {}
   const tw = performance.now();
   let lastShow = 0;

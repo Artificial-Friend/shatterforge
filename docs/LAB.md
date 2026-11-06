@@ -116,5 +116,49 @@ The runner prints the summaries and writes `lab-results/<scenario>.json` and `al
 - **The upper part rising after it landed.** A trace of frames 44–62 (`collapse --frames 70 --trace 44:62`) showed the upper part (1,554 bricks) going from −6.34 to +1.11 m/s on the stumps at frame 51 and then rising again (0.44, then 0.64 m/s); the roof rose 0.5 m over frames 60–90 of the full run. The mass-ratio limit was making momentum, and the body's supports were solved in the parallel overflow pass. Both are fixed (docs/GPU.md, "Still to do", and GPU test `stumps`). After the fixes the upper part lands from −6.0 to −0.56 and −0.17 m/s (`--frames 60 --trace 44:56`). On 150 frames: rebounds 7 → 4, launches 1 → 0, energy gains 6 → 2.
 - **Open.** Pieces of 11–27 bricks next to the upper part are still thrown out at 2–4 m/s when it lands (frames 50–57), and one energy gain remains at frame 54, just after the upper part breaks.
 - **Open (mixed).** With the ground storey cut, the mixed building comes down only partly in 600 frames: roof 22.39 → 19.9 m against the 3 m the check asks (software GPU, full length). With structure checks every frame (a bug: the rubble interval was 1 ms) it fell 5.6 m in 240 frames; it also shows 11 rebounds and 18 energy gains, of the same kind as the collapse's.
-- **Open (irregular fracture).** With bricks on fracture surfaces drawn as Voronoi cells (docs/STRUCTURE.md), the collapse (150 frames) shows 3–5 frames of drawn volume below what exists, by 0.07–0.4 m³: crumbs not yet drawn for one or two frames. With it off (`SF_NO_FRAC_CELLS=1`), none. When a hole appears, the lab now lists the bodies and particles that exist but are not drawn (`undrawn` in the hole event).
+- **Open (irregular fracture).** With convex cells in the engine (docs/STRUCTURE.md), the collapse (150 frames) shows 1–4 frames of drawn volume below what exists, by 0.06–0.4 m³. With the page's former skin of cells it was 3–5. With cells off (`SF_NO_FRAC_CELLS=1`), there are none. When a hole appears, the lab lists the bodies and particles that exist but are not drawn (`undrawn` in the hole event).
 - **Varies by run (collapse energy gains).** Full-length collapse runs today counted 2, 24 and 49 small energy gains (the last after irregular fracture: 4–250 kJ each from frame 235 on, no launches). The GPU's atomics make each run differ; a count from one run is not a trend.
+
+## The foundation changes, compared (November 2026)
+
+Each line is one collapse run of 150 frames on the software GPU (`node game/lab.cjs collapse --frames 150`), counted from its events. Runs vary (GPU atomics), so there are three of each. The raw lines are in `lab-results/cmp_*.txt`.
+
+**Convex cells against boxes** (spring-network solver, no GPU breaks):
+
+| Run | Hole frames | Jumps | Rebounds | Launches | Engine breaks | Roof (m) |
+| --- | --- | --- | --- | --- | --- | --- |
+| cells | 2 / 3 / 2 | 0 / 0 / 0 | 4 / 6 / 9 | 1 / 0 / 1 | 24 / 74 / 85 | 15.2 / 14.0 / 14.0 |
+| boxes (`SF_NO_FRAC_CELLS=1`) | 0 / 0 / 0 | 0 / 0 / 31 | 12 / 11 / 21 | 2 / 2 / 8 | 86 / 67 / 94 | 13.6 / 15.1 / 12.8 |
+
+Rebounds are counted by the check "rebounds over half the impact speed (while quiet)". With cells there are fewer, because spalled cells fall as particles. When they fell as chunk bodies, slivers 6 cm thick rebounded (9 and 19 rebounds in two runs).
+
+**Breaking on the GPU** (cells on; docs/GPU.md):
+
+| Run | Hole frames | Jumps | Rebounds | Launches | Engine breaks | GPU breaks | Roof (m) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| first version | 1 / 0 / 1 | 0 / 1 / 0 | 1 / 4 / 1 | 1 / 0 / 1 | 10 / 2 / 3 | 25 / 35 / 27 | 15.9 / 15.9 / 15.9 |
+| hits on a broken piece go to its parts | 0 / 0 / 0 | 0 / 0 / 0 | 5 / 2 / 1 | 5 / 0 / 0 | 2 / 2 / 18 | 26 / 26 / 25 | 15.9 / 15.8 / 15.9 |
+| breaks batched into one job, parts not re-armed (kept) | 1 / 4 / 1 | 0 / 0 / 0 | 6 / 16 / 12 | 2 / 2 / 2 | 69 / 76 / 76 | 33 / 44 / 40 | 13.0 / 13.8 / 13.2 |
+| off (`SF_NO_SNAP=1`), same build as the first | 1 / 4 / 1 | 11 / 5 / 0 | 13 / 29 / 2 | 2 / 6 / 0 | 106 / 115 / 24 | 0 | 11.5 / 12.4 / 15.9 |
+
+What went wrong in the first two versions:
+- A break on the GPU queued a job for the engine at the head of the line, and every part was armed with a plan of its own. Parts broke again as they kept landing, one job every 4 frames.
+- The engine's answers to the hits (crushing, the part cut free) never had their turn. The building stopped coming down: the roof was at 15.9 m, against 11.5–13.8 m otherwise.
+
+What the kept version does:
+- All of a frame's breaks go in one job.
+- The parts get no plan of their own; the engine's answer to the hit refines the break from there.
+- No run of it has jumped. Runs without it jumped in two of three.
+
+**Open: rebounds.** With every change, these runs count more rebounds than the last commit before the spring-network solver did (3 in its one 150-frame run; there have been 0–29 since). They come from pieces of 15–95 bricks landing on rubble at 2–5 m/s (`bounce` events). It is not yet known whether the cause is the solver's breaks (more pieces of that size) or contacts.
+
+**Full-length collapse with all three changes** (600 frames, software GPU, `tools/check.sh lab`, 6 November):
+- The building comes down much further: the roof falls 13.73 m (18.64 → 4.91 m). The last full run before this work fell 2.4 m.
+- Energy gains are down to 0 (they were 49).
+- 7 hole frames (they were 6).
+- Rebounds are up to 29 (they were 2), and 16 pieces are thrown up faster than 5 m/s (there were 0).
+  - At frame 53, a 3-box piece went from −2.0 to +12.2 m/s.
+  - In the same frame, a spare body went from −2.7 to +6.8 m/s, just after its piece broke on the GPU.
+- 55 pieces broke on the GPU.
+
+**Open:** these launches. One of them is a body that a GPU break had just made.

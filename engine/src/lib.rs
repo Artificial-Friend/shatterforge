@@ -10,6 +10,7 @@ pub mod mesh;
 pub mod player;
 pub mod game;
 pub mod structure;
+pub mod hull;
 mod validation;
 
 #[cfg(target_arch = "wasm32")]

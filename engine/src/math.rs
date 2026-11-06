@@ -92,6 +92,11 @@ pub fn sin(x: f32) -> f32 {
 }
 #[inline] pub fn cos(x: f32) -> f32 { sin(x + core::f32::consts::FRAC_PI_2) }
 #[inline] pub fn floor(x: f32) -> f32 { let t = x as i32 as f32; if t > x { t - 1.0 } else { t } }
+#[inline] pub fn sqrt64(x: f64) -> f64 {
+    #[cfg(target_arch = "wasm32")] { use core::arch::wasm32::*; f64x2_extract_lane::<0>(f64x2_sqrt(f64x2_splat(x))) }
+    #[cfg(not(target_arch = "wasm32"))] { if x <= 0.0 { 0.0 } else { x.sqrt() } }
+}
+#[inline] pub fn floor64(x: f64) -> f64 { let t = x as i64 as f64; if t > x { t - 1.0 } else { t } }
 
 #[cfg(test)]
 mod tests {

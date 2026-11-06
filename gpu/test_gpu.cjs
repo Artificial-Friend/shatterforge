@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'stumps', 'wakeup', 'hulls', 'hullpairs', 'hullthrow'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -542,6 +542,34 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       const perSecond = rows.filter(r => r.t !== undefined && r.onTable !== undefined);   // (probe rows are mixed in)
       check('particles', bad.below === 0 && bad.inside === 0 && perSecond[6].onTable > 300 && asleep && skips > 20 && woke > 0 && last.inBox < 5,
         { bad, asleepAt7s: asleep, skippedSteps: skips, wokeByBox: woke, box: bp.map(v => +v.toFixed(2)), rows });
+    }
+    if (scenes.includes('snap')) {
+      // breaking on the GPU in the step of the hit (setSnap): a column of two 0.5 m concrete cubes (600 kg) falls
+      // 1 m onto the ground (4.4 m/s: about 2.7 kN s to stop it), armed to break between its cubes at 500 N s; a
+      // second one beside it armed at 10 MN s. The first breaks in the step it lands: the top cube is a body of its
+      // own from then on, in the same place (it moves no further between frames than its speed allows) with the
+      // speed it had; it ends resting on the lower one. The second never breaks.
+      const col = (x) => ({ shapes: [{ p: [x, 1.25, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }, { p: [x, 1.75, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
+      const w = await GpuWorld.create(dev, [col(0), col(3)], { substeps: 12, sleep: true, maxShapes: 16, maxBodies: 8 });
+      const spare = w.setSnap(1, 500, [2]), spare2 = w.setSnap(2, 1e7, [4]);
+      const topOf = (r) => { const k = Array.from(r.slots).indexOf(2); return [r.pose[k * 10], r.pose[k * 10 + 1], r.pose[k * 10 + 2]]; };
+      let prev = null, jump = 0, snapAt = -1, hitAt = -1, vBefore = 0, vAfter = null; const snaps = [];
+      for (let f = 1; f <= 120; f++) {
+        w.step(1 / 60);
+        await dev.queue.onSubmittedWorkDone(); await settle();
+        const r = await w.readPose();
+        for (const s of w.takeSnaps()) { snaps.push({ f, body: s.body, spare: s.spare }); if (snapAt < 0) snapAt = f; }
+        const t = topOf(r);
+        if (prev) jump = Math.max(jump, Math.hypot(t[0] - prev[0], t[1] - prev[1], t[2] - prev[2]) - (Math.abs(vBefore) + 1) / 60);
+        const lowY = r.pose[Array.from(r.slots).indexOf(1) * 10 + 1];
+        if (hitAt < 0 && lowY < 0.27) hitAt = f;
+        if (snapAt < 0) vBefore = speed(r.vel, 0); else if (vAfter === null) vAfter = speed(r.vel, spare - 1);
+        prev = t;
+      }
+      const r = await w.readPose(), top = topOf(r);
+      w.destroy();
+      const ok = snaps.length === 1 && snaps[0].body === 1 && snaps[0].spare === spare && spare2 > 0 && Math.abs(snapAt - hitAt) <= 2 && jump < 0.05 && Math.abs(top[1] - 0.75) < 0.05;
+      check('snap', ok, { snaps, hitAt, snapAt, jump_m: +jump.toFixed(3), vBefore: +vBefore.toFixed(2), spareSpeedAfter: vAfter == null ? null : +vAfter.toFixed(2), topRestsAt_m: +top[1].toFixed(3) });
     }
     if (scenes.includes('wakeup')) {
       // a moving body hits sleeping bricks: in that step they count as fixed and the contact takes the whole

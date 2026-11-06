@@ -13,8 +13,13 @@ if [ "$level" != status ]; then
   echo "== engine tests"
   (cd engine && cargo test --release 2>&1) > lab-results/engine.txt; grep -E "test result|FAILED|panicked" lab-results/engine.txt | head -5
   echo "== wasm and page build"
-  (cd engine && RUSTC_BOOTSTRAP=1 cargo build --release --target wasm32-unknown-unknown -Zbuild-std=core,alloc,panic_abort 2>&1 | tail -1) && python3 game/build_tower.py
+  # (a failed wasm build stops here: the page was built on with the last good wasm, and the checks ran on it)
+  if ! (cd engine && RUSTC_BOOTSTRAP=1 cargo build --release --target wasm32-unknown-unknown -Zbuild-std=core,alloc,panic_abort > ../lab-results/wasm.txt 2>&1); then
+    grep -E "^error" -A4 lab-results/wasm.txt | head -20; echo "FAIL wasm build"; exit 1
+  fi
+  python3 game/build_tower.py
   echo "== GPU suite"
+  node gpu/test_hulls.cjs
   node gpu/test_gpu.cjs 2>&1 | grep -E "^(PASS|FAIL)" | cut -c1-120
   case "$level" in
     lab) node game/lab.cjs quick 2>&1 | grep -v "GL Driver" | grep -v " of " ;;

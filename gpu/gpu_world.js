@@ -51,6 +51,7 @@ struct Params {
   o_ptab: u32, ptab_mask: u32, o_big: u32, o_mslot: u32,   // contact reduction (see red_count)
   o_crushed: u32, o_crush: u32, crush_ratio: f32, crush_dv: f32,   // crushing (see crush)
   o_hull: u32, o_hl: u32, dbg: u32, ovf_push: f32,   // the convex chunk library, in the shape buffer
+  o_plan: u32, o_spart: u32, o_snap: u32, pad10: u32,   // breaking on the GPU (see snap_split)
 }
 struct ColorU { c: u32 }
 
@@ -644,6 +645,7 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
   if (kid != 0u || par == 0u) { return; }
   setB(par, F_P, vec4f(0.0, -1000.0, 0.0, 0.0)); setB(par, F_FL, vec4f(1.0, 0.0, -1000.0, 0.0));
   setS(par, S_V, vec4f(0.0)); setS(par, S_W, vec4f(0.0));
+  st(P.o_plan + par * SN + 2u, 0u);
 }
 
 // wake every sleeping body (the static structure under them changed)
@@ -1168,6 +1170,66 @@ const CRUSH_MPA = array<f32, 8>(30.0, 10.0, 250.0, 50.0, 8.0, 1.0, 1e9, 10.0);
   st(o + 2u, bitcast<u32>(p.x)); st(o + 3u, bitcast<u32>(p.y)); st(o + 4u, bitcast<u32>(p.z));
   st(o + 5u, bitcast<u32>(q.x)); st(o + 6u, bitcast<u32>(q.y)); st(o + 7u, bitcast<u32>(q.z)); st(o + 8u, bitcast<u32>(q.w));
   st(o + 9u, bitcast<u32>(v.x)); st(o + 10u, bitcast<u32>(v.y)); st(o + 11u, bitcast<u32>(v.z));
+}
+
+// Breaking on the GPU, in the step of the hit. A falling piece can carry a plan from the engine (GpuWorld.setSnap):
+// its weakest section, the normal impulse in one step that breaks it there, and the two bodies it breaks into
+// (the part it keeps and a spare body for the other, made in advance with that part's mass). When this step's
+// contacts on it pass the impulse, it breaks at once: the spare takes the other part's shapes and the motion of
+// the piece at its centre, the piece keeps the rest with that part's mass. The engine is told afterwards (the
+// list at o_snap) and refines the break when it answers; it used to answer a hit about 4 frames late.
+// Plan (SN words per body): impulse (f32 N s), spare body, state (1 armed, 2 broke this step, 3 done), impulse
+// this step (u32 N s), kept part: centre of mass (3), rotation (4) in the body's frame, inverse mass, inverse
+// inertia (3); other part: centre of mass (3), rotation (4).
+const SN = 24u; const C_NSNAP_MAX = 256u;
+fn plan(i: u32, k: u32) -> u32 { return ld(P.o_plan + i * SN + k); }
+fn planf(i: u32, k: u32) -> f32 { return bitcast<f32>(plan(i, k)); }
+fn plan3(i: u32, k: u32) -> vec3f { return vec3f(planf(i, k), planf(i, k + 1u), planf(i, k + 2u)); }
+fn plan4(i: u32, k: u32) -> vec4f { return vec4f(planf(i, k), planf(i, k + 1u), planf(i, k + 2u), planf(i, k + 3u)); }
+@compute @workgroup_size(64) fn snap_acc(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let m = P.cur_base + mi; let base = m * MS;
+  let hd = man[base]; let j = u32(man[base + M_OUT].y + 0.5);
+  if (j == 0u) { return; }
+  for (var k = 0u; k < 2u; k++) {
+    let i = u32(select(hd.y, hd.x, k == 0u));
+    if (i != 0u && plan(i, 2u) == 1u) { atomicAdd(&ints[P.o_plan + i * SN + 3u], j); }
+  }
+}
+@compute @workgroup_size(64) fn snap_split(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x + 1u; if (i >= P.n1) { return; }
+  let state = plan(i, 2u);
+  if (state == 2u) { st(P.o_plan + i * SN + 2u, 3u); return; }
+  if (state != 1u) { return; }
+  let acc = f32(plan(i, 3u)); st(P.o_plan + i * SN + 3u, 0u);
+  if (acc < planf(i, 0u)) { return; }
+  let k = atomicAdd(&ints[P.o_snap], 1u); if (k >= C_NSNAP_MAX) { return; }
+  let j = plan(i, 1u);
+  let p = B(i, F_P); let q = B(i, F_Q); let v = S(i, S_V); let w = S(i, S_W).xyz;
+  // the other part: the spare, where that part is, moving as the piece did there
+  let pb = p.xyz + qrot(q, plan3(i, 15u)); let qb = normalize(qmul(q, plan4(i, 18u)));
+  setB(j, F_P, vec4f(pb, B(j, F_P).w)); setB(j, F_Q, qb); setB(j, F_FL, vec4f(0.0, pb)); setB(j, F_RQ, qb);
+  let ilb = B(j, F_IL); setB(j, F_IL, vec4f(ilb.xyz, 0.0));
+  setS(j, S_V, vec4f(v.xyz + cross(w, pb - p.xyz), 1.0)); setS(j, S_W, vec4f(w, 0.0));
+  // the piece keeps its own part, with that part's mass
+  let pa = p.xyz + qrot(q, plan3(i, 4u)); let qa = normalize(qmul(q, plan4(i, 7u)));
+  setB(i, F_P, vec4f(pa, planf(i, 11u))); setB(i, F_Q, qa); setB(i, F_IL, vec4f(plan3(i, 12u), 0.0));
+  setB(i, F_FL, vec4f(0.0, pa)); setB(i, F_RQ, qa);
+  setS(i, S_V, vec4f(v.xyz + cross(w, pa - p.xyz), v.w));
+  st(P.o_plan + i * SN + 2u, 2u);
+  let o = P.o_snap + 1u + 4u * k; st(o, i); st(o + 1u, j); st(o + 2u, P.cur_base); st(o + 3u, bitcast<u32>(acc));
+}
+// the shapes of a piece that broke this step go to their part's body, in its frame
+@compute @workgroup_size(64) fn snap_shapes(@builtin(global_invocation_id) g: vec3u) {
+  let s = g.x + 1u; if (s >= P.ns1 || dead(s)) { return; }
+  let i = sbody(s); if (i == 0u || plan(i, 2u) != 2u) { return; }
+  let other = ld(P.o_spart + s) == 2u;
+  let c = select(plan3(i, 4u), plan3(i, 15u), other); let r = select(plan4(i, 7u), plan4(i, 18u), other);
+  let rc = vec4f(-r.xyz, r.w);
+  let id = Hs(s, H_ID);
+  if (other) { setHs(s, H_ID, vec4f(f32(plan(i, 1u)), id.yzw)); }
+  setHs(s, H_LP, vec4f(qrot(rc, Hs(s, H_LP).xyz - c), 0.0));
+  setHs(s, H_LQ, normalize(qmul(rc, Hs(s, H_LQ))));
 }
 
 @compute @workgroup_size(64) fn finish(@builtin(global_invocation_id) g: vec3u) {
@@ -1741,6 +1803,7 @@ class GpuWorld {
     take('hl', 1 + this.maxPairs); take('crushed', cb1); take('crush', 12 * 256);
     this.maxEvents = 512; take('events', 12 * this.maxEvents);
     this.maxInherit = 4096; take('inherit', 12 * this.maxInherit);
+    take('plan', 24 * cb1); take('spart', cs1); take('snap', 1 + 4 * 256);
     this.L = L; this.nInts = o;
 
     const bod = new Float32Array(cb1 * 20), sol = new Float32Array(cb1 * 24), shp = new Float32Array(cs1 * 32);
@@ -1769,7 +1832,8 @@ class GpuWorld {
     this.evSpeed = opt.eventSpeed ?? 2.0; this.evEnergy = opt.eventEnergy ?? 0;   // events off unless asked for
     // a ring of stats read-back buffers: the browser delivers mappings late, so one pending read must not hold
     // back the next step's stats and impact events
-    this.statBufs = [0, 1, 2].map(() => ({ buf: buf(64 + 48 * this.maxEvents + 33 * 4 + 48 * 256, U.COPY_DST | U.MAP_READ), busy: false }));
+    this.statBufs = [0, 1, 2].map(() => ({ buf: buf(64 + 48 * this.maxEvents + 33 * 4 + 48 * 256 + 4 + 16 * 256, U.COPY_DST | U.MAP_READ), busy: false }));
+    this.snaps = [];
     this.crushes = [];
     this.colCounts = new Array(33).fill(0);
     this.statBuf = this.statBufs[0].buf; this.statSeq = 0; this.statLatest = 0; this.inputs = 0;
@@ -1809,7 +1873,7 @@ class GpuWorld {
     const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color_support', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_score', 'red_pick', 'red_apply', 'crush'];
+                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_score', 'red_pick', 'red_apply', 'crush', 'snap_acc', 'snap_split', 'snap_shapes'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'hull_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
@@ -1851,6 +1915,7 @@ class GpuWorld {
     let tp = 1024; while (tp < 2 * ((this.stats.manifolds || 0) * 1.5 + 2048) && tp < this.TP) tp *= 2; this.TPeff = tp;
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
     u[136] = this.oHull; u[137] = L.hl; f[139] = this.ovfPush ?? 1; u[138] = this.dbgBits || 0;
+    u[140] = L.plan; u[141] = L.spart; u[142] = L.snap;
     u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 3;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
@@ -1883,7 +1948,7 @@ class GpuWorld {
     const L = this.L, cur = this.frame & 1;
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
     // counters; impact events keep accumulating until a step copies them out (a pending read-back skips the copy)
-    if (this.statCopied === false) { clr(0, 7); clr(8, 7); } else clr(0, 16);   // (events and crushes gather until copied)
+    if (this.statCopied === false) { clr(0, 7); clr(8, 7); } else { clr(0, 16); clr(L.snap, 1); }   // (events, crushes and breaks gather until copied)
     clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.hl, 1); clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (this.reduce !== false) { clr(L.ptab, 3 * this.TPeff); clr(L.big, 64 * 4096); }
@@ -1960,6 +2025,7 @@ class GpuWorld {
     run(p, 'finish', nb);
     if (this.evEnergy > 0) ind(p, 'events', 96 * 4);
     if (this.crushing !== false) ind(p, 'crush', 96 * 4);
+    if (this.plans) { ind(p, 'snap_acc', 96 * 4); run(p, 'snap_split', nb); run(p, 'snap_shapes', nsh); }
     p.end();
     // particles, after the bodies moved (they see this step's shapes and body velocities)
     p = pass('particles');
@@ -1990,6 +2056,7 @@ class GpuWorld {
       if (this.evEnergy > 0) enc.copyBufferToBuffer(this.intBuf, L.events * 4, sb.buf, 64, 48 * this.maxEvents);
       enc.copyBufferToBuffer(this.intBuf, L.ccount * 4, sb.buf, 64 + 48 * this.maxEvents, 33 * 4);
       enc.copyBufferToBuffer(this.intBuf, L.crush * 4, sb.buf, 64 + 48 * this.maxEvents + 33 * 4, 48 * 256);
+      enc.copyBufferToBuffer(this.intBuf, L.snap * 4, sb.buf, 64 + 48 * this.maxEvents + 33 * 4 + 48 * 256, 4 + 16 * 256);
       this.statCopied = true;
     } else this.statCopied = false;
     if (this.inheritCount) {
@@ -2070,6 +2137,7 @@ class GpuWorld {
   killBody(body) {
     this.inputs++;
     const b = this.bodies[body - 1]; if (!b || b.dead) return;
+    this.clearSnap(body);
     b.dead = true;
     const own = this.bodyShapes && this.bodyShapes.get(body);
     if (own) { for (const k of own) if (this.shapes[k - 1] && this.shapes[k - 1].body === body) this.killShape(k); this.bodyShapes.delete(body); }
@@ -2078,6 +2146,67 @@ class GpuWorld {
     this.device.queue.writeBuffer(this.bodBuf, body * 80, new Float32Array([0, -1000, 0, 0]));
     this.device.queue.writeBuffer(this.bodBuf, body * 80 + 48, new Float32Array([1, 0, -1000, 0]));
   }
+  // ---- breaking on the GPU (see snap_split)
+  // Arm body `body` to break in the step its contacts' normal impulse passes `impulse` (N s): the shapes in
+  // `other` (slots) go to a spare body, made now with their mass. Returns the spare (0 if there is no room).
+  setSnap(body, impulse, other) {
+    this.bodyShapes = this.bodyShapes || new Map();
+    const b = this.bodies[body - 1];
+    if (!this.bodyShapes.has(body)) this.bodyShapes.set(body, this.shapes.map((x, k) => x && !x.dead && x.body === body ? k + 1 : 0).filter(Boolean));
+    const own = this.bodyShapes.get(body);
+    if (!b || b.dead || !other.length || other.length >= own.length) return 0;
+    const set = new Set(other);
+    // the two parts' mass, centre and principal frame, in the body's frame (shapes at their local poses)
+    const part = (want) => own.filter(k => set.has(k) === want).map(k => { const s = this.shapes[k - 1]; return { p: s.lp, q: s.lq, h: s.h, mat: s.mat, hull: s.hull }; });
+    const { bodies: pb } = buildBodies([{ shapes: part(false) }, { shapes: part(true) }]);
+    const [A, Bp] = pb;
+    if (!(A.im > 0) || !(Bp.im > 0)) return 0;
+    this.freeBodies = this.freeBodies || [];
+    if (!this.freeBodies.length && this.n + 1 > this.capB) return 0;
+    const j = this.freeBodies.length ? this.freeBodies.pop() : (this.n++, this.n1++, this.n1 - 1);
+    this.inputs++;
+    const q = this.device.queue;
+    // (parked asleep, out of the way, until it is needed)
+    q.writeBuffer(this.bodBuf, j * 80, new Float32Array([0, -1000, 0, Bp.im, ...Bp.q, ...Bp.il, 0, 1, 0, -1000, 0, ...Bp.q]));
+    q.writeBuffer(this.solBuf, j * 96, new Float32Array(24));
+    q.writeBuffer(this.intBuf, (this.L.crushed + j) * 4, new Uint32Array([0]));
+    this.bodies[j - 1] = { p: [0, -1000, 0], q: Bp.q, im: Bp.im, il: Bp.il, v: [0, 0, 0], w: [0, 0, 0], mass: Bp.mass, spare: body };
+    this.bodyShapes.set(j, []);
+    const w = new Uint32Array(24), wf = new Float32Array(w.buffer);
+    wf[0] = impulse; w[1] = j; w[2] = 1; w[3] = 0;
+    wf.set([...A.p, ...A.q, A.im, ...A.il, ...Bp.p, ...Bp.q], 4);
+    q.writeBuffer(this.intBuf, (this.L.plan + body * 24) * 4, w);
+    for (const k of own) q.writeBuffer(this.intBuf, (this.L.spart + k) * 4, new Uint32Array([set.has(k) ? 2 : 1]));
+    this.planOf = this.planOf || new Map();
+    this.planOf.set(body, { spare: j, other: set, A, B: Bp, impulse });
+    this.plans = (this.plans || 0) + 1;
+    return j;
+  }
+  // a plan no longer wanted (the body is broken or retired another way): its spare is freed
+  clearSnap(body) {
+    const pl = this.planOf && this.planOf.get(body); if (!pl) return;
+    this.planOf.delete(body); this.plans--;
+    this.device.queue.writeBuffer(this.intBuf, (this.L.plan + body * 24 + 2) * 4, new Uint32Array([0]));
+    if (!pl.done) { const sp = this.bodies[pl.spare - 1]; if (sp) sp.dead = true; this.bodyShapes.delete(pl.spare); (this.freeBodies = this.freeBodies || []).push(pl.spare); }
+  }
+  // a read-back says body i broke on the GPU into itself and spare j: the JS records follow
+  snapped(i, j, impulse) {
+    const pl = this.planOf && this.planOf.get(i); if (!pl || pl.done) return;
+    pl.done = true; this.planOf.delete(i); this.plans--;
+    const own = this.bodyShapes.get(i) || [], keep = [], moved = [];
+    for (const k of own) {
+      const s = this.shapes[k - 1]; if (!s || s.dead) continue;
+      const other = pl.other.has(k), c = other ? pl.B.p : pl.A.p, r = other ? pl.B.q : pl.A.q, rc = [-r[0], -r[1], -r[2], r[3]];
+      s.lp = mv(q2m(rc), [s.lp[0] - c[0], s.lp[1] - c[1], s.lp[2] - c[2]]); s.lq = qmulJ(rc, s.lq);
+      if (other) { s.body = j; moved.push(k); } else keep.push(k);
+    }
+    this.bodyShapes.set(i, keep); this.bodyShapes.set(j, moved);
+    const b = this.bodies[i - 1]; if (b) { b.im = pl.A.im; b.il = pl.A.il; b.mass = pl.A.mass; }
+    this.snaps.push({ body: i, spare: j, A: pl.A, B: pl.B, impulse });
+  }
+  // the pieces broken on the GPU since the last call: [{ body, spare, A, B (the parts' centre p and rotation q in
+  // the body's frame), impulse }]
+  takeSnaps() { const s = this.snaps; this.snaps = []; return s; }
   // Take the impact events collected since the last call.
   // pieces made by breakBody that the next step still has to place (a read-back now would show them wrong)
   placing() { return !!(this.pendingInherit && this.pendingInherit.length); }
@@ -2087,6 +2216,7 @@ class GpuWorld {
   breakBody(parent, kids, pr, qr, dvs, parts = [], pdvs = []) {
     this.inputs++;
     const b = this.bodies[parent - 1]; if (!b || b.dead) return;
+    this.clearSnap(parent);
     b.dead = true;
     const own = this.bodyShapes && this.bodyShapes.get(parent);
     if (own) { for (const k of own) if (this.shapes[k - 1] && this.shapes[k - 1].body === parent) this.killShape(k); this.bodyShapes.delete(parent); }
@@ -2206,6 +2336,9 @@ class GpuWorld {
       // crushed bodies, never lost either
       { const n = Math.min(u[15], 256), o0 = (64 + 48 * this.maxEvents + 33 * 4) / 4;
         for (let k = 0; k < n; k++) { const o = o0 + k * 12; this.crushes.push({ body: u[o], by: u[o + 1], p: [f[o + 2], f[o + 3], f[o + 4]], q: [f[o + 5], f[o + 6], f[o + 7], f[o + 8]], v: [f[o + 9], f[o + 10], f[o + 11]] }); } }
+      // pieces broken on the GPU, never lost: their shapes' records here follow (as the kernels did)
+      { const o0 = (64 + 48 * this.maxEvents + 33 * 4 + 48 * 256) / 4, n = Math.min(u[o0], 256);
+        for (let k = 0; k < n; k++) { const o = o0 + 1 + 4 * k; this.snapped(u[o], u[o + 1], f[o + 3]); } }
       if (seq < this.statLatest) return;
       this.statLatest = seq; this.statsInputs = sb.inputs;
       this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7], pActive: u[12], pLive: u[13], pairsLost: Math.max(0, u[5] - this.maxPairs) };

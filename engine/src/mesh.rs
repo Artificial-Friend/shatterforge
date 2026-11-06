@@ -51,10 +51,10 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
     let mut m = Mesh::default();
     let mut rects: Vec<Rect> = Vec::new();
     for i in 0..b.len() as u32 {
-        // (bricks on a fracture surface are drawn by the page as their Voronoi cells)
-        if !b.alive(i) || b.flags[i as usize] & (crate::brick::F_DYNAMIC | crate::brick::F_FRAC) != 0 || !keep(b, i) { continue; }
+        if !b.alive(i) || b.flags[i as usize] & crate::brick::F_DYNAMIC != 0 || !keep(b, i) { continue; }
         let tb = b.tbox(i);
         let col = colour(b, i);
+        if let Some(cl) = b.cell(i) { cell_faces(b, i, cl, col, &mut m); continue; }
         // cracked joints of this brick (axis, plane, overlap box): drawn as dark seams where they meet its faces
         let mut cracks: Vec<(usize, i32, TBox)> = Vec::new();
         let mut j = b.jhead[i as usize];
@@ -81,7 +81,9 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
                 while j != NONE && !rects.is_empty() {
                     let ju = j as usize;
                     // joint axis matches and the neighbour is on this side: a = min side, b = max side
-                    if b.jaxis[ju] as usize == ax && ((side == 1 && b.ja[ju] == i) || (side == 0 && b.jb[ju] == i)) {
+                    // (a convex cell covers only part of the face: the face stays, and the cell's own face, coplanar and
+                    // facing the other way, is hidden by it)
+                    if b.jaxis[ju] as usize == ax && ((side == 1 && b.ja[ju] == i) || (side == 0 && b.jb[ju] == i)) && b.hull[b.joint_other(j, i) as usize] == 0 {
                         let o = b.tbox(b.joint_other(j, i));
                         subtract(&mut rects, [o.min[u], o.min[w], o.max[u], o.max[w]]);
                     }
@@ -123,6 +125,27 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
     }
     m
 }
+/// The faces of a convex cell: all of them but those it shares with a cell still joined to it, and its bottom on
+/// the ground. (Its faces on its box's sides are drawn even where a neighbour covers them: inside the material,
+/// facing away from the viewer.)
+fn cell_faces(b: &Bricks, i: u32, cl: &crate::hull::Cell, col: [f32; 3], m: &mut Mesh) {
+    let (c, h) = b.box_m(i);
+    let ground = b.tbox(i).min[1] <= 0;
+    for f in &cl.faces {
+        if f.other == 3 && ground { continue; }
+        if f.other >= 6 {
+            let mut j = b.jhead[i as usize]; let mut hidden = false;
+            while j != NONE { if b.jaxis[j as usize] == 3 { if let Some(o) = b.cell(b.joint_other(j, i)) { if o.slot == f.other - 6 { hidden = true; break; } } } j = b.joint_next(j, i); }
+            if hidden { continue; }
+        }
+        let poly = cl.face_in(f, c, h);
+        let (_, _, n) = crate::hull::polygon(&poly);
+        let base = (m.v.len() / 9) as u32;
+        for p in &poly { m.v.extend_from_slice(&[p[0] as f32, p[1] as f32, p[2] as f32, n[0] as f32, n[1] as f32, n[2] as f32, col[0], col[1], col[2]]); }
+        for t in 1..poly.len() as u32 - 1 { m.i.extend_from_slice(&[base, base + t, base + t + 1]); }
+        m.quads += 1;
+    }
+}
 /// width of a drawn crack seam (m)
 const CRACK_W: f32 = 0.02;
 
@@ -156,6 +179,30 @@ mod tests {
         b.build_joints();
         b.jdmg[b.jhead[0] as usize] = 1;
         assert_eq!(build(&b).quads, 8 + 6);
+    }
+    #[test] fn a_cell_draws_its_faces_but_those_it_shares() {
+        // a 1 m brick on the ground split into its cells: each cell draws its faces except the ones shared with
+        // a cell still there and its bottom on the ground; the faces drawn enclose the cells' volume (divergence
+        // theorem: the sum over faces of area x centroid . normal / 3 is the volume) once the shared faces of a
+        // removed cell show
+        let mut b = Bricks::new();
+        let i = b.add([0, 0, 0], [8, 8, 8], mat::MASONRY, 0, 0);
+        b.build_joints();
+        let (cells, _) = b.shatter(i);
+        let m = build(&b);
+        let faces: usize = cells.iter().map(|&c| b.cell(c).unwrap().faces.len()).sum();
+        let shared: usize = (0..b.ja.len()).filter(|&j| b.ja[j] != NONE && b.jaxis[j] == 3).count();
+        let bottoms = cells.iter().filter(|&&c| b.cell(c).unwrap().side(3).is_some()).count();
+        assert_eq!(m.quads, faces - 2 * shared - bottoms);
+        // every triangle faces outward: the mesh's signed volume (with the ground faces left out, measured from y = 0)
+        // is the brick's volume
+        let mut vol = 0.0f64;
+        for t in m.i.chunks(3) {
+            let p = |k: u32| { let o = k as usize * 9; [m.v[o] as f64, m.v[o + 1] as f64, m.v[o + 2] as f64] };
+            let (a, c, d) = (p(t[0]), p(t[1]), p(t[2]));
+            vol += (a[0] * (c[1] * d[2] - c[2] * d[1]) - a[1] * (c[0] * d[2] - c[2] * d[0]) + a[2] * (c[0] * d[1] - c[1] * d[0])) / 6.0;
+        }
+        assert!((vol - 1.0).abs() < 1e-4, "outward faces enclose 1 m^3: {vol}");
     }
     #[test] fn tower_mesh() {
         let t = std::time::Instant::now();

@@ -54,6 +54,32 @@ Three foundation changes, in this order, before scaling to a city. Each keeps th
 - The engine then refines the break when its answer arrives. The pieces are already moving apart, from the right place.
 - The building's own structure check stays asynchronous.
 
+## Where it stands (6 November 2026)
+
+**1. Spring-network solver: done.** See docs/STRUCTURE.md.
+- **Validation.** Cantilevers within 0.2%, columns within 0.7%; spans inside their bracket.
+- **Buildings under their own weight** (worst joint): concrete 39%, masonry 83%, timber 15%, mixed 58%. Under the load flow they were at 85–94%.
+- **What it replaced.** The overturning check, the flat-slab check and the plate spread are gone.
+- **Speed.** The 12-storey tower takes 184 ms native (62 iterations); a repeat check with a warm start takes 31 ms.
+- **In the worker (lab collapse).** 4–8 ms median, 50–370 ms at p95.
+
+**2. Convex cells as the primitive: done.**
+- A fractured brick becomes its cells as engine bricks, with real mass and centroids, polygon joints, sections from the polygons, and a mesh. They go to the page and the GPU as hull ids from one library (checked identical, `gpu/test_hulls.cjs`).
+- The page's skin and its bookkeeping are gone.
+- Lab comparison (docs/LAB.md): fewer rebounds than with boxes, and 1–4 short hole frames left.
+
+**3. Same-frame breaks on the GPU: done, first version.**
+- The engine plans each new falling piece's first break: a horizontal section, and the impulse that breaks it there.
+- The GPU breaks the piece in the step of the hit into the body and a spare made in advance. The engine then cuts the plan's joints and refines from the same hit.
+- GPU test `snap` and engine test `a_falling_piece_has_a_break_plan_and_snaps_by_it` cover it.
+- In the lab, no run has jumped with it on; with it off, two of three did.
+- Limits:
+  - A plan assumes landing on the underside.
+  - The break is one plane into two parts.
+  - Further breaks wait for the engine, as before.
+
+**Open:** rebounds in the collapse (docs/LAB.md), and the mixed building coming down only partly.
+
 ## Later
 
 Determinism, solver stability work (mass ratios, continuous collision, islands), scaling (streaming, level of detail, a check per building), authoring of imported meshes, effects.

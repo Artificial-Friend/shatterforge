@@ -46,6 +46,10 @@ pub struct Game {
     pub piece_info: [f32; 4],
     pub dbg: Vec<f32>,
     caps: Vec<f32>,
+    /// the standing building's last solution under gravity, to start the next check from
+    warm: structure::Warm,
+    /// iterations of the last structure check's solve
+    pub last_iterations: usize,
     /// bricks removed as dust (rubble beyond the budget)
     pub dust: usize,
     /// build meshes (off in a worker that only simulates)
@@ -57,7 +61,25 @@ pub struct Game {
     pub crumb_keep: usize,
     pub rubble_keep: usize,
     pub crush_depth: f32,
+    /// standing bricks split into convex cells so far, and at most how many (each cell is a shape on the GPU:
+    /// the cut of the lab's collapse marks thousands of bricks, and as cells they ran the GPU out of shapes)
+    pub frac_made: usize,
+    pub frac_max: usize,
+    /// break plans of falling pieces, for the GPU to break them in the step of a hit (see `plan_piece`)
+    pub plans: hashbrown::HashMap<u32, Plan>,
+    plan_todo: Vec<u32>,
+    /// the plans made by the last call: [piece, impulse (N s), n, the other part's bricks as places in the piece's
+    /// list (n of them)] ...
+    pub plan_out: Vec<f32>,
+    /// pieces parted by `snap`, and the two they became
+    pub snapped: hashbrown::HashMap<u32, (u32, u32)>,
 }
+/// Where a falling piece breaks first, and how hard a hit must be to break it there: its weakest section under
+/// its own inertia, landing on its underside. The joints to cut (with their bricks, to see they are still
+/// there), the bricks of the part that comes away (the lighter), and the normal impulse over one 60 Hz step.
+pub struct Plan { pub len: usize, pub cut: Vec<(u32, u32, u32)>, pub other: Vec<u32>, pub impulse: f32 }
+/// at most this many standing bricks are split into convex cells (beyond it a fractured brick stays a box)
+pub const FRAC_MAX: usize = 1500;
 
 /// fragments of fewer bricks than this count as rubble; at most `rubble_keep` (default RUBBLE_KEEP) of them per
 /// impacts call stay as bodies
@@ -76,8 +98,8 @@ impl Game {
     pub fn new_kind(storeys: i32, kind: u8) -> Self {
         let b = tower::build_kind(storeys, 1, kind);
         let n = (storeys + 2) as usize;
-        let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH };
+        let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
+                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
         for k in 0..n as i32 { g.remesh(k); }
         g
     }
@@ -92,7 +114,7 @@ impl Game {
     /// A brick as [x, y, z, sx, sy, sz (ticks), material + 16 x paint].
     fn push_box(out: &mut Vec<f32>, b: &Bricks, i: u32) {
         let t = b.tbox(i);
-        out.extend_from_slice(&[t.min[0] as f32, t.min[1] as f32, t.min[2] as f32, (t.max[0] - t.min[0]) as f32, (t.max[1] - t.min[1]) as f32, (t.max[2] - t.min[2]) as f32, (b.mat[i as usize] as u32 + 16 * b.paint[i as usize] as u32 + if b.flags[i as usize] & crate::brick::F_FRAC != 0 { 256 } else { 0 }) as f32]);
+        out.extend_from_slice(&[t.min[0] as f32, t.min[1] as f32, t.min[2] as f32, (t.max[0] - t.min[0]) as f32, (t.max[1] - t.min[1]) as f32, (t.max[2] - t.min[2]) as f32, (b.mat[i as usize] as u32 + 16 * b.paint[i as usize] as u32 + 512 * b.hull[i as usize] as u32) as f32]);
     }
 
     /// All static bricks: [n, (index, x, y, z, sx, sy, sz, material) ...] in ticks.
@@ -106,8 +128,122 @@ impl Game {
         self.out[0] = n as f32;
     }
 
+    /// Split the standing bricks marked on a fracture surface into their convex cells (within `frac_max`); the cells
+    /// that spall off are removed and returned, to fall as crumbs. Bricks of falling pieces stay as they are (the
+    /// GPU places a piece's parts one for one).
+    fn shatter_pending(&mut self) -> Vec<u32> {
+        let pend = core::mem::take(&mut self.b.frac_pending);
+        let mut crumbs = Vec::new();
+        for i in pend {
+            let iu = i as usize;
+            if self.b.flags[iu] & crate::brick::F_FRAC == 0 { continue; }
+            if self.b.flags[iu] & (F_ALIVE | F_DYNAMIC) != F_ALIVE || self.frac_made >= self.frac_max { self.b.flags[iu] &= !crate::brick::F_FRAC; continue; }
+            let (_, spall) = self.b.shatter(i);
+            self.frac_made += 1;
+            // (removing a spalled cell marks nothing more: a fracture surface does not spread by itself)
+            for c in spall { self.b.remove_quiet(c); crumbs.push(c); }
+        }
+        crumbs
+    }
+
+    /// Plan the first break of falling piece `pid` (`Plan`): its joints' ratios under its own weight, resting on its
+    /// lowest bricks; the strongest of them failing first, the fewest from the top that part it in two. A hit that
+    /// decelerates it by g / (worst ratio) breaks it there: the impulse M g dt / ratio over a step dt.
+    fn plan_piece(&mut self, pid: u32) {
+        let set = self.pieces[pid as usize].clone();
+        if set.len() < 2 || set.len() > 4000 { return; }
+        let miny = set.iter().map(|&i| self.b.y[i as usize]).min().unwrap();
+        // (what it lands on: its bricks within half a metre of its lowest)
+        let sink: Vec<bool> = set.iter().map(|&i| self.b.y[i as usize] as i32 <= miny as i32 + 4).collect();
+        if sink.iter().all(|&x| x) { return; }
+        let load: Vec<f32> = set.iter().map(|&i| structure::mass(&self.b, i) * 9.81).collect();
+        let a = structure::analyse(&self.b, &set, &load, &sink, v3(0.0, -1.0, 0.0));
+        let mut r = a.ratios; r.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(core::cmp::Ordering::Equal));
+        if r.is_empty() || !(r[0].1 > 1e-6) { return; }
+        // a falling building breaks across a bed joint, a storey line or a wall's course: a horizontal plane that
+        // parts it, every bearing joint on it cut. The plane whose worst joint is the worst, with at least a
+        // twentieth of the mass on the smaller side. (Cutting single joints worst first, the 4-storey tower took
+        // 4,096 of its 5,140 joints to part: its worst joints are spread over the building.)
+        let rmap: hashbrown::HashMap<u32, f32> = r.iter().copied().collect();
+        let mut planes: hashbrown::HashMap<i32, (f32, Vec<u32>)> = hashbrown::HashMap::new();
+        for &i in &set { let mut j = self.b.jhead[i as usize]; while j != NONE {
+            if self.b.ja[j as usize] == i && self.b.jaxis[j as usize] == 1 && self.b.body[self.b.jb[j as usize] as usize] == pid {
+                let e = planes.entry(self.b.tbox(i).max[1]).or_insert((0.0, Vec::new()));
+                e.0 = e.0.max(*rmap.get(&j).unwrap_or(&0.0)); e.1.push(j);
+            }
+            j = self.b.joint_next(j, i); } }
+        let mut pl: Vec<(i32, f32, Vec<u32>)> = planes.into_iter().map(|(y, (q, js))| (y, q, js)).collect();
+        pl.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(core::cmp::Ordering::Equal));
+        let m = |v: &Vec<u32>| v.iter().map(|&i| structure::mass(&self.b, i)).sum::<f32>();
+        let total: f32 = m(&set);
+        let parts = |cut: &hashbrown::HashSet<u32>| -> Vec<Vec<u32>> {
+            let mut idx = vec![NONE; self.b.len()];
+            for (q, &i) in set.iter().enumerate() { idx[i as usize] = q as u32; }
+            let mut seen = vec![false; set.len()]; let mut out = Vec::new();
+            for s0 in 0..set.len() { if seen[s0] { continue; }
+                let mut g = Vec::new(); let mut st = vec![s0]; seen[s0] = true;
+                while let Some(q) = st.pop() { let i = set[q]; g.push(i);
+                    let mut j = self.b.jhead[i as usize];
+                    while j != NONE { if !cut.contains(&j) { let o = idx[self.b.joint_other(j, i) as usize]; if o != NONE && !seen[o as usize] { seen[o as usize] = true; st.push(o as usize); } } j = self.b.joint_next(j, i); }
+                }
+                out.push(g);
+            }
+            out
+        };
+        let mut found = None;
+        for (_, q, js) in pl.iter().take(24) {
+            if *q < 1e-6 { break; }
+            let cut: hashbrown::HashSet<u32> = js.iter().copied().collect();
+            let mut g = parts(&cut);
+            g.sort_by(|x, y| m(y).partial_cmp(&m(x)).unwrap());
+            if g.len() >= 2 && m(&g[1]) >= 0.05 * total { found = Some((*q, js.clone(), g)); break; }
+        }
+        #[cfg(test)] { extern crate std; if std::env::var("SF_PLAN").is_ok() { std::println!("  plan {pid}: {} bricks, {} planes, worst {:.3}: {:?}", set.len(), pl.len(), r[0].1, found.as_ref().map(|f| (f.0, f.1.len(), f.2.len()))); } }
+        let Some((q, cutj, g)) = found else { return };
+        let impulse = total * 9.81 / q / 60.0;
+        // (the smaller part, and with it any bits the cut parts besides: they come away with it)
+        let other: Vec<u32> = g[1..].iter().flatten().copied().collect();
+        let pos: hashbrown::HashMap<u32, usize> = set.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+        self.plan_out.extend_from_slice(&[pid as f32, impulse, other.len() as f32]);
+        for i in &other { self.plan_out.push(pos[i] as f32); }
+        let cut = cutj.iter().map(|&j| (j, self.b.ja[j as usize], self.b.jb[j as usize])).collect();
+        self.plans.insert(pid, Plan { len: set.len(), cut, other, impulse });
+    }
+    /// Plan the pieces made since the last call (`plan_out` lists them)
+    pub fn finish_plans(&mut self) {
+        let todo = core::mem::take(&mut self.plan_todo);
+        let pieces = &self.pieces; self.plans.retain(|&p, _| !pieces[p as usize].is_empty());
+        for pid in todo { if !self.pieces[pid as usize].is_empty() { self.plan_piece(pid); } }
+    }
+    /// The GPU broke falling piece `pid` by its plan, in the step of a hit: cut the plan's joints and make the two
+    /// parts pieces of their own. Output as `impact`: [2, (id, n, boxes) for the part it kept, then for the other];
+    /// [0] when the piece changed since (the engine broke it first, say) and the plan no longer holds.
+    pub fn snap(&mut self, pid: u32) -> usize {
+        self.out.clear();
+        let Some(pl) = self.plans.remove(&pid) else { self.out.push(0.0); return 0 };
+        let pu = pid as usize;
+        let ok = pu < self.pieces.len() && self.pieces[pu].len() == pl.len
+            && pl.cut.iter().all(|&(j, a, b)| (j as usize) < self.b.ja.len() && self.b.ja[j as usize] == a && self.b.jb[j as usize] == b)
+            && pl.other.iter().all(|&i| self.b.alive(i) && self.b.body[i as usize] == pid);
+        if !ok { self.out.push(0.0); return 0; }
+        for &(j, _, _) in &pl.cut { self.b.fracture_joint(j); }
+        let set = core::mem::take(&mut self.pieces[pu]);
+        let other: hashbrown::HashSet<u32> = pl.other.iter().copied().collect();
+        // (both parts in the piece's order: the GPU's shapes of each body are in it)
+        let (moved, kept): (Vec<u32>, Vec<u32>) = set.into_iter().partition(|i| other.contains(i));
+        let ids = [self.new_piece(kept), self.new_piece(moved)];
+        self.snapped.insert(pid, (ids[0], ids[1]));
+        self.out.push(2.0);
+        for &id in &ids {
+            self.out.push(id as f32); self.out.push(self.pieces[id as usize].len() as f32);
+            for k in 0..self.pieces[id as usize].len() { let i = self.pieces[id as usize][k]; Self::push_box(&mut self.out, &self.b, i); }
+        }
+        2
+    }
+
     fn new_piece(&mut self, bricks: Vec<u32>) -> u32 {
         let id = self.pieces.len() as u32;
+        self.plan_todo.push(id);
         for &i in &bricks { self.b.flags[i as usize] |= F_DYNAMIC; self.b.body[i as usize] = id; }
         self.pieces.push(bricks);
         id
@@ -173,6 +309,7 @@ impl Game {
             if d2 <= rt * rt { crumbs.push(i); }
         }
         for &i in &crumbs { self.b.remove(i); }
+        crumbs.extend(self.shatter_pending());
         // the crumb budget holds for blasts too: an even sample of the crumbs fly, the rest is dust
         let keep = self.crumb_keep;
         if crumbs.len() > keep { let n = crumbs.len(); let kept: Vec<u32> = (0..keep).map(|k| crumbs[k * n / keep]).collect(); self.dust += n - keep; crumbs = kept; }
@@ -204,19 +341,18 @@ impl Game {
         }
         let _ = &mut load;
         let sink: Vec<bool> = set.iter().map(|&i| self.b.y[i as usize] <= 0).collect();
-        let mut a = structure::analyse_at(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0));
-        if !point.is_empty() {
-            let pts: Vec<(u32, f32, f32, f32)> = point.iter().map(|&(k, x, z, f)| (set[k as usize], x, z, f)).collect();
-            let (cracks, worst) = structure::panels(&self.b, &pts);
-            self.panel_ratio = worst;
-            a.max_ratio = a.max_ratio.max(worst);
-            a.cracks.extend(cracks);
-        }
+        let a = structure::analyse_warm(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0), Some(&mut self.warm));
+        self.last_iterations = a.iterations;
+        // (the worst ratio with rubble on the floors: since the spring network, the building's worst)
+        self.panel_ratio = a.max_ratio;
         self.max_ratio = a.max_ratio;
         let work = self.apply_failures(&a, max_fail);
         self.failed_total += work.len();
+        let mut crumbs = self.shatter_pending();
+        let keep = self.crumb_keep;
+        if crumbs.len() > keep { let n = crumbs.len(); let kept: Vec<u32> = (0..keep).map(|k| crumbs[k * n / keep]).collect(); self.dust += n - keep; crumbs = kept; }
         let pieces = if work.is_empty() { Vec::new() } else { self.detach() };
-        self.emit(&[], &pieces);
+        self.emit(&crumbs, &pieces);
         work.len()
     }
 
@@ -344,9 +480,18 @@ impl Game {
     pub fn impacts(&mut self, dt: f32) -> usize {
         let inp = core::mem::take(&mut self.inp);
         struct Hit { who: i32, p: [f32; 3], d: V3, j: f32, v: f32, other: i32 }
-        let hits: Vec<Hit> = inp.chunks_exact(11).map(|r| Hit {
+        let mut hits: Vec<Hit> = inp.chunks_exact(11).map(|r| Hit {
             who: r[0] as i32, p: [r[1] / TICK, r[2] / TICK, r[3] / TICK], d: v3(r[4], r[5], r[6]), j: r[7], v: r[8], other: r[9] as i32,
         }).collect();
+        // a hit on a piece the GPU broke by its plan (and `snap` parted since) goes to the part holding the brick
+        // nearest the contact: the engine refines the break from there
+        for h in hits.iter_mut() {
+            if h.who < 0 { continue; }
+            if let Some(&(a, b)) = self.snapped.get(&(h.who as u32)) {
+                let near = |pid: u32| self.pieces[pid as usize].iter().map(|&i| dist2(&self.b, i, h.p)).fold(f32::MAX, f32::min);
+                h.who = if near(a) <= near(b) { a as i32 } else { b as i32 };
+            }
+        }
         let ce = |m: i32| if m < 0 { 0.0 } else { structure::crush_energy(m as u8) };
         // the energy divides by the other side's crush energy: the weaker material takes most of it
         // (steel on concrete crushes the concrete, concrete on concrete half each): V = E c_o / (c_s (c_s + c_o))
@@ -407,7 +552,7 @@ impl Game {
             for &(i, f, p) in &extra { let k = idx[i as usize]; if k != NONE { point.push((k, p[0], p[2], f)); } }
             let sink: Vec<bool> = set.iter().map(|&i| self.b.y[i as usize] <= 0).collect();
             if !extra.is_empty() {
-                let a = structure::analyse_at(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0));
+                let a = structure::analyse_warm(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0), Some(&mut self.warm));
                 self.max_ratio = self.max_ratio.max(a.max_ratio);
                 let work = self.apply_failures(&a, 256);
                 self.failed_total += work.len();
@@ -431,6 +576,11 @@ impl Game {
                 self.failed_total += work.len();
                 self.side_failed += work.len();
             }
+            // the fracture surfaces: cells, and what spalls off them falls as crumbs (within the budget left)
+            let mut sp = self.shatter_pending();
+            thin(&mut sp, crumb_room, &mut self.dust);
+            crumb_room -= sp.len();
+            scrumbs.extend(sp);
             spieces = self.detach();
         }
         self.emit(&scrumbs, &spieces);
@@ -912,10 +1062,37 @@ mod tests {
             assert_eq!(fell > 0, expect, "{kpa} kPa");
         }
     }
+    #[test] fn a_second_check_starts_from_the_first() {
+        // the standing building's solve starts from its last solution: unchanged, the second check of the
+        // 12-storey tower needs no iterations and gives the same worst ratio; a small change (one column gone)
+        // needs fewer than from zero
+        let mut g = Game::new_kind(12, 0);
+        let t = std::time::Instant::now();
+        g.structure_step(64);
+        let (cold, r1, t1) = (g.last_iterations, g.max_ratio, t.elapsed().as_secs_f64() * 1e3);
+        let t = std::time::Instant::now();
+        g.structure_step(64);
+        let (again, r2, t2) = (g.last_iterations, g.max_ratio, t.elapsed().as_secs_f64() * 1e3);
+        // the ground storey blasted away but one column (as `a_tower_left_on_one_column_comes_down`): the first
+        // round of failures must be the same from the last solution as from zero
+        let mut cold_g = Game::new_kind(12, 0);
+        let mut x = -11.6f32;
+        while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 {
+            if (x + 3.7).abs() > 1.3 || (z + 3.7).abs() > 1.3 { g.blast(v3(x, 1.6, z), 0.7); cold_g.blast(v3(x, 1.6, z), 0.7); }
+            z += 0.8; } x += 0.8; }
+        let (fw, fc) = (g.structure_step(1 << 20), cold_g.structure_step(1 << 20));
+        std::println!("tower checks: first {cold} iterations ({t1:.0} ms), again {again} ({t2:.0} ms), worst {r1:.3} / {r2:.3}; with the ground storey gone but one column: {} iterations warm against {} cold, worst {:.3} / {:.3}, failures {fw} / {fc}", g.last_iterations, cold_g.last_iterations, g.max_ratio, cold_g.max_ratio);
+        // (the same within the solve's tolerance: a joint at 1.00 of strength can go either way)
+        assert!(fw > 0 && (g.max_ratio - cold_g.max_ratio).abs() < 0.01 * cold_g.max_ratio && (fw as f32 - fc as f32).abs() <= (0.01 * fc as f32).max(2.0), "warm and cold agree");
+        assert!(g.last_iterations < cold_g.last_iterations);
+        assert_eq!(again, 0);
+        assert!((r1 - r2).abs() < 1e-4);
+    }
     #[test] fn the_mixed_buildings_timber_floor_gives_way_under_rubble_and_its_brick_cracks() {
-        // a timber floor bay of the third storey (joists, 2.4 MPa over 0.25 m: m_p = 25 kNm/m) between the brick
-        // wall and the steel beam at x = -7.5 m (3.25 m clear, beams on both sides): 3 kPa is carried; 40 kPa
-        // (q L^2 / 8 = 41 x 3.25^2 / 8 = 54 kNm/m against 2 m_p = 50) is not
+        // a timber floor bay of the third storey (joists along x, 2.4 MPa over 0.25 m: 25 kNm/m) between the brick
+        // wall and the steel beam at x = -7.5 m (3.25 m clear): 3 kPa is carried; 40 kPa (q L^2 / 8 = 54 kNm/m,
+        // shared between midspan and the section over the beam) is not: 1.55 of strength at its worst joist section
+        // (3 kPa: 0.59, the building's own worst joint elsewhere)
         for (kpa, expect) in [(3.0f32, false), (40.0, true)] {
             let mut g = Game::new_kind(5, 3);
             assert_eq!(g.structure_step(64), 0, "the mixed building stands");
@@ -955,19 +1132,54 @@ mod tests {
         assert!(cracked[0] > 0, "the first hit cracks the mortar");
     }
     #[test] fn a_blast_leaves_a_fracture_surface() {
-        // a blast in a wall: the bricks round the crater that are left standing, and those of the pieces that fall,
-        // are marked as on a fracture surface (drawn as Voronoi cells, losing one or two); none bigger than 2 m or
-        // smaller than 0.25 m a side; the standing ones are left out of the engine's mesh
+        // a blast in a wall: the bricks round the crater that are left standing are split into the convex cells of
+        // their fracture patterns, and one or two cells of each spall off as crumbs; none bigger than 2 m or
+        // smaller than 0.25 m a side. The cells are in the engine's mesh and carry their hull ids to the page.
         let mut g = Game::new_kind(3, 1);
-        let q0 = g.chunks[1].quads;
         g.blast(v3(-6.0, 5.0, -11.2), 1.2);
-        let frac: std::vec::Vec<u32> = (0..g.b.len() as u32).filter(|&i| g.b.alive(i) && g.b.flags[i as usize] & crate::brick::F_FRAC != 0).collect();
-        let standing = frac.iter().filter(|&&i| g.b.flags[i as usize] & F_DYNAMIC == 0).count();
-        std::println!("blast in a masonry facade: {} bricks on the fracture surface ({standing} standing), storey-1 mesh {q0} -> {} quads", frac.len(), g.chunks[1].quads);
-        assert!(standing > 4, "the crater's rim is a fracture surface");
-        for &i in &frac { let s = g.b.size(i); assert!(s.iter().all(|&v| v >= 2 && v <= 16), "size {s:?}"); }
+        let cells: std::vec::Vec<u32> = (0..g.b.len() as u32).filter(|&i| g.b.alive(i) && g.b.hull[i as usize] != 0 && g.b.flags[i as usize] & F_DYNAMIC == 0).collect();
+        let mut parents: std::vec::Vec<crate::brick::TBox> = cells.iter().map(|&i| g.b.tbox(i)).collect();
+        parents.sort_by_key(|t| (t.min, t.max)); parents.dedup();
+        let spalled = bodies_in(&g.out).iter().filter(|&&(id, _)| id < 0).count();
+        std::println!("blast in a masonry facade: {} standing bricks split into {} cells, {} crumbs out (with the crater's), {} split so far", parents.len(), cells.len(), spalled, g.frac_made);
+        assert!(parents.len() > 4, "the crater's rim is a fracture surface");
+        for t in &parents { for d in 0..3 { let v = t.max[d] - t.min[d]; assert!(v >= 2 && v <= 16, "size {v}"); } }
+        // every cell is joined to something, and the cells' volumes are those of their bricks less what spalled
+        for &i in &cells { assert!(g.b.jhead[i as usize] != NONE); }
+        let mut q = 0.0f64; for &i in &cells { q += g.b.vol_share(i); }
+        assert!(q < parents.len() as f64 && q > 0.3 * parents.len() as f64, "cells kept: {q} bricks' worth of {}", parents.len());
+        // the out records carry the hull id (code / 512)
+        let mut f = std::vec::Vec::new(); g.dump(); f.extend_from_slice(&g.out);
+        let n = f[0] as usize; let with_hull = (0..n).filter(|&k| f[1 + k * 8 + 7] as u32 / 512 != 0).count();
+        assert_eq!(with_hull, cells.len());
         // the spalled cells: one or two, never all, the same every time
         for i in 0..200u32 { for n in 2..=6u32 { let (p, m) = crate::brick::frac_cells(i, n); assert!(p < 16 && m != 0 && m.count_ones() <= 2 && m < (1 << n)); assert_eq!(crate::brick::frac_cells(i, n), (p, m)); } }
+    }
+    #[test] fn a_falling_piece_has_a_break_plan_and_snaps_by_it() {
+        // the 4-storey tower's ground storey cut: the building above falls as a piece. Its plan: the weakest section
+        // under its own weight on its underside; the impulse that breaks it there (M g dt / ratio); the part that
+        // comes away lighter than the part kept. Snapping by the plan parts it there into two pieces with no joint
+        // between them; a second snap of the same piece finds no plan.
+        let mut g = Game::new_kind(4, 0);
+        let mut x = -11.6f32;
+        while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 { g.blast(v3(x, 1.6, z), 0.7); z += 0.8; } x += 0.8; }
+        for _ in 0..20 { if g.structure_step(64) == 0 { break; } }
+        g.plan_out.clear(); g.finish_plans();
+        let (&pid, pl) = g.plans.iter().max_by_key(|(_, p)| p.len).expect("a plan");
+        let (n, k, imp) = (pl.len, pl.other.len(), pl.impulse);
+        let m: f32 = g.pieces[pid as usize].iter().map(|&i| structure::mass(&g.b, i)).sum();
+        std::println!("plans for {} pieces; the biggest ({n} bricks, {:.0} t): {} joints cut, {k} bricks come away, broken by {:.0} kN s in a step (it carries {:.0} kN s at 5 m/s)", g.plans.len(), m / 1e3, pl.cut.len(), imp / 1e3, m * 5.0 / 1e3);
+        let mo: f32 = pl.other.iter().map(|&i| structure::mass(&g.b, i)).sum();
+        assert!(imp > 0.0 && imp.is_finite() && k > 0 && mo >= 0.05 * m && mo <= 0.5 * m, "a part of some size comes away: {:.0} t", mo / 1e3);
+        assert!(g.plan_out.len() >= 3);
+        assert_eq!(g.snap(pid), 2);
+        let (a, b) = (g.out[1] as u32, g.out[3 + 7 * g.out[2] as usize] as u32);
+        assert_eq!(g.pieces[a as usize].len() + g.pieces[b as usize].len(), n);
+        assert_eq!(g.pieces[b as usize].len(), k);
+        let inb: hashbrown::HashSet<u32> = g.pieces[b as usize].iter().copied().collect();
+        for &i in &g.pieces[a as usize] { let mut j = g.b.jhead[i as usize]; while j != NONE { assert!(!inb.contains(&g.b.joint_other(j, i)), "no joint between the parts"); j = g.b.joint_next(j, i); } }
+        assert_eq!(g.snap(pid), 0);
+        assert_eq!(g.snapped.get(&pid), Some(&(a, b)));
     }
     #[test] fn a_falling_slab_cracks_on_impact() {
         // a free piece: a 4 m x 4 m slab of 1 m x 0.25 m planks joined edge to edge, hitting the ground on a corner

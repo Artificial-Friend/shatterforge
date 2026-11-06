@@ -161,7 +161,7 @@ const towerMat = new THREE.MeshLambertMaterial({ vertexColors: true });
 const chunks = [], chunkVol = {};
 function chunkMesh(k) {
   chunkVol[k] = E.chunk_volume ? E.chunk_volume(k) : 0;
-  if (LAB.on) LAB.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0) + staticCellPubVol;
+  if (LAB.on) LAB.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
   const vl = E.chunk_vlen(k), il = E.chunk_ilen(k);
   const v = new Float32Array(E.memory.buffer, E.chunk_vptr(k), vl).slice();
   const ix = new Uint32Array(E.memory.buffer, E.chunk_iptr(k), il).slice();
@@ -259,14 +259,9 @@ function pullDebris() {
     const t0 = performance.now();
     // the building's mesh changes in the frame the debris that replaces it first shows: with the first
     // read-back issued after that debris was made
-    if (pendingChunks.length || fracPending.length) {
+    if (pendingChunks.length) {
       const due = new Set(), keep = [];
       for (const e of pendingChunks) { if (e.need <= seq) due.add(e.k); else keep.push(e); }
-      // the standing cells as they were after the latest job now due (a later job's are not shown before its debris)
-      let snap = null; const fk = [];
-      for (const f of fracPending) { if (f.need <= seq) snap = f; else fk.push(f); }
-      fracPending = fk;
-      if (snap) publishFrac(snap);
       pendingChunks = keep; for (const k of due) chunkMesh(k);
     }
     r.t = clock();
@@ -367,7 +362,7 @@ function drawDebris(now) {
       const vol = 8 * SS.x * SS.y * SS.z;
       // a crumb is drawn as a Voronoi cell (one of the library's, by its slot), scaled to the crumb's volume; as a
       // cube it read as a pile of boxes. (Its physics is a sphere either way.)
-      const hid = setting.chunks && GpuWorld.hulls ? 1 + (Math.imul(i + 1, 2654435761) >>> 0) % (GpuWorld.hulls.hulls.length - 1) : 0;
+      const hid = inf.hull ? inf.hull : setting.chunks && GpuWorld.hulls ? 1 + (Math.imul(i + 1, 2654435761) >>> 0) % (GpuWorld.hulls.hulls.length - 1) : 0;
       if (hid) {
         const sc = Math.cbrt(1 / GpuWorld.hulls.hulls[hid].vol); SS.multiplyScalar(sc);
         M4.compose(PP, QQ, SS);
@@ -419,125 +414,28 @@ function readBodies(f, o) {
 }
 function boxShape(f, o) {
   const [x, y, z, sx, sy, sz, code] = [f[o], f[o + 1], f[o + 2], f[o + 3], f[o + 4], f[o + 5], f[o + 6]];
-  // the engine sends material + 16 x paint: the material drives physics, both the colour
-  // (and 256 when the brick is on a fracture surface: drawn and collided as its Voronoi cells, see fracCells)
-  return { p: [(x + sx / 2) * TICK, (y + sy / 2) * TICK, (z + sz / 2) * TICK], q: [0, 0, 0, 1], h: [sx * TICK / 2, sy * TICK / 2, sz * TICK / 2], mat: code & 15, col: code & 255, frac: (code & 256) !== 0 };
-}
-// ---- irregular fracture
-// A brick on a fracture surface (the engine marks it when a joint of it breaks or a neighbour is crushed away) is
-// replaced by the Voronoi cells of a fracture pattern, which tile it exactly, and one or two of its cells spall off
-// as chunks: a break is jagged, not a step of boxes. Pattern and spalled cells come from the brick's index (the
-// engine's brick::frac_cells, the same hash), so they are the same every time the brick is seen.
-function fracCells(i) {
-  let h = Math.imul(i, 2654435761) >>> 0; h = ((h >>> 7) | (h << 25)) >>> 0; h = (h ^ 0x9e3779b9) >>> 0;
-  const pattern = h % 16, n = GpuWorld.hulls.patterns[pattern].length;
-  if (n < 2) return { pattern, mask: 0 };
-  const a = (h >>> 8) % n; let mask = 1 << a;
-  if (n > 3 && ((h >>> 16) & 1)) mask |= 1 << ((a + 1 + ((h >>> 20) % (n - 1))) % n);
-  return { pattern, mask };
-}
-// a fractured brick's cells (shape p and q in the frame given), split into those kept and those spalled
-function fracSplit(idx, s, p, q) {
-  const { pattern, mask } = fracCells(idx);
-  const cells = GpuWorld.hullShapes(p, q, s.h, pattern, s.mat, s.col);
-  return { kept: cells.filter((c, k) => !((mask >> k) & 1)), spall: cells.filter((c, k) => (mask >> k) & 1) };
-}
-const fracStatic = new Map();   // standing fractured brick -> { key, slots, cells }
-const FRAC_MAX = 1500;
-const FRACTURE_CELLS = !window.__noFracCells;   // (off only to compare, in the lab)
-const fracGone = new Map();   // box key -> brick index, of standing fractured bricks that went with a piece
-// box key (tower frame) -> the hash its cells were made with: a brick that already spalled keeps the same cells when
-// its piece breaks again (the engine hands back the whole brick; spalling again made its material twice)
-const fracKeys = new Map();
-let staticCellVol = 0, staticCellPubVol = 0, fracDirty = false;
-const cellVol = (c) => 8 * c.h[0] * c.h[1] * c.h[2] * GpuWorld.hulls.hulls[c.hull].vol;
-// the standing cells are drawn from their own instanced meshes, published with the chunk meshes (so a brick
-// leaves the engine's mesh and shows as cells in the same frame)
-const staticCellMeshes = new Map();
-let fracPending = [];
-// the standing cells now, to be shown with the chunk meshes of the job that made them (or at once, without a GPU)
-function snapFrac() {
-  if (!fracDirty) return; fracDirty = false;
-  const list = []; for (const [idx, r] of fracStatic) for (const c of r.cells) list.push([c, idx]);
-  const snap = { list, vol: staticCellVol, need: readSeq + 1 };
-  if (gpu) fracPending.push(snap); else publishFrac(snap);
-}
-function publishFrac(snap) {
-  const by = new Map();
-  for (const [c, idx] of snap.list) { let l = by.get(c.hull); if (!l) by.set(c.hull, l = []); l.push([c, idx]); }
-  for (const [id, m] of staticCellMeshes) if (!by.has(id)) m.count = 0;
-  for (const [id, l] of by) {
-    let m = staticCellMeshes.get(id);
-    if (!m) {
-      const src = hullMesh(id);
-      m = new THREE.InstancedMesh(src.geometry, dMesh.material, HULL_CAP);
-      m.frustumCulled = false; m.castShadow = true; m.receiveShadow = true;
-      m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(HULL_CAP * 3).fill(1), 3);
-      scene.add(m); staticCellMeshes.set(id, m);
-    }
-    const n = Math.min(HULL_CAP, l.length);
-    for (let k = 0; k < n; k++) {
-      const [c, idx] = l[k];
-      PP.set(c.p[0], c.p[1], c.p[2]); QQ.set(c.q[0], c.q[1], c.q[2], c.q[3]); SS.set(c.h[0], c.h[1], c.h[2]);
-      M4.compose(PP, QQ, SS); m.setMatrixAt(k, M4); m.setColorAt(k, debrisColour(c.col, idx));
-    }
-    m.count = n; m.instanceMatrix.needsUpdate = true; m.instanceColor.needsUpdate = true;
+  // the engine sends material + 16 x paint (the material drives physics, both the colour) + 512 x hull: a convex
+  // cell of the hull library (the engine's and the GPU's are the same, gpu/test_hulls.cjs), mapped into the box
+  const p = [(x + sx / 2) * TICK, (y + sy / 2) * TICK, (z + sz / 2) * TICK], h = [sx * TICK / 2, sy * TICK / 2, sz * TICK / 2];
+  const hull = Math.floor(code / 512), s = { p, q: [0, 0, 0, 1], h, mat: code & 15, col: code & 255, hull: 0 };
+  if (hull && GpuWorld.hulls && hull < GpuWorld.hulls.count) {
+    const bx = GpuWorld.hulls.hulls[hull].box;
+    s.p = p.map((c, k) => c + bx.c[k] * h[k]); s.h = h.map((x, k) => x * bx.h[k]); s.hull = hull;
   }
-  staticCellPubVol = snap.vol;
-  if (LAB.on) LAB.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0) + staticCellPubVol;
+  return s;
 }
-// cells that spall off a fracture surface fall as crumbs: particles of the cell's volume (drawn as cells)
-function addCrumbCells(cells) {
-  const slotsP = gpu.addParticles(cells.map(c => ({ p: c.p, v: [0, 0, 0], w: [0, 0, 0], q: c.q, r: Math.cbrt(6 * c.h[0] * c.h[1] * c.h[2] * GpuWorld.hulls.hulls[c.hull].vol / Math.PI), mat: c.mat })));
-  // (h is the box of equal volume)
-  slotsP.forEach((slot, k) => { if (slot < 0) return; const c = cells[k], e = Math.cbrt(GpuWorld.hulls.hulls[c.hull].vol); const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: c.h.map(x => x * e), col: c.col, gen: g, dead: false }; partsMade++; });
-}
+// a shape's volume (a cell: its share of its own box)
+const shapeVol = (s) => 8 * s.h[0] * s.h[1] * s.h[2] * (s.hull ? GpuWorld.hulls.hulls[s.hull].vol : 1);
 function applyStatic(updates) {
   let woke = false;
-  const spalled = [];
   for (const u of updates) {
     const [idx, alive] = [u[0], u[1]];
     const s = boxShape(u, 2);
-    const fr = fracStatic.get(idx), key = u.slice(2, 8).join(',');
-    const frac = alive && s.frac && GpuWorld.hulls;
-    // a fractured brick changed (split, or no longer fractured): its cells go first
-    if (fr && (!frac || fr.key !== key)) {
-      for (const sl of fr.slots) gpu.killShape(sl);
-      for (const c of fr.cells) staticCellVol -= cellVol(c);
-      fracStatic.delete(idx); fracDirty = true; woke = true;
-      // (if it now falls with a piece, the piece takes the same cells and spalls nothing more)
-      if (!alive) fracGone.set(key, idx);
-    }
-    // (within budget: at most FRAC_MAX standing bricks as cells, and only with shape capacity to spare; the cut of
-    // the lab's collapse marks thousands, and as cells and chunk bodies they ran the GPU world out of shapes)
-    // (over budget it stays whole: one cell, the cube; the engine leaves every fractured brick out of its mesh, so
-    // it must be drawn here either way)
-    const whole = frac && !fracStatic.has(idx) && (!setting.chunks || !FRACTURE_CELLS || fracStatic.size >= FRAC_MAX || gpu.roomShapes() < 4096);
-    if (frac) {
-      if (fracStatic.has(idx)) continue;
-      if (slots.has(idx)) { gpu.killShape(slots.get(idx)); slots.delete(idx); }
-      const { kept, spall } = whole ? { kept: [{ p: s.p.slice(), q: [0, 0, 0, 1], h: s.h.slice(), mat: s.mat, col: s.col, hull: 0 }], spall: [] } : fracSplit(idx, s, s.p, [0, 0, 0, 1]);
-      // (spalled once: a brick seen again after a split keeps all its cells)
-      const first = !fr;
-      const cells = first ? kept : kept.concat(spall);
-      fracStatic.set(idx, { key, cells, slots: cells.map(c => gpu.setStaticShape(null, 1, c.p, c.h, c.mat, c.hull)) });
-      if (!whole) fracKeys.set(key, idx);
-      for (const c of cells) staticCellVol += cellVol(c);
-      if (first) for (const c of spall) spalled.push(c);
-      fracDirty = true; woke = true;
-      continue;
-    }
-    if (alive) slots.set(idx, gpu.setStaticShape(slots.get(idx) ?? null, 1, s.p, s.h, s.mat));
+    // (a brick split into convex cells: each cell is a brick of its own, a hull shape)
+    if (alive) slots.set(idx, gpu.setStaticShape(slots.get(idx) ?? null, 1, s.p, s.h, s.mat, s.hull));
     else if (slots.has(idx)) { gpu.killShape(slots.get(idx)); slots.delete(idx); woke = true; }
   }
-  // the spalled cells fall as crumbs (particles, drawn as cells); without room for them, as chunk bodies
-  if (spalled.length) {
-    const asP = gpu.addParticles && setting.particles && gpu.roomParticles && gpu.roomParticles() >= spalled.length;
-    if (asP) addCrumbCells(spalled);
-    else if (gpu.roomBodies() >= spalled.length && gpu.roomShapes() >= spalled.length) gpu.addBodies(spalled.map(c => ({ shapes: [{ ...c }], v: [0, 0, 0], w: [0, 0, 0] })));
-  }
   if (woke) gpu.wakeAll();   // what rested on removed bricks must fall
-  snapFrac();
 }
 // Add bodies whose boxes are in the tower frame. xf: tower frame -> world { R, T, C } (identity when absent);
 // vel(c): the velocity a body starts with at world point c, and its spin.
@@ -549,8 +447,11 @@ const pInfo = [];      // particle slot -> { h, col, gen, dead }
 let partsMade = 0, partsCrushed = 0;
 function asParticle(b) {
   if (!setting.particles || !gpu.capP || b.id >= 0 || b.boxes.length !== 1) return false;
-  const bx = b.boxes[0], h = [bx[3] * TICK / 2, bx[4] * TICK / 2, bx[5] * TICK / 2];
-  return Math.cbrt(6 * h[0] * h[1] * h[2] / Math.PI) <= PART_R && Math.max(...h) <= 0.35;
+  const s = boxShape(b.boxes[0], 0);
+  // (a cell spalled off a fracture surface always: as chunk bodies, slivers of them rebounded and thousands ran the
+  // GPU world out of shapes)
+  if (s.hull) return true;
+  return Math.cbrt(6 * shapeVol(s) / 8 / Math.PI) <= PART_R && Math.max(...s.h) <= 0.35;
 }
 function addPieces(list, xf, vel, cool) {
   if (!gpu || !list.length) return { idxs: [], list: [], parts: [], kinds: [] };
@@ -559,38 +460,8 @@ function addPieces(list, xf, vel, cool) {
   for (const b of list) { if (proom > 0 && asParticle(b)) { proom--; pl.push(b); } else bl.push(b); }
   list = bl;
   // capacity: bodies and shapes (slots of retired bodies are not reused)
-  // fractured boxes of new pieces (made from the standing structure, not cut from a moving piece): their cells,
-  // the spalled ones as chunks of their own
-  const spallP = [];
-  if (setting.chunks && GpuWorld.hulls && FRACTURE_CELLS) {
-    const extra = [];
-    for (const b of list) {
-      if (b.chunk || b.boxes.length < 2) continue;
-      b.cells = [];
-      for (let k = 0; k < b.boxes.length; k++) {
-        const s = boxShape(b.boxes[k], 0);
-        if (!s.frac) continue;
-        const key = Array.from(b.boxes[k].slice(0, 6)).join(','), was = fracGone.get(key) ?? fracKeys.get(key);
-        // already cells (standing, or in the piece this one broke from): the same ones, nothing more spalls
-        if (was !== undefined) { fracGone.delete(key); b.cells[k] = fracSplit(was, s, s.p, [0, 0, 0, 1]).kept; continue; }
-        // newly fractured: only in pieces made from the standing structure (a piece cut from a moving one is
-        // placed by the GPU one for one, with no room for crumbs placed with it)
-        if (xf) continue;
-        const h = Math.floor(s.p[0] * 977 + s.p[1] * 131 + s.p[2] * 7919) >>> 0;
-        const { kept, spall } = fracSplit(h, s, s.p, [0, 0, 0, 1]);
-        fracKeys.set(key, h);
-        b.cells[k] = kept;
-        for (const c of spall) spallP.push(c);
-      }
-    }
-    if (extra.length) list = list.concat(extra);
-    // the spalled cells fall as crumbs; without room for them as particles, they stay on the piece
-    const room = setting.particles && gpu.roomParticles ? gpu.roomParticles() : 0;
-    if (spallP.length && room >= spallP.length) addCrumbCells(spallP);
-    else if (spallP.length) for (const b of list) if (b.cells) b.cells = b.cells.map((kept, k) => kept && kept.length ? kept.concat(fracSplit(Math.floor(boxShape(b.boxes[k], 0).p[0] * 977 + boxShape(b.boxes[k], 0).p[1] * 131 + boxShape(b.boxes[k], 0).p[2] * 7919) >>> 0, boxShape(b.boxes[k], 0), boxShape(b.boxes[k], 0).p, [0, 0, 0, 1]).spall) : kept);
-  }
   let room = gpu.roomBodies(), sroom = gpu.roomShapes(), k = 0;
-  const nShapes = (b) => b.chunk ? 1 : b.boxes.reduce((n, bx, i) => n + (b.cells && b.cells[i] ? b.cells[i].length : 1), 0);
+  const nShapes = (b) => b.chunk ? 1 : b.boxes.length;
   while (k < list.length && room > 0 && sroom >= nShapes(list[k])) { sroom -= nShapes(list[k]); room--; k++; }
   if (k < list.length) { dropped += list.length - k; list = list.slice(0, k); }
   const R = xf ? xf.R : [[1, 0, 0], [0, 1, 0], [0, 0, 1]], qs = xf ? m2q(R) : [0, 0, 0, 1], C = xf ? xf.C : [0, 0, 0], T = xf ? xf.T : [0, 0, 0];
@@ -602,7 +473,7 @@ function addPieces(list, xf, vel, cool) {
     for (const b of list) {
       if (b.chunk || b.id >= 0 || b.boxes.length !== 1) { out.push(b); continue; }
       const s0 = boxShape(b.boxes[0], 0);
-      if (Math.max(...s0.h) < 0.15) { out.push(b); continue; }
+      if (Math.max(...s0.h) < 0.15 || s0.hull) { out.push(b); continue; }
       const pat = Math.floor(Math.random() * GpuWorld.hulls.patterns.length);
       for (const sh of GpuWorld.hullShapes(s0.p, [0, 0, 0, 1], s0.h, pat, s0.mat, s0.col)) out.push({ id: -1, boxes: b.boxes, chunk: sh, of: b });
     }
@@ -611,19 +482,13 @@ function addPieces(list, xf, vel, cool) {
   const bodies = list.map(b => {
     if (b.chunk) { const v = vel ? vel(b.chunk.p, b.of) : { v: [0, 0, 0], w: [0, 0, 0] }; return { shapes: [{ ...b.chunk }], v: v.v, w: v.w }; }
     let m = 0, c = [0, 0, 0];
-    const shapes = b.boxes.flatMap((bx, k) => {
-      // (cells are made in the tower frame: moved into the world like the boxes)
-      if (b.cells && b.cells[k]) return b.cells[k].map(cs => {
-        const w = mv(R, [cs.p[0] - C[0], cs.p[1] - C[1], cs.p[2] - C[2]]);
-        const p = [T[0] + w[0], T[1] + w[1], T[2] + w[2]];
-        const vol = cs.h[0] * cs.h[1] * cs.h[2] * GpuWorld.hulls.hulls[cs.hull].vol; m += vol; for (let a = 0; a < 3; a++) c[a] += vol * p[a];
-        return { ...cs, p, q: qs };
-      });
+    const shapes = b.boxes.map((bx) => {
       const s = boxShape(bx, 0);
       const w = mv(R, [s.p[0] - C[0], s.p[1] - C[1], s.p[2] - C[2]]);
       s.p = [T[0] + w[0], T[1] + w[1], T[2] + w[2]]; s.q = qs;
-      const vol = s.h[0] * s.h[1] * s.h[2]; m += vol; for (let k = 0; k < 3; k++) c[k] += vol * s.p[k];
-      return [s];
+      // (a cell's mass is at its centroid, not its box's centre: near enough for the velocity it starts with)
+      const vol = shapeVol(s); m += vol; for (let k = 0; k < 3; k++) c[k] += vol * s.p[k];
+      return s;
     });
     c = c.map(x => x / m);
     const v = vel ? vel(c, b) : { v: [0, 0, 0], w: [0, 0, 0] };
@@ -635,16 +500,18 @@ function addPieces(list, xf, vel, cool) {
     const w = mv(R, [s.p[0] - C[0], s.p[1] - C[1], s.p[2] - C[2]]);
     const c = [T[0] + w[0], T[1] + w[1], T[2] + w[2]];
     const v = vel ? vel(c, b) : { v: [0, 0, 0], w: [0, 0, 0] };
-    return { e: { p: c, v: v.v, w: v.w, q: qs, r: Math.cbrt(6 * s.h[0] * s.h[1] * s.h[2] / Math.PI), mat: s.mat, wait: !!xf }, s };
+    return { e: { p: c, v: v.v, w: v.w, q: qs, r: Math.cbrt(6 * shapeVol(s) / 8 / Math.PI), mat: s.mat, wait: !!xf }, s };
   });
   const parts = gpu.addParticles ? gpu.addParticles(pent.map(x => x.e)) : [];
-  parts.forEach((slot, k) => { if (slot < 0) return; const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: pent[k].s.h, col: pent[k].s.col, gen: g, dead: false }; partsMade++; });
+  // (h: the box of the crumb's volume; a cell keeps its hull id, to be drawn as itself)
+  parts.forEach((slot, k) => { if (slot < 0) return; const s = pent[k].s, e = s.hull ? Math.cbrt(GpuWorld.hulls.hulls[s.hull].vol) : 1; const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: s.h.map(x => x * e), hull: s.hull, col: s.col, gen: g, dead: false }; partsMade++; });
   const idxs = gpu.addBodies(bodies);
   list.forEach((b, k) => {
     if (b.id < 0) return;
     const idx = idxs[k], gb = idx ? gpu.bodies[idx - 1] : null;
     if (!gb) return;
     bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, v0: bodies[k].v, f0: gpu.frame, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: clock() + (cool || 0) });
+    armPlan(idx, b.id);
   });
   // (vel was called for the bodies kept, in order, then for the particles)
   return { idxs, list, parts };
@@ -655,6 +522,8 @@ function remeshDirty() {
 }
 let lastBlast = '', structPending = false, structRounds = 0, failedJoints = 0, breaks = 0, structRatio = 0;
 let dustBricks = 0, impactMs = 0, dropped = 0, workerMs = 0;
+// each engine job's time in the engine (ms), for the lab
+const engineMsLog = [];
 
 // ---- the simulation engine runs in a worker
 // The worker holds the authoritative brick store and does everything that changes it: blasts, the
@@ -676,11 +545,13 @@ onmessage = async (m) => {
   else if (d.op === 'structure') { if (d.rest) for (let k = 0; k < d.rest.length; k += 4) E.rest_load(d.rest[k], d.rest[k + 1], d.rest[k + 2], d.rest[k + 3]); n = E.structure_step(d.max); }
   else if (d.op === 'pblast') n = E.piece_blast(d.piece, d.x, d.y, d.z, d.r);
   else if (d.op === 'impacts') { const p = E.impacts_in(d.recs.length / 11); new Float32Array(E.memory.buffer, p, d.recs.length).set(d.recs); n = E.impacts(d.dt); }
-  const out = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
+  else if (d.op === 'snap') { const o = []; for (const pc of d.pieces) { n += E.piece_snap(pc); o.push(...new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len())); } d.outs = o; }
+  const out = d.op === 'snap' ? Float32Array.from(d.outs) : new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
+  const plans = new Float32Array(E.memory.buffer, E.plan_ptr(), E.plan_len()).slice();
   let snap = null;
   if (n > 0) { const len = E.snap_save(); snap = new Uint8Array(E.memory.buffer, E.snap_ptr(), len).slice(); }
-  const r = { op: d.op, n, out, snap, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), ms: performance.now() - t0 };
-  postMessage(r, snap ? [out.buffer, snap.buffer] : [out.buffer]);
+  const r = { op: d.op, n, out, snap, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans, ms: performance.now() - t0 };
+  postMessage(r, snap ? [out.buffer, snap.buffer, plans.buffer] : [out.buffer, plans.buffer]);
 };`;
 let worker = null, busy = null;
 const jobs = { blast: [], impacts: null, structure: false };
@@ -702,8 +573,9 @@ function runInline(job) {
   if (job.op === 'blast') n = E.blast(job.x, job.y, job.z, job.r);
   else if (job.op === 'structure') { if (job.rest) for (let k = 0; k < job.rest.length; k += 4) E.rest_load(job.rest[k], job.rest[k + 1], job.rest[k + 2], job.rest[k + 3]); n = E.structure_step(job.max); }
   else if (job.op === 'pblast') n = E.piece_blast(job.piece, job.x, job.y, job.z, job.r);
+  else if (job.op === 'snap') { const o = []; for (const pc of job.pieces) { n += E.piece_snap(pc); o.push(...new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len())); } job.outs = o; }
   else { const p = E.impacts_in(job.recs.length / 11); new Float32Array(E.memory.buffer, p, job.recs.length).set(job.recs); n = E.impacts(job.dt); }
-  return { op: job.op, n, out: new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), ms: performance.now() - t0, inline: true };
+  return { op: job.op, n, out: job.op === 'snap' ? Float32Array.from(job.outs) : new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans: new Float32Array(E.memory.buffer, E.plan_ptr(), E.plan_len()).slice(), ms: performance.now() - t0, inline: true };
 }
 // Rubble lying on the building weighs on it: once a second the weight of the debris at rest (bodies slower than
 // 0.5 m/s and particles asleep) goes to the engine with a structure check, binned in 0.5 m cells; the engine
@@ -763,14 +635,66 @@ function finish(r) {
 function finishInner(r) {
   const job = busy; busy = null;
   workerMs = r.ms; dustBricks = r.dust; structRatio = r.ratio;
+  engineMsLog.push(r.ms); if (engineMsLog.length > 5000) engineMsLog.shift();
   if (r.cracked !== undefined) crackedJoints = r.cracked;
   if (r.op === 'structure' && job && job.rest) restOnFloors = r.restOn || 0;
   // the page's copy of the store
   if (r.snap) { const p = E.snap_in(r.snap.length); new Uint8Array(E.memory.buffer, p, r.snap.length).set(r.snap); E.snap_load(r.lo, r.hi); }
+  readPlans(r);
   if (r.op === 'blast') onBlast(job, r);
+  else if (r.op === 'snap') onSnap(job, r);
   else if (r.op === 'pblast') onImpacts(job, r);
   else if (r.op === 'structure') onStructure(r);
   else onImpacts(job, r);
+}
+// ---- breaking on the GPU in the step of a hit (GpuWorld.setSnap). The engine sends with each new falling piece its
+// break plan: the impulse in one step that breaks it, and the bricks of the part that comes away. The GPU breaks it
+// in the step of the hit; the page then tells the engine (a 'snap' job, first in line), which cuts the plan's joints
+// and answers with the two pieces: the one kept by the body, and the one the spare body took.
+const SNAP_ON = !window.__noSnap;
+let jobPlans = new Map(), gpuSnaps = 0;
+const snapPending = new Map();   // piece -> { body, spare, infB } until the engine's answer
+function readPlans(r) {
+  jobPlans = new Map(); const f = r.plans; if (!f) return;
+  for (let o = 0; o + 2 < f.length;) { const n = f[o + 2]; jobPlans.set(f[o], { imp: f[o + 1], pos: Array.from(f.subarray(o + 3, o + 3 + n)) }); o += 3 + n; }
+}
+function armPlan(idx, pid) {
+  const pl = jobPlans.get(pid); if (!pl || !SNAP_ON || !gpu || !gpu.setSnap) return;
+  const own = gpu.bodyShapes && gpu.bodyShapes.get(idx); if (!own) return;
+  const other = pl.pos.map(k => own[k]).filter(Boolean);
+  if (other.length === pl.pos.length) gpu.setSnap(idx, pl.imp, other);
+}
+function takeGpuSnaps() {
+  if (!gpu.takeSnaps) return;
+  for (const s of gpu.takeSnaps()) {
+    const inf = bodyInfo.get(s.body); if (!inf) continue;
+    // a part's frame: the body's at its creation moved by the part's centre and rotation (the same tower-to-world
+    // map, see frameOf)
+    const fr = (part) => { const d = mv(q2m(inf.q0), part.p); return { ...inf, p0: [inf.p0[0] + d[0], inf.p0[1] + d[1], inf.p0[2] + d[2]], q0: qmulJ(inf.q0, part.q) }; };
+    bodyInfo.set(s.body, fr(s.A));
+    snapPending.set(inf.piece, { body: s.body, spare: s.spare, infB: fr(s.B) });
+    // (all of a frame's breaks in one job, first in line; the impacts after it still get their turn)
+    const j = jobs.blast[0] && jobs.blast[0].op === 'snap' ? jobs.blast[0] : (jobs.blast.unshift({ op: 'snap', pieces: [] }), jobs.blast[0]);
+    j.pieces.push(inf.piece);
+    gpuSnaps++;
+  }
+  pump();
+}
+function onSnap(job, r) {
+  const f = r.out; let o = 0;
+  for (const pc of job.pieces) {
+    const pend = snapPending.get(pc); snapPending.delete(pc);
+    const n = f[o++];
+    // (the engine broke the piece first: its parts already include the spare's bricks)
+    if (!(n >= 2)) { if (pend) gpu.killBody(pend.spare); continue; }
+    const idA = f[o], nA = f[o + 1]; o += 2 + 7 * nA;
+    const idB = f[o], nB = f[o + 1]; o += 2 + 7 * nB;
+    if (!pend) continue;
+    const inf = bodyInfo.get(pend.body);
+    if (inf) { inf.piece = idA; inf.n = nA; }
+    bodyInfo.set(pend.spare, { ...pend.infB, piece: idB, n: nB });
+    // (the parts get no plan of their own: the engine's answer to the hit refines the break from here)
+  }
 }
 function readStatic(f) {
   let o = 0;
@@ -920,6 +844,7 @@ function crushBodies() {
   }
 }
 function impacts() {
+  takeGpuSnaps();
   crushBodies();
   const evs = gpu.takeEvents();
   if (!evs.length) return;
@@ -1024,7 +949,7 @@ function onImpacts(job, r) {
     const Jl = Math.hypot(...c.J) || 1, D = c.J.map(v => v / Jl);
     // parts cut free keep falling, slowed by the energy it took to crush the section that gave way
     let mFree = 0;
-    for (const kd of kids) if (!kd.hit) for (const bx of kd.boxes) mFree += bx[3] * bx[4] * bx[5] * TICK * TICK * TICK * ((MATERIALS[bx[6] & 15] || MATERIALS[0]).density);
+    for (const kd of kids) if (!kd.hit) for (const bx of kd.boxes) mFree += shapeVol(boxShape(bx, 0)) * ((MATERIALS[bx[6] & 15] || MATERIALS[0]).density);
     // (cap is the energy crushing that section took: the speed into the contacts drops to sqrt(v^2 - 2E/m))
     const along = vPre[0] * D[0] + vPre[1] * D[1] + vPre[2] * D[2];   // < 0: moving into the contacts
     const speed = Math.max(-along, 0);
@@ -1090,7 +1015,9 @@ const SETTINGS = {
   crush: { el: 's-crush', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: v => setParam(2, v) },
   adaptive: { el: 's-adaptive', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: v => { if (gpu && !+v) gpu.substeps = setting.substeps || 12; } },
   restLoads: { el: 's-restLoads', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
-  chunks: { el: 's-chunks', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
+  // (chunks: loose bricks break into convex chunks, and the engine splits bricks on a fracture surface into
+  // convex cells, at most 1,500 standing bricks)
+  chunks: { el: 's-chunks', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: v => setParam(3, +v && !window.__noFracCells ? 1500 : 0) },
   particles: { el: 's-particles', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
   crumbs: { el: 's-crumbs', def: 384, fmt: v => `${v}`, apply: v => setParam(0, v) },
   rubble: { el: 's-rubble', def: 64, fmt: v => `${v}`, apply: v => setParam(1, v) },

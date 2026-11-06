@@ -55,8 +55,14 @@ fn span(m: u8, span: i32, h: i32, bear: i32) -> Row {
     b.build_joints();
     let a = run(&b, &[]);
     let (c, bw, d) = (span as f32 * 0.0625, bear as f32 * 0.125, h as f32 * 0.125);
-    let sigma = 3.0 * density(m) * G * (c * c + bw * c) / d;
-    Row { case: std::format!("simple span, {} m clear on {:.2} m bearings, {:.2} m deep, {}", span as f32 * 0.125, bw, d, name(m)), engine: a.max_ratio, theory: sigma / flexural(m) }
+    // the strip is bonded to its bearings (its joints carry bending), so it is between clamped (w L^2 / 12 at the
+    // ends) and simply supported (w L^2 / 8 at midspan), L between the bearings' centres. The engine checks the
+    // sections at cell faces (every 2 m at most): a peak between two faces is missed by up to w s^2 / 2 for a
+    // face s from it. The row's theory is the clamped end moment; `span_bracket` checks the bracket.
+    let l = 2.0 * c + bw;
+    let w = density(m) * G * d;
+    let sigma = w * l * l / 12.0 * 6.0 / (d * d);
+    Row { case: std::format!("span bonded to bearings, {} m clear, {:.2} m deep, {}", span as f32 * 0.125, d, name(m)), engine: a.max_ratio, theory: sigma / flexural(m) }
 }
 /// A column of `side` x `side` ticks, `tall` ticks high, with a load P (N) on a cap brick on top.
 /// Theory: the base carries P plus its own weight: sigma = (P + W) / A against the compressive strength.
@@ -78,10 +84,19 @@ fn name(m: u8) -> &'static str { match m { mat::CONCRETE => "concrete", mat::MAS
     for len in [24, 40, 56] { rows.push(cantilever(mat::CONCRETE, len, 2)); }
     rows.push(cantilever(mat::CONCRETE, 40, 4));
     rows.push(cantilever(mat::TIMBER, 40, 2));
-    for sp in [48, 96] { rows.push(span(mat::CONCRETE, sp, 2, 2)); }
-    rows.push(span(mat::TIMBER, 96, 4, 2));
+    let mut spans = Vec::new();
+    for sp in [48, 96] { spans.push(span(mat::CONCRETE, sp, 2, 2)); }
+    spans.push(span(mat::TIMBER, 96, 4, 2));
     rows.push(column(mat::CONCRETE, 4, 24, 5.0e6));
     rows.push(column(mat::MASONRY, 4, 24, 2.0e6));
     rows.push(column(mat::TIMBER, 4, 24, 1.0e6));
     report(&rows, 0.10);
+    // spans: between 0.6 of the clamped end moment (partial fixity, sampled at cell faces) and the simply
+    // supported midspan moment with the bearings' width, w (c^2 + b c) / 2: about 1.6 times the clamped end's for
+    // these spans. (A stiff timber beam on short bearings comes out at the simply supported value: 1.54.)
+    std::println!("{:<52} {:>8} {:>8}", "span (between 0.6 and 1.6 of clamped)", "engine", "clamped");
+    for r in &spans {
+        std::println!("{:<52} {:>8.3} {:>8.3}", r.case, r.engine, r.theory);
+        assert!(r.engine > 0.6 * r.theory && r.engine < 1.6 * r.theory, "{}: engine {:.3}, clamped {:.3}", r.case, r.engine, r.theory);
+    }
 }

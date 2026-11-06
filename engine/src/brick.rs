@@ -24,12 +24,11 @@ pub const F_DYNAMIC: u8 = 4;
 pub const F_MONO: u8 = 8;
 /// reinforced concrete: a failure first cracks it (the steel holds, half the strength is left), a second one separates
 pub const F_REINF: u8 = 16;
-/// on a fracture surface: a joint of it broke, or a neighbour was crushed away. Drawn and collided as its Voronoi
-/// cells (pattern and the cells it lost from `frac_cells`), so a break is jagged, not a step of boxes.
+/// on a fracture surface: a joint of it broke, or a neighbour was crushed away. It waits in `frac_pending` to be
+/// split into the convex cells of a fracture pattern (`shatter`), so a break is jagged, not a step of boxes.
 pub const F_FRAC: u8 = 32;
-/// The cell pattern of fractured brick `i` (0..16, see the GPU's hull library) and the mask of its cells that spall
-/// off (fall away as chunks): one or two of them, never all. Fixed by the brick's index, so the worker's engine,
-/// the page's copy and the page agree without being told.
+/// The cell pattern of fractured brick `i` (0..16, see the hull library) and the mask of its cells that spall off
+/// (fall away as crumbs): one or two of them, never all. Fixed by the brick's index.
 pub fn frac_cells(i: u32, ncells: u32) -> (u32, u32) {
     let h = i.wrapping_mul(2654435761).rotate_right(7) ^ 0x9e37_79b9;
     let pattern = h % 16;
@@ -67,11 +66,14 @@ pub fn face_contact(p: &TBox, q: &TBox) -> Option<(u8, u32, bool)> {
 
 #[derive(Clone, Default)]
 pub struct Bricks {
-    // bricks, SoA (24 B each)
+    // bricks, SoA (25 B each)
     pub x: Vec<i16>, pub y: Vec<i16>, pub z: Vec<i16>,
     pub sx: Vec<u8>, pub sy: Vec<u8>, pub sz: Vec<u8>,
     pub mat: Vec<u8>, pub paint: Vec<u8>, pub flags: Vec<u8>,
     pub structure: Vec<u16>, pub body: Vec<u32>, pub jhead: Vec<u32>, pub damage: Vec<u8>,
+    /// the brick's convex cell: 0 = its whole box; else a cell of the hull library (`hull::lib`), mapped into the box
+    /// (the box is the brick it was split from: the cells of one fractured brick share it)
+    pub hull: Vec<u8>,
     // joints, SoA (20 B each); `ja == NONE` marks a free slot
     pub ja: Vec<u32>, pub jb: Vec<u32>, pub jna: Vec<u32>, pub jnb: Vec<u32>,
     pub jarea: Vec<u16>, pub jaxis: Vec<u8>, pub jdmg: Vec<u8>,
@@ -84,6 +86,8 @@ pub struct Bricks {
     cnext: Vec<u32>,            // next brick in the same cell
     /// bricks added, resized or removed since the log was last drained (for meshes and physics shapes)
     pub log: Vec<u32>,
+    /// bricks marked on a fracture surface (F_FRAC) and not yet split into cells
+    pub frac_pending: Vec<u32>,
 }
 #[inline] fn ckey(l: usize, c: [i32; 3]) -> u64 {
     ((l as u64) << 60) | (((c[0] + (1 << 19)) as u64 & 0xfffff) << 40) | (((c[1] + (1 << 19)) as u64 & 0xfffff) << 20) | ((c[2] + (1 << 19)) as u64 & 0xfffff)
@@ -114,7 +118,7 @@ impl Bricks {
         put(out, &self.x); put(out, &self.y); put(out, &self.z);
         put(out, &self.sx); put(out, &self.sy); put(out, &self.sz);
         put(out, &self.mat); put(out, &self.paint); put(out, &self.flags);
-        put(out, &self.structure); put(out, &self.body); put(out, &self.jhead); put(out, &self.damage);
+        put(out, &self.structure); put(out, &self.body); put(out, &self.jhead); put(out, &self.damage); put(out, &self.hull);
         put(out, &self.ja); put(out, &self.jb); put(out, &self.jna); put(out, &self.jnb);
         put(out, &self.jarea); put(out, &self.jaxis); put(out, &self.jdmg);
         put(out, &self.jfree); put(out, &[self.live_joints as u32]);
@@ -128,7 +132,7 @@ impl Bricks {
         b.x = get(src, at); b.y = get(src, at); b.z = get(src, at);
         b.sx = get(src, at); b.sy = get(src, at); b.sz = get(src, at);
         b.mat = get(src, at); b.paint = get(src, at); b.flags = get(src, at);
-        b.structure = get(src, at); b.body = get(src, at); b.jhead = get(src, at); b.damage = get(src, at);
+        b.structure = get(src, at); b.body = get(src, at); b.jhead = get(src, at); b.damage = get(src, at); b.hull = get(src, at);
         b.ja = get(src, at); b.jb = get(src, at); b.jna = get(src, at); b.jnb = get(src, at);
         b.jarea = get(src, at); b.jaxis = get(src, at); b.jdmg = get(src, at);
         b.jfree = get(src, at); b.live_joints = get::<u32>(src, at)[0] as usize;
@@ -156,7 +160,7 @@ impl Bricks {
         self.x.push(min[0] as i16); self.y.push(min[1] as i16); self.z.push(min[2] as i16);
         self.sx.push(size[0] as u8); self.sy.push(size[1] as u8); self.sz.push(size[2] as u8);
         self.mat.push(material); self.paint.push(paint); self.flags.push(F_ALIVE);
-        self.structure.push(structure); self.body.push(NONE); self.jhead.push(NONE); self.damage.push(0);
+        self.structure.push(structure); self.body.push(NONE); self.jhead.push(NONE); self.damage.push(0); self.hull.push(0);
         self.cnext.push(NONE);
         self.index(i);
         self.log.push(i);
@@ -179,6 +183,12 @@ impl Bricks {
         // what it touched is now a fracture surface
         let mut j = self.jhead[i as usize];
         while j != NONE { let o = self.joint_other(j, i); self.mark_frac(o); j = self.joint_next(j, i); }
+        while self.jhead[i as usize] != NONE { let j = self.jhead[i as usize]; self.remove_joint(j); }
+        self.flags[i as usize] &= !F_ALIVE;
+        self.log.push(i);
+    }
+    /// Remove a brick without marking what it touched (a cell spalling off a fracture surface).
+    pub fn remove_quiet(&mut self, i: u32) {
         while self.jhead[i as usize] != NONE { let j = self.jhead[i as usize]; self.remove_joint(j); }
         self.flags[i as usize] &= !F_ALIVE;
         self.log.push(i);
@@ -305,11 +315,11 @@ impl Bricks {
     /// ones are refined near a break, smaller ones are crumbs already).
     pub fn mark_frac(&mut self, i: u32) {
         let iu = i as usize;
-        if self.flags[iu] & F_ALIVE == 0 || self.flags[iu] & F_FRAC != 0 || self.mat[iu] == mat::GLASS { return; }
+        if self.flags[iu] & F_ALIVE == 0 || self.flags[iu] & F_FRAC != 0 || self.hull[iu] != 0 || self.mat[iu] == mat::GLASS { return; }
         let s = self.size(i);
         if s.iter().any(|&v| v < 2) || s.iter().any(|&v| v > 16) { return; }
         self.flags[iu] |= F_FRAC;
-        self.log.push(i);
+        self.frac_pending.push(i);
     }
     /// A joint that breaks: both bricks are now on a fracture surface.
     pub fn fracture_joint(&mut self, j: u32) {
@@ -326,9 +336,111 @@ impl Bricks {
     }
 
     fn join_if_touching(&mut self, p: u32, q: u32, dmg: u8) {
-        if let Some((ax, area, p_low)) = face_contact(&self.tbox(p), &self.tbox(q)) {
+        if let Some((ax, area, p_low)) = self.contact(p, q) {
             if p_low { self.add_joint(p, q, ax, area, dmg); } else { self.add_joint(q, p, ax, area, dmg); }
         }
+    }
+
+    // ---- convex cells ----
+    /// the brick's convex cell, if it is one
+    #[inline] pub fn cell(&self, i: u32) -> Option<&'static crate::hull::Cell> { let h = self.hull[i as usize]; if h == 0 { None } else { Some(&crate::hull::lib().cells[h as usize]) } }
+    /// centre and half size of the brick's box (m)
+    pub fn box_m(&self, i: u32) -> ([f64; 3], [f64; 3]) {
+        let t = self.tbox(i); let k = TICK as f64;
+        ([0.5 * (t.min[0] + t.max[0]) as f64 * k, 0.5 * (t.min[1] + t.max[1]) as f64 * k, 0.5 * (t.min[2] + t.max[2]) as f64 * k],
+         [0.5 * (t.max[0] - t.min[0]) as f64 * k, 0.5 * (t.max[1] - t.min[1]) as f64 * k, 0.5 * (t.max[2] - t.min[2]) as f64 * k])
+    }
+    /// the brick's share of its box's volume (1 for a whole box)
+    #[inline] pub fn vol_share(&self, i: u32) -> f64 { self.cell(i).map_or(1.0, |c| c.vol) }
+    /// the brick's centroid (m)
+    pub fn centroid(&self, i: u32) -> [f64; 3] {
+        let (c, h) = self.box_m(i);
+        match self.cell(i) { None => c, Some(cl) => [c[0] + h[0] * cl.cen[0], c[1] + h[1] * cl.cen[1], c[2] + h[2] * cl.cen[2]] }
+    }
+    /// The brick's polygon on side `side` of its box (0..6: +x, -x, +y, -y, +z, -z), in m, counter-clockwise seen
+    /// from outside; none if it is a cell that does not reach that side.
+    pub fn side_poly(&self, i: u32, side: u8) -> Option<Vec<[f64; 3]>> {
+        let (c, h) = self.box_m(i);
+        if let Some(cl) = self.cell(i) { return cl.side(side).map(|f| cl.face_in(f, c, h)); }
+        let ax = (side / 2) as usize; let sg = if side % 2 == 0 { 1.0 } else { -1.0 };
+        let (u, w) = ((ax + 1) % 3, (ax + 2) % 3);
+        let corner = |a: f64, b: f64| { let mut p = c; p[ax] += sg * h[ax]; p[u] += a * h[u]; p[w] += b * h[w]; p };
+        let mut v = alloc::vec![corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)];
+        if sg < 0.0 { v.reverse(); }
+        Some(v)
+    }
+    /// Contact between bricks p and q: (axis, area in tick^2, true if p is on the min side). Two cells of one
+    /// fractured brick touch on their shared face (axis 3, p the lower cell of the pattern); otherwise the boxes
+    /// touch on a face and the contact is where the bricks' polygons on it overlap.
+    pub fn contact(&self, p: u32, q: u32) -> Option<(u8, u32, bool)> {
+        let (cp, cq) = (self.cell(p), self.cell(q));
+        if let (Some(a), Some(b)) = (cp, cq) {
+            if a.pattern == b.pattern && self.tbox(p) == self.tbox(q) {
+                let f = a.shared(b.slot)?;
+                let (c, h) = self.box_m(p);
+                let area = crate::hull::polygon(&a.face_in(f, c, h)).0;
+                return Some((3, area_ticks(area), a.slot < b.slot));
+            }
+        }
+        let (ax, area, p_low) = face_contact(&self.tbox(p), &self.tbox(q))?;
+        if cp.is_none() && cq.is_none() { return Some((ax, area, p_low)); }
+        let (lo, hi) = if p_low { (p, q) } else { (q, p) };
+        let poly = self.contact_poly(lo, hi, ax as usize);
+        let a = crate::hull::polygon(&poly).0;
+        if a < 1e-6 { return None; }
+        Some((ax, area_ticks(a), p_low))
+    }
+    /// Where `lo` (on the min side along `ax`) and `hi` meet: the overlap of their polygons on the shared plane, in m,
+    /// counter-clockwise about +ax.
+    pub fn contact_poly(&self, lo: u32, hi: u32, ax: usize) -> Vec<[f64; 3]> {
+        let (pa, pb) = match (self.side_poly(lo, 2 * ax as u8), self.side_poly(hi, 2 * ax as u8 + 1)) { (Some(a), Some(b)) => (a, b), _ => return Vec::new() };
+        let mut n = [0.0; 3]; n[ax] = 1.0;
+        crate::hull::intersect(&pa, &pb, n)
+    }
+    /// The face of joint j (m), counter-clockwise about the normal from ja to jb.
+    pub fn joint_poly(&self, j: u32) -> Vec<[f64; 3]> {
+        let ju = j as usize;
+        let (a, b) = (self.ja[ju], self.jb[ju]);
+        let ax = self.jaxis[ju] as usize;
+        if ax == 3 {
+            let (ca, cb) = (self.cell(a).unwrap(), self.cell(b).unwrap());
+            let (c, h) = self.box_m(a);
+            return ca.shared(cb.slot).map(|f| ca.face_in(f, c, h)).unwrap_or_default();
+        }
+        self.contact_poly(a, b, ax)
+    }
+    /// Split fractured brick `i` into the cells of its pattern (`frac_cells`). The first cell keeps `i`; its joints
+    /// go to the cells that reach them, and the cells are joined on their shared faces. Returns the cells and,
+    /// of them, the one or two that spall off (the caller removes them).
+    pub fn shatter(&mut self, i: u32) -> (Vec<u32>, Vec<u32>) {
+        let iu = i as usize;
+        self.flags[iu] &= !F_FRAC;
+        if self.hull[iu] != 0 || self.flags[iu] & F_ALIVE == 0 { return (Vec::new(), Vec::new()); }
+        let lib = crate::hull::lib();
+        let (pattern, _) = frac_cells(i, 1);
+        let ids = &lib.patterns[pattern as usize];
+        let (_, mask) = frac_cells(i, ids.len() as u32);
+        // its joints, with neighbour and damage
+        let mut nb: Vec<(u32, u8)> = Vec::new();
+        while self.jhead[iu] != NONE { let j = self.jhead[iu]; nb.push((self.joint_other(j, i), self.jdmg[j as usize])); self.remove_joint(j); }
+        let t = self.tbox(i);
+        let size = [t.max[0] - t.min[0], t.max[1] - t.min[1], t.max[2] - t.min[2]];
+        let mut cells = Vec::with_capacity(ids.len());
+        for (k, &id) in ids.iter().enumerate() {
+            let c = if k == 0 { i } else {
+                let n = self.add(t.min, size, self.mat[iu], self.paint[iu], self.structure[iu]);
+                let nu = n as usize;
+                self.flags[nu] = self.flags[iu]; self.body[nu] = self.body[iu]; self.damage[nu] = self.damage[iu];
+                n
+            };
+            self.hull[c as usize] = id as u8;
+            cells.push(c);
+        }
+        self.log.push(i);
+        for &c in &cells { for &(o, d) in &nb { self.join_if_touching(c, o, d); } }
+        for s in 0..cells.len() { for t in s + 1..cells.len() { self.join_if_touching(cells[s], cells[t], 0); } }
+        let spall = (0..cells.len()).filter(|&k| mask & (1 << k) != 0).map(|k| cells[k]).collect();
+        (cells, spall)
     }
 
     /// Rebuild every joint from geometry.
@@ -352,6 +464,7 @@ impl Bricks {
     pub fn split(&mut self, i: u32, axis: usize, at: i32) -> u32 {
         let b = self.tbox(i);
         debug_assert!(at > b.min[axis] && at < b.max[axis]);
+        debug_assert!(self.hull[i as usize] == 0, "a convex cell is not split");
         // detach i's joints, remembering neighbour and damage
         let mut nb: [(u32, u8); 64] = [(NONE, 0); 64];
         let mut big: Vec<(u32, u8)> = Vec::new();
@@ -423,7 +536,8 @@ impl Bricks {
         let mut splits = 0;
         while let Some(b) = work.pop() {
             let tb = self.tbox(b);
-            if !sphere_box(c, r, &tb) { continue; }
+            // (a convex cell is as small as fracture makes bricks: it is not split)
+            if !sphere_box(c, r, &tb) || self.hull[b as usize] != 0 { continue; }
             let s = self.size(b);
             let mut ax = 3; let mut best = target;
             for k in 0..3 { if s[k] > best { best = s[k]; ax = k; } }
@@ -441,7 +555,7 @@ impl Bricks {
     /// Bytes of brick + joint records per live brick (the format in SPEC.md; excludes the spatial index).
     pub fn bytes_per_brick(&self) -> f32 {
         let n = self.alive_count().max(1);
-        (n * 24 + self.live_joints * 20) as f32 / n as f32
+        (n * 25 + self.live_joints * 20) as f32 / n as f32
     }
     /// Approximate bytes held by the spatial index.
     pub fn index_bytes(&self) -> usize {
@@ -473,6 +587,8 @@ pub fn panel() -> (Bricks, u32) {
     (b, w)
 }
 
+/// an area in m^2 as tick^2 for a joint record (at least 1)
+fn area_ticks(a: f64) -> u32 { ((a / (TICK as f64 * TICK as f64)) + 0.5).clamp(1.0, 65535.0) as u32 }
 #[inline] fn floor_i(x: f32) -> i32 { crate::math::floor(x) as i32 }
 fn sphere_box(c: [f32; 3], r: f32, b: &TBox) -> bool {
     let mut d2 = 0.0;
@@ -497,6 +613,41 @@ mod tests {
         assert_eq!(face_contact(&TBox { min: [4, 1, 0], max: [8, 3, 2] }, &a), Some((0, 2, false)));
         assert_eq!(face_contact(&a, &TBox { min: [4, 2, 0], max: [8, 3, 2] }), None); // edge only
         assert_eq!(face_contact(&a, &TBox { min: [5, 0, 0], max: [8, 2, 2] }), None); // gap
+    }
+
+    #[test] fn a_fractured_brick_splits_into_its_convex_cells() {
+        // a 1 x 1 x 0.5 m masonry brick on a ground block, with a brick on each side and one on top: split into the
+        // cells of its pattern, the cells fill its volume, its old joints are shared by the cells that reach each
+        // face (the cells' faces tile it), and the cells are joined to each other on their shared faces
+        for idx in 0..16u32 {
+            let mut b = Bricks::new();
+            for _ in 0..idx { b.add([100, 0, 100], [2, 2, 2], mat::CONCRETE, 0, 0); }   // (to vary the pattern)
+            b.add([0, 0, 0], [8, 8, 4], mat::CONCRETE, 0, 0);
+            let i = b.add([0, 8, 0], [8, 8, 4], mat::MASONRY, 0, 0);
+            b.add([-8, 8, 0], [8, 8, 4], mat::MASONRY, 0, 0);
+            b.add([8, 8, 0], [8, 8, 4], mat::MASONRY, 0, 0);
+            b.add([0, 16, 0], [8, 8, 4], mat::MASONRY, 0, 0);
+            b.build_joints();
+            let face = |b: &Bricks, k: u32, o: u32| -> f64 { let mut a = 0.0; let mut j = b.jhead[k as usize]; while j != NONE { if b.joint_other(j, k) == o { a += crate::hull::polygon(&b.joint_poly(j)).0; } j = b.joint_next(j, k); } a };
+            let others: std::vec::Vec<u32> = (0..b.len() as u32).filter(|&o| o != i && b.contact(i, o).is_some()).collect();
+            assert_eq!(others.len(), 4);
+            let (cells, spall) = b.shatter(i);
+            let pat = &crate::hull::lib().patterns[frac_cells(i, 1).0 as usize];
+            assert_eq!(cells.len(), pat.len());
+            assert!(!spall.is_empty() && spall.len() < cells.len());
+            let vol: f64 = cells.iter().map(|&c| b.vol_share(c)).sum();
+            assert!((vol - 1.0).abs() < 1e-9, "the cells fill the brick: {vol}");
+            for &o in &others {
+                let a: f64 = cells.iter().map(|&c| face(&b, c, o)).sum();
+                let want = 0.5;   // (every face of a 1 x 1 x 0.5 m brick that touches a neighbour here is 0.5 m^2)
+                assert!((a - want).abs() < 1e-3, "pattern {}: the cells share the face to {o}: {a} m^2 against {want}", frac_cells(i, 1).0);
+            }
+            // cells joined where they share a face; each cell joined to something
+            let shared: usize = (0..cells.len()).map(|s| (s + 1..cells.len()).filter(|&t| { let (x, y) = (b.cell(cells[s]).unwrap(), b.cell(cells[t]).unwrap()); x.shared(y.slot).is_some() }).count()).sum();
+            let joined: usize = (0..b.ja.len()).filter(|&j| b.ja[j] != NONE && b.jaxis[j] == 3).count();
+            assert_eq!(joined, shared);
+            for &c in &cells { assert!(b.jhead[c as usize] != NONE); }
+        }
     }
 
     #[test] fn split_keeps_joints_exact() {

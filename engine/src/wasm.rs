@@ -77,10 +77,11 @@ static mut SNAP: Vec<u8> = Vec::new();
     for k in lo..=hi { g.remesh(k); }
     g.dirty = (lo.max(0), hi.min(g.chunks.len() as i32 - 1));
 }
-/// Settings: 0 crumbs kept per impacts call, 1 rubble fragments kept, 2 crush depth (m).
+/// Settings: 0 crumbs kept per impacts call, 1 rubble fragments kept, 2 crush depth (m), 3 standing bricks split
+/// into convex cells at most (0: fracture leaves boxes).
 #[no_mangle] pub extern "C" fn set_param(id: u32, v: f32) {
     let g = game();
-    match id { 0 => g.crumb_keep = (v.max(0.0) as usize).max(2), 1 => g.rubble_keep = v.max(0.0) as usize, 2 => g.crush_depth = v.max(0.0), _ => {} }
+    match id { 0 => g.crumb_keep = (v.max(0.0) as usize).max(2), 1 => g.rubble_keep = v.max(0.0) as usize, 2 => g.crush_depth = v.max(0.0), 3 => g.frac_max = v.max(0.0) as usize, _ => {} }
 }
 #[no_mangle] pub extern "C" fn game_mesh(on: u32) { game().mesh = on != 0; }
 #[no_mangle] pub extern "C" fn chunk_count() -> u32 { game().chunks.len() as u32 }
@@ -95,11 +96,11 @@ static mut SNAP: Vec<u8> = Vec::new();
     let (y0, y1) = (k * crate::tower::STOREY, (k + 1) * crate::tower::STOREY);
     let mut v = 0.0f64;
     for i in 0..g.b.len() {
-        // (the volume the chunk's mesh draws: bricks on a fracture surface are drawn by the page, as cells)
-        if g.b.flags[i] & (crate::brick::F_ALIVE | crate::brick::F_DYNAMIC | crate::brick::F_FRAC) != crate::brick::F_ALIVE { continue; }
+        if g.b.flags[i] & (crate::brick::F_ALIVE | crate::brick::F_DYNAMIC) != crate::brick::F_ALIVE { continue; }
         let y = g.b.y[i] as i32; if y < y0 || y >= y1 { continue; }
         let t = g.b.tbox(i as u32);
-        v += ((t.max[0] - t.min[0]) as f64) * ((t.max[1] - t.min[1]) as f64) * ((t.max[2] - t.min[2]) as f64);
+        // (a convex cell: its share of its box)
+        v += ((t.max[0] - t.min[0]) as f64) * ((t.max[1] - t.min[1]) as f64) * ((t.max[2] - t.min[2]) as f64) * g.b.vol_share(i as u32);
     }
     let t = crate::brick::TICK as f64; (v * t * t * t) as f32
 }
@@ -111,7 +112,7 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn rest_applied() -> f32 { game().rest_applied }
 #[no_mangle] pub extern "C" fn cracked_total() -> u32 { game().cracked_total as u32 }
 #[no_mangle] pub extern "C" fn bricks_dump() { game().dump(); }
-#[no_mangle] pub extern "C" fn blast(x: f32, y: f32, z: f32, r: f32) -> u32 { game().blast(v3(x, y, z), r) as u32 }
+#[no_mangle] pub extern "C" fn blast(x: f32, y: f32, z: f32, r: f32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.blast(v3(x, y, z), r) as u32; g.finish_plans(); n }
 #[no_mangle] pub extern "C" fn raycast(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32, max: f32) -> f32 { game().raycast(v3(ox, oy, oz), v3(dx, dy, dz), max) }
 #[no_mangle] pub extern "C" fn bricks_alive() -> u32 { game().b.alive_count() as u32 }
 #[no_mangle] pub extern "C" fn joints_live() -> u32 { game().b.live_joints as u32 }
@@ -122,13 +123,27 @@ static mut SNAP: Vec<u8> = Vec::new();
 }
 #[no_mangle] pub extern "C" fn player_get(axis: u32) -> f32 { game().player.p.get(axis as usize) }
 #[no_mangle] pub extern "C" fn player_on_ground() -> u32 { game().player.on_ground as u32 }
-#[no_mangle] pub extern "C" fn structure_step(max_fail: u32) -> u32 { game().structure_step(max_fail as usize) as u32 }
+#[no_mangle] pub extern "C" fn structure_step(max_fail: u32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.structure_step(max_fail as usize) as u32; g.finish_plans(); n }
 #[no_mangle] pub extern "C" fn structure_ratio() -> f32 { game().max_ratio }
 /// Room for `n` impact records (11 floats each, see `Game::impacts`); returns where to write them.
 #[no_mangle] pub extern "C" fn impacts_in(n: u32) -> *mut f32 { let g = game(); g.inp.clear(); g.inp.resize(n as usize * 11, 0.0); g.inp.as_mut_ptr() }
-#[no_mangle] pub extern "C" fn impacts(dt: f32) -> u32 { game().impacts(dt) as u32 }
-#[no_mangle] pub extern "C" fn piece_blast(piece: u32, x: f32, y: f32, z: f32, r: f32) -> u32 { game().blast_piece(piece, v3(x, y, z), r) as u32 }
+#[no_mangle] pub extern "C" fn impacts(dt: f32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.impacts(dt) as u32; g.finish_plans(); n }
+#[no_mangle] pub extern "C" fn piece_blast(piece: u32, x: f32, y: f32, z: f32, r: f32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.blast_piece(piece, v3(x, y, z), r) as u32; g.finish_plans(); n }
 #[no_mangle] pub extern "C" fn dust_bricks() -> u32 { game().dust as u32 }
 #[no_mangle] pub extern "C" fn piece_impact(piece: u32, px: f32, py: f32, pz: f32, dx: f32, dy: f32, dz: f32, impulse: f32, approach: f32, dt: f32) -> u32 {
     game().impact(piece, v3(px, py, pz), v3(dx, dy, dz), impulse, approach, dt) as u32
 }
+
+/// The engine's hull library, for the check against the GPU's (gpu/test_hulls.cjs): the number of hulls, and
+/// per hull k = 0..2 its box centre, 3..5 half size, 6 volume share, 7..9 centroid (cube coordinates), 10 pattern
+#[no_mangle] pub extern "C" fn hull_count() -> u32 { crate::hull::lib().cells.len() as u32 }
+#[no_mangle] pub extern "C" fn hull_value(id: u32, k: u32) -> f64 {
+    let c = &crate::hull::lib().cells[id as usize];
+    match k { 0..=2 => c.bc[k as usize], 3..=5 => c.bh[k as usize - 3], 6 => c.vol, 7..=9 => c.cen[k as usize - 7], _ => c.pattern as f64 }
+}
+
+/// The GPU broke falling piece `piece` by its plan (see Game::snap); the result in `out`.
+#[no_mangle] pub extern "C" fn piece_snap(piece: u32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.snap(piece) as u32; g.finish_plans(); n }
+/// The break plans made by the last call (see Game::plan_out)
+#[no_mangle] pub extern "C" fn plan_ptr() -> *const f32 { game().plan_out.as_ptr() }
+#[no_mangle] pub extern "C" fn plan_len() -> u32 { game().plan_out.len() as u32 }

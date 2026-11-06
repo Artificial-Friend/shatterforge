@@ -161,6 +161,35 @@ A light piece pressed by a body at least 20 times heavier is crushed on the GPU 
 
 GPU test `crush`: a 7,700 t block landing on 24 pieces of 11 t crushes all 24 and comes down to the ground; a piece rammed from the side by a 600 t block is not crushed. In the lab's collapse (150 frames), launches went from 14 to 1 and bounces from 11 to 7.
 
+## Breaking in the step of the hit
+
+The engine answers a hit about 4 frames late. So each new falling piece carries a break plan from it (`Game::plan_piece`): where it breaks first, and how hard a hit must be to break it there.
+
+How the engine makes the plan:
+- The piece is loaded with its own weight, resting on its bricks within 0.5 m of its lowest.
+- The plan's section is the horizontal plane (a bed joint, a storey line) whose worst bearing joint is the worst, among the planes that part the piece with at least a twentieth of its mass on the smaller side.
+- The threshold is the impulse in one step that decelerates the piece by g / (that joint's ratio): M g dt / ratio.
+- Cutting single joints worst first did not work: the 4-storey tower's worst joints are spread over the building, and it took 4,096 of its 5,140 joints to part it.
+
+The page arms the body with `setSnap(body, impulse, shapes of the other part)`. That makes a spare body in advance, parked asleep, with the other part's mass and inertia. Each step on the GPU:
+- `snap_acc` adds up the normal impulse of the body's contacts (N s, integer).
+- `snap_split` runs when the total passes the threshold. The spare takes the other part's place and the piece's motion there; the body keeps its own part, with that part's mass.
+- `snap_shapes` moves the other part's shapes to the spare, in its frame.
+
+What follows:
+- The read-back lists the break (`takeSnaps`).
+- The page sends the engine a `snap` job, first in line. The engine cuts the plan's joints and answers with the two pieces, each with its own new plan.
+- If the engine broke the piece first, the plan no longer holds, the answer is empty, and the spare is given up: the engine's parts already include its bricks.
+
+GPU test `snap`: a column of two 0.5 m cubes (600 kg) falls 1 m, armed to break between them at 500 N s. A second column is armed at 10 MN s.
+- The first breaks in the frame it lands (frame 27 of both). The top cube moves no further between frames than its speed allows. It ends resting on the lower cube at 0.75 m.
+- The second never breaks.
+
+Engine test `a_falling_piece_has_a_break_plan_and_snaps_by_it`: the 4-storey tower's ground storey is cut.
+- Its upper part (2,049 bricks, 2,225 t) breaks across a plane of 77 joints, letting 17 bricks (at least a twentieth of its mass) come away.
+- The threshold is 3,116 kN s in a step. Stopping it from 5 m/s takes 11,125 kN s.
+- Snapping parts it there into two pieces with no joint between them.
+
 ## Convex chunks
 
 A shape can be a convex hull instead of a box (`hull` on the shape, stored in its record's fourth word). The library (`GpuWorld.hulls`) holds 16 fracture patterns of the cube (Voronoi cells of 2–6 seeds, 63 cells); `GpuWorld.hullShapes(p, q, h, pattern)` gives the cells of a brick, which tile it exactly. Each cell is kept in its own box mapped to [-1, 1]^3, so a shape's `h` is its cell's half size and the cells need no per-shape storage. Mass and inertia come from the cell's real volume, centroid and covariance (a wedge's box centre can lie outside it).
