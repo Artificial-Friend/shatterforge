@@ -464,7 +464,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       // the upper building landing on the stumps of its cut columns with rubble on it (lab collapse, frame 50: a
       // 1,554-brick body at 6.3 m/s on 5 static stumps, touching dozens of pieces: it went from -6.34 to +1.11
       // m/s, then up again from 0.44 to 0.64 m/s). Here: a slab of 16 x 16 bricks with 6 columns on 5 stumps, two
-      // layers of 225 pieces riding on it. Concrete (e 0.1) allows 0.63 m/s of rebound; after that nothing may
+      // layers of 225 pieces riding on it. Concrete (e 0.1) allows a tenth of its impact speed in rebound; after that nothing may
       // push the slab up, and the pieces may not be thrown (they land on it at 7.6 m/s).
       // Before the fixes (the mass-ratio limit applied before mass splitting and both ways, the slab's supports
       // left to the parallel pass): slab up at 2.1-8.7 m/s, pieces at up to 15 m/s, varying run to run. After:
@@ -497,7 +497,10 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       const ovf = w.colCounts[w.colorLimit];
       w.destroy();
       const pmax = Math.max(...(globalThis.pcv || [[0]]).map(x => x[0]));
-      check('stumps', vmax < 0.7 && later < 0.7 && pmax < 2.5, { hitAt: hit, reboundUp_ms: +vmax.toFixed(2), laterUp_ms: +later.toFixed(2), vy: vs, overflow: ovf, stages: stg, piecesUpDown: globalThis.pcv });
+      // (the rebound allowed is the restitution of concrete, 0.1, times the speed it hits at: 7.6 m/s after 8
+      // frames of fall, so 0.76 m/s. The limit was 0.7, from the 6.3 m/s it starts at.)
+      const vHit = -vs[Math.max(0, hit - 2)], allowed = 0.1 * vHit;
+      check('stumps', vmax < allowed && later < 0.7 && pmax < 2.5, { hitAt: hit, reboundUp_ms: +vmax.toFixed(2), allowed_ms: +allowed.toFixed(2), laterUp_ms: +later.toFixed(2), vy: vs, overflow: ovf, stages: stg, piecesUpDown: globalThis.pcv });
     }
     if (scenes.includes('particles')) {
       // granular crumbs poured on a fixed table: they pile up on it and around it on the ground, never inside it
