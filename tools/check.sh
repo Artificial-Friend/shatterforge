@@ -22,7 +22,9 @@ if [ "$level" != status ]; then
   node gpu/test_hulls.cjs
   node gpu/test_gpu.cjs 2>&1 | grep -E "^(PASS|FAIL)" | cut -c1-120
   case "$level" in
-    lab) node game/lab.cjs quick 2>&1 | grep -v "GL Driver" | grep -v " of " ;;
+    # (and determinism: the collapse twice, 150 frames, the same frame for frame)
+    lab) node game/lab.cjs quick 2>&1 | grep -v "GL Driver" | grep -v " of "
+         node game/lab.cjs collapse --frames 150 --twice --out lab-results/twice 2>&1 | grep -E "deterministic|    frame" ;;
     lab-full) node game/lab.cjs full 2>&1 | grep -v "GL Driver" | grep -v " of " ;;
   esac
 fi

@@ -1276,7 +1276,8 @@ __LAB_JS__
         const f = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
         const n = f[0], shapes = [], idx = [];
         for (let k = 0; k < n; k++) { const o = 1 + k * 8; idx.push(f[o]); shapes.push(boxShape(f, o + 1)); }
-        gpu = await GpuWorld.create(dev, [{ fixed: true, shapes }], { substeps: 12, sleep: true, maxBodies: 30000, maxShapes: n + 120000, maxContacts: 160000, maxPairs: 640000, eventSpeed: 2.0, eventEnergy: 20000, maxParticles: MAXP, particleMaxRadius: PART_R + 0.05 });
+        gpu = await GpuWorld.create(dev, [{ fixed: true, shapes }], { colorCheck: !!window.__colCheck, substeps: 12, sleep: true, maxBodies: 30000, maxShapes: n + 120000, maxContacts: 160000, maxPairs: 640000, eventSpeed: 2.0, eventEnergy: 20000, maxParticles: MAXP, particleMaxRadius: PART_R + 0.05 });
+        if (window.__colR) { const [x, y] = window.__colR.split(',').map(Number); gpu.colRoundsS = x; gpu.colRounds = y; }   // (debugging: the colour rounds)
         gpu.substeps = setting.substeps || 12; gpu.maxColors = setting.colors || 16; gpu.colorLimit = Math.min(gpu.colorLimit, gpu.maxColors);
         idx.forEach((b, k) => slots.set(b, k + 1));
       }

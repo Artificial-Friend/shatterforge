@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -17,7 +17,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
   await p.goto('file:///tmp/sf_blank.html');
   await p.addScriptTag({ path: path.join(__dirname, 'gpu_world.js') });
   const res = await p.evaluate(async ({ wasm, scenes, SUB, SAND_PUSH, SAND_MAT, SAND_SUB, SAND_COL, SAND_FALL, COMP_N, COMP_FLOOR, RELAX, HNOSLEEP, HBOX, HNOCRUSH, HNORED, HONLY, HPDYN, HRANDOM, HBIG, KN }) => {
-    Object.assign(globalThis, KN || {}); if (globalThis.DBG) { const c0 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c0(...a); w.dbgBits = +globalThis.DBG; return w; }; }
+    Object.assign(globalThis, KN || {}); if (globalThis.COLR) { const c1 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c1(...a); const [x, y] = globalThis.COLR.split(',').map(Number); w.colRoundsS = x; w.colRounds = y; return w; }; } if (globalThis.DBG) { const c0 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c0(...a); w.dbgBits = +globalThis.DBG; return w; }; }
     if (SAND_PUSH) globalThis.SAND_PUSH = SAND_PUSH; if (SAND_MAT) globalThis.SAND_MAT = SAND_MAT; if (SAND_SUB) globalThis.SAND_SUB = SAND_SUB; if (SAND_COL) globalThis.SAND_COL = SAND_COL; if (SAND_FALL) globalThis.SAND_FALL = 1; if (COMP_N) globalThis.COMP_N = COMP_N; if (COMP_FLOOR) globalThis.COMP_FLOOR = 1; if (RELAX) globalThis.RELAX = RELAX; if (HNOSLEEP) globalThis.HNOSLEEP = 1; if (HBOX) globalThis.HBOX = 1; if (HNOCRUSH) globalThis.HNOCRUSH = 1; if (HNORED) globalThis.HNORED = 1; if (HONLY) globalThis.HONLY = HONLY; if (HPDYN) globalThis.HPDYN = 1; if (HRANDOM) globalThis.HRANDOM = 1; if (HBIG) globalThis.HBIG = 1;
     // SF_SUB=n forces n sub-steps everywhere (to see what fewer cost in accuracy)
     if (SUB) { const c0 = GpuWorld.create; GpuWorld.create = (d, l, o = {}) => c0.call(GpuWorld, d, l, { ...o, substeps: SUB }); }
@@ -481,7 +481,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       const NP = +(globalThis.STUMP_PIECES ?? 450), pcs = [];
       for (let k = 0; k < NP; k++) pcs.push({ shapes: [{ p: [-3.5 + (k % 15) * 0.5, 5.3 + Math.floor(k / 225) * 0.5, -3.5 + Math.floor(k / 15) % 15 * 0.5], q: [0, 0, 0, 1], h: [0.2, 0.2, 0.2], mat: MAT.concrete }], v: [0, -6.3, 0], w: [0, 0, 0] });
       const w = await GpuWorld.create(dev, [{ fixed: true, shapes: fl }, { shapes: sh, v: [0, -6.3, 0], w: [0, 0, 0] }, ...pcs], { substeps: 12, sleep: false, maxShapes: 1000 });
-      if (globalThis.STUMP_OP) w.ovfPush = +globalThis.STUMP_OP; if (globalThis.SAND_PUSH) w.maxPush = +globalThis.SAND_PUSH; if (globalThis.RELAX) w.relaxRounds = +globalThis.RELAX; if (globalThis.SAND_COL) { w.maxColors = +globalThis.SAND_COL; w.colorLimit = +globalThis.SAND_COL; }
+      if (globalThis.DBG_NOSORT) globalThis.NO_OVF_SORT = 1; if (globalThis.STUMP_OP) w.ovfPush = +globalThis.STUMP_OP; if (globalThis.SAND_PUSH) w.maxPush = +globalThis.SAND_PUSH; if (globalThis.RELAX) w.relaxRounds = +globalThis.RELAX; if (globalThis.SAND_COL) { w.maxColors = +globalThis.SAND_COL; w.colorLimit = +globalThis.SAND_COL; }
       const bi = 2; let vmax = -1e9, hit = -1, later = -1e9; const vs = [];
       for (let f = 1; f <= 40; f++) {
         w.step(1 / 60);
@@ -679,6 +679,76 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       const last = rows[rows.length - 1];
       check('rubble', last.awake < N * 0.05, { rows });
     }
+    if (scenes.includes('determinism')) {
+      // The same world run twice gives the same result, bit for bit: a pile of 600 boxes falling into a heap
+      // (contacts by the thousand: colours, the overflow pass, contact reduction, sleep) and a pile of 120 convex
+      // chunks, 90 frames each, every pose compared. Floats summed in a different order differ in the last bit,
+      // and a heap amplifies that within frames; so does any choice made by whichever thread gets there first.
+      const once = async (list, frames, opt) => {
+        const w = await GpuWorld.create(dev, list, { substeps: 8, sleep: true, ...opt });
+        const sums = [];
+        for (let f = 1; f <= frames; f++) {
+          w.step(1 / 60);
+          if (f % 10 === 0 || f > 70) { await dev.queue.onSubmittedWorkDone(); await settle(); const r = await w.readPose(); sums.push(Array.from(r.pose)); sums.st = sums.st || []; sums.st.push(JSON.stringify(w.stats)); }
+        }
+        w.destroy(); return sums;
+      };
+      const cmp = (a, b) => { let first = -1, worst = 0, at = null; for (let k = 0; k < a.length; k++) { let d = 0, bi = -1; for (let i = 0; i < a[k].length; i++) { const e = Math.abs(a[k][i] - b[k][i]) || 0; if (e > d) { d = e; bi = i; } } if (d > 0 && first < 0) { first = k; at = { body: Math.floor(bi / 10), stA: a.st && a.st[k], stB: b.st && b.st[k] }; } worst = Math.max(worst, d); } return { firstDiffAtSample: first, maxDiff: +worst.toExponential(2), at }; };
+      E.pile_setup(600, 4); const boxes = GpuWorld.boxes(grab());
+      const b1 = await once(boxes, 90, {}), b2 = await once(boxes, 90, {});
+      const rnd = (k) => { const x = Math.sin(k * 12.9898) * 43758.5453; return x - Math.floor(x); };
+      const chunks = []; for (let k = 0; k < 120; k++) chunks.push({ shapes: [{ p: [(rnd(k) - 0.5) * 3, 0.5 + k * 0.12, (rnd(k + 500) - 0.5) * 3], q: [0, 0, 0, 1], h: [0.2, 0.15, 0.25], mat: MAT.concrete, hull: 1 + (k % 60) }], v: [0, 0, 0], w: [rnd(k + 9), 0, rnd(k + 7)] });
+      const c1 = await once(chunks, 90, {}), c2 = await once(chunks, 90, {});
+      // and everything at once: a 7,700 t block crushing 24 light pieces, 1,500 particles poured beside them, a
+      // column armed to break on the GPU, and a body broken into pieces placed from it as it falls (inherit)
+      const mixed = async () => {
+        const pieces = [];
+        for (let i = 0; i < 6; i++) for (let k = 0; k < 4; k++) pieces.push({ shapes: [{ p: [-7.5 + i * 3, 0.25, -6 + k * 4], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
+        const block = { shapes: [{ p: [0, 4.5, 0], q: [0, 0, 0, 1], h: [10, 4, 10], mat: MAT.concrete }], v: [0, -5.7, 0], w: [0, 0, 0] };
+        const col = { shapes: [{ p: [14, 1.25, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }, { p: [14, 1.75, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] };
+        const bar = { shapes: [0, 1, 2, 3].map(k => ({ p: [18 + k * 0.5, 3, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete })), v: [0, 0, 0], w: [0.5, 0.2, 0] };
+        const w = await GpuWorld.create(dev, [...pieces, block, col, bar], { substeps: 8, sleep: true, maxBodies: 64, maxShapes: 128, maxParticles: 4096 });
+        w.setSnap(26, 500, [27]);   // (the column is body 26, its shapes 26 and 27)
+        let rnd = 7; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+        const list = []; for (let i = 0; i < 1500; i++) list.push({ p: [14 + (rand() - 0.5) * 2, 3 + rand() * 4, 3 + (rand() - 0.5) * 2], v: [0, -1, 0], r: 0.06 + 0.04 * rand(), mat: MAT.concrete });
+        w.addParticles(list);
+        const sums = [];
+        for (let f = 1; f <= 90; f++) {
+          w.step(1 / 60);
+          if (f === 20) { const kids = w.addBodies([{ shapes: [0, 1].map(k => ({ p: [18 + k * 0.5, 3, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete })), v: [0, 0, 0], w: [0, 0, 0] }, { shapes: [2, 3].map(k => ({ p: [18 + k * 0.5, 3, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete })), v: [0, 0, 0], w: [0, 0, 0] }]); w.breakBody(27, kids, [19.25, 3, 0], [0, 0, 0, 1], [[0, 0, 0], [0, 0, 0]]);
+            // and one of them broken again in the same step (its pieces are placed from it while it is being placed)
+            const gk = w.addBodies([0, 1].map(k => ({ shapes: [{ p: [18 + k * 0.5, 3, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] })));
+            w.breakBody(kids[0], gk, [18.25, 3, 0], [0, 0, 0, 1], [[0, 0, 0], [0, 0, 0]]); }
+          await dev.queue.onSubmittedWorkDone(); await w.flushStats(); await settle();
+          if (f % 5 === 0) { const r = await w.readPose(), pr = await w.readParticles(); sums.push([...Array.from(r.pose), ...Array.from(pr.data)]); }
+        }
+        sums.covered = { gpuBreaks: w.takeSnaps().length, crushed: (w.crushes || []).length };
+        w.destroy(); return sums;
+      };
+      const m1 = await mixed(), m2 = await mixed();
+      const B = cmp(b1, b2), Cc = cmp(c1, c2), M = cmp(m1, m2);
+      check('determinism', B.maxDiff === 0 && Cc.maxDiff === 0 && M.maxDiff === 0 && m1.covered.gpuBreaks === 1 && m1.covered.crushed > 0, { boxes: B, chunks: Cc, mixed: { ...M, ...m1.covered } });
+    }
+    if (scenes.includes('redpairs')) {
+      // contact reduction for many bodies on the static world at once: 80 slabs of 6 x 6 boxes (36
+      // contacts each, past the 32 that are reduced) resting on a floor of 2,880 bricks that is all one static
+      // body. Every slab's pair with the floor must be reduced. (The pair table hashed (floor, slab) so that all
+      // of them started from one slot; past 64 probes the rest went unreduced, which ones by thread order:
+      // 128 of the 160 big pairs reduced before, 160 after.)
+      const floor = []; for (let i = 0; i < 60; i++) for (let k = 0; k < 48; k++) floor.push({ p: [-15 + i * 0.5 + 0.25, -0.25, -12 + k * 0.5 + 0.25], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete });
+      const slabs = [];
+      for (let i = 0; i < 10; i++) for (let k = 0; k < 8; k++) { const sh = []; for (let a = 0; a < 6; a++) for (let c = 0; c < 6; c++) sh.push({ p: [-15 + i * 3 + a * 0.5 + 0.25, 0.125, -12 + k * 3 + c * 0.5 + 0.25], q: [0, 0, 0, 1], h: [0.24, 0.125, 0.24], mat: MAT.concrete }); slabs.push({ shapes: sh, v: [0, 0, 0], w: [0, 0, 0] }); }
+      const w = await GpuWorld.create(dev, [{ fixed: true, shapes: floor }, ...slabs], { substeps: 8, sleep: false });
+      for (let f = 0; f < 3; f++) { w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await w.flushStats(); }
+      const nm = Math.min(w.stats.manifolds, w.maxMan), cur = (w.frame - 1) & 1;
+      const man = await w.read(w.manBuf, 2 * w.maxMan * 17 * 16);
+      const pairs = new Map();
+      for (let k = 0; k < nm; k++) { const b = (cur * w.maxMan + k) * 68, a = man[b], c = man[b + 1], z = man[b + 2]; const key = Math.min(a, c) + ',' + Math.max(a, c); const e = pairs.get(key) || { n: 0, red: 0 }; e.n++; if (z >= 8) e.red++; pairs.set(key, e); }
+      const big = [...pairs.values()].filter(e => e.n > 32), reduced = big.filter(e => e.red > 0).length;
+      w.destroy();
+      // (each slab also lies on the ground plane: its pairs with the floor and with the ground, 160)
+      check('redpairs', big.length >= 80 && reduced === big.length, { pairsOver32: big.length, reduced, contacts: nm });
+    }
     if (scenes.includes('pile')) {
       E.pile_setup(2000, 4);
       const r = await run(GpuWorld.boxes(grab()), 120, { substeps: 4 });
@@ -694,7 +764,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   // the results for docs/STATUS.md (tools/status.py): full runs only (a run of a few scenes is not the state)

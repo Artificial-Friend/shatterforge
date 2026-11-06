@@ -78,8 +78,10 @@ Three foundation changes, in this order, before scaling to a city. Each keeps th
   - The break is one plane into two parts.
   - Further breaks wait for the engine, as before.
 
+**Determinism (6 November): done.** The GPU, the engine and the lab give the same run frame for frame on one machine (docs/GPU.md and docs/LAB.md, "Determinism").
+
 **Open:** rebounds in the collapse (docs/LAB.md), and the mixed building coming down only partly.
 
 ## Later
 
-Determinism, solver stability work (mass ratios, continuous collision, islands), scaling (streaming, level of detail, a check per building), authoring of imported meshes, effects.
+Solver stability work (mass ratios, continuous collision, islands), scaling (streaming, level of detail, a check per building), authoring of imported meshes, effects.

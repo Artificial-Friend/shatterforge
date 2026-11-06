@@ -51,7 +51,9 @@ struct Params {
   o_ptab: u32, ptab_mask: u32, o_big: u32, o_mslot: u32,   // contact reduction (see red_count)
   o_crushed: u32, o_crush: u32, crush_ratio: f32, crush_dv: f32,   // crushing (see crush)
   o_hull: u32, o_hl: u32, dbg: u32, ovf_push: f32,   // the convex chunk library, in the shape buffer
-  o_plan: u32, o_spart: u32, o_snap: u32, pad10: u32,   // breaking on the GPU (see snap_split)
+  o_plan: u32, o_spart: u32, o_snap: u32, o_claim: u32,   // breaking on the GPU (see snap_split); colour claims
+  o_mtry: u32, o_claim2: u32, o_sorted2: u32, o_evhist: u32,
+  o_cchk: u32, pad14: u32, pad15: u32, pad16: u32,   // (see color_claim, sort_cells)
 }
 struct ColorU { c: u32 }
 
@@ -140,6 +142,7 @@ fn tangents(n: vec3f) -> mat2x3f {
   }
   setS(i, S_DP, vec4f(0.0)); setS(i, S_TH, vec4f(0.0));
   st(P.o_mask + i, 0u);
+  for (var c = 0u; c < P.color_limit; c++) { st(P.o_claim + i * 32u + c, 0u); st(P.o_claim2 + i * 32u + c, 0u); }
   st(P.o_par + i, i);
   st(P.o_mint + i, 0x7f7fffffu);
 }
@@ -189,9 +192,29 @@ fn wg_scan(t: u32, s: u32) -> u32 {
 @compute @workgroup_size(64) fn scatter(@builtin(global_invocation_id) g: vec3u) {
   let s = g.x + 1u; if (s >= P.ns1 || dead(s)) { return; }
   let hc = ld(P.o_cell + s);
-  st(P.o_sorted + ld(P.o_gstart + hc) + atomicAdd(&ints[P.o_gfill + hc], 1u), s);
+  st(P.o_sorted2 + ld(P.o_gstart + hc) + atomicAdd(&ints[P.o_gfill + hc], 1u), s);
 }
 
+// Determinism: the grid's cells are filled by atomics, in whatever order the threads get there; each shape then
+// takes its place in its cell by shape order (its rank among the cell's shapes), so everything that walks a cell
+// (pairs, particle candidates, capped at 24) is the same every run (GPU test determinism). (Sorting each cell
+// with a thread per cell of the hash grid cost 0.5 M threads a step in the page.)
+@compute @workgroup_size(64) fn sort_cells(@builtin(global_invocation_id) g: vec3u) {
+  let s = g.x + 1u; if (s >= P.ns1 || dead(s)) { return; }
+  let hc = ld(P.o_cell + s);
+  let s0 = ld(P.o_gstart + hc); let n = ld(P.o_gcount + hc);
+  var r = 0u;
+  for (var k = 0u; k < n; k++) { if (ld(P.o_sorted2 + s0 + k) < s) { r++; } }
+  st(P.o_sorted + s0 + r, s);
+}
+// A contact's key: its two shapes, mixed (the same every run, unlike its slot, which narrow hands out by atomics).
+// Choices between contacts (colours, the contacts kept by reduction, the order of a body's sums) go by it.
+fn mkey(m: u32) -> u32 {
+  let sa = u32(cold[m * CS + 4u].w); let sb = u32(cold[m * CS + 5u].w);
+  var h = (sa * 0x9E3779B1u) ^ ((sb + 0x7F4A7C15u) * 0x85EBCA77u);
+  h ^= h >> 15u; h *= 0x2C1B3C6Du; h ^= h >> 12u;
+  return h | 1u;
+}
 fn push_pair(a: u32, b: u32) {
   let k = atomicAdd(&ints[C_NPAIR], 1u);
   if (k < P.max_pairs) { st(P.o_pairs + 2u * k, a); st(P.o_pairs + 2u * k + 1u, b); }
@@ -753,13 +776,27 @@ fn red_slot(mi: u32) -> u32 { return ld(P.o_mslot + mi); }
   st(P.o_mslot + mi, 0xffffffffu);
   if (u32(hd.z) == 0u) { return; }
   let key = (min(a, b) | (max(a, b) << 16u)) + 1u;
-  var h = (key * 2654435761u) & P.ptab_mask;
+  // (mixed: key * constant keeps only the low bits of the lower body in the low bits of the slot, and every pair
+  // with the static building (body 1) started from one slot. Chains past the 64 probes left contacts uncounted,
+  // which ones by thread order, and the building's pairs were reduced in one run and not in the next: lab
+  // collapse, frames 91-102)
+  var h = key; h ^= h >> 16u; h *= 0x7feb352du; h ^= h >> 15u; h *= 0x846ca68bu; h ^= h >> 16u;
+  h &= P.ptab_mask;
   for (var t = 0u; t < 64u; t++) {
     let o = P.o_ptab + 3u * h;
     let r = atomicCompareExchangeWeak(&ints[o], 0u, key);
     if (r.exchanged || r.old_value == key) { atomicAdd(&ints[o + 1u], 1u); st(P.o_mslot + mi, h); return; }
     if (r.old_value != 0u) { h = (h + 1u) & P.ptab_mask; }
   }
+}
+// Each pair to reduce gets its place once, by a thread per table slot. (Handed out by its contacts as they came, a
+// pair with hundreds of them took hundreds of places: past the 4,096 the ones that came last went unreduced, and
+// which those were changed run to run; lab collapse, frame 91.)
+@compute @workgroup_size(64) fn red_big(@builtin(global_invocation_id) g: vec3u) {
+  let h = g.x; if (h > P.ptab_mask) { return; }
+  let o = P.o_ptab + 3u * h;
+  if (ld(o) == 0u || ld(o + 1u) <= RED_K) { return; }
+  st(o + 2u, atomicAdd(&ints[C_NBIG], 1u) + 1u);
 }
 fn man_centre(mi: u32) -> vec4f {
   let base = (P.cur_base + mi) * MS; let hd = man[base]; let cnt = u32(hd.z);
@@ -773,16 +810,8 @@ fn man_centre(mi: u32) -> vec4f {
   let h = red_slot(mi); if (h == 0xffffffffu) { return; }
   let o = P.o_ptab + 3u * h;
   if (ld(o + 1u) <= RED_K) { return; }
-  // this pair's place among the reduced ones
-  var big = ld(o + 2u);
-  if (big == 0u) {
-    let n = atomicAdd(&ints[C_NBIG], 1u) + 1u;
-    for (var t = 0u; t < 16u; t++) {
-      let r = atomicCompareExchangeWeak(&ints[o + 2u], 0u, n);
-      if (r.exchanged) { big = n; break; }
-      if (r.old_value != 0u) { big = r.old_value; break; }
-    }
-  }
+  // this pair's place among the reduced ones (red_big)
+  let big = ld(o + 2u);
   if (big == 0u || big > RED_NBIG) { return; }
   let c = man_centre(mi); let bo = P.o_big + (big - 1u) * 64u;
   for (var k = 0u; k < RED_D; k++) { atomicMax(&ints[bo + k], f2o(dot(c.xyz, red_dir(k)))); }
@@ -793,15 +822,18 @@ fn man_centre(mi: u32) -> vec4f {
   let h = red_slot(mi); if (h == 0xffffffffu) { return; }
   let big = ld(P.o_ptab + 3u * h + 2u); if (big == 0u || big > RED_NBIG) { return; }
   let c = man_centre(mi); let bo = P.o_big + (big - 1u) * 64u;
-  for (var k = 0u; k < RED_D; k++) { if (f2o(dot(c.xyz, red_dir(k))) == ld(bo + k)) { atomicMax(&ints[bo + 32u + k], mi + 1u); } }
-  if (f2o(-c.w) == ld(bo + RED_D)) { atomicMax(&ints[bo + 32u + RED_D], mi + 1u); }
+  // (ties go to the higher key: by slot, they went to whichever contact narrow happened to place later)
+  let key = mkey(P.cur_base + mi);
+  for (var k = 0u; k < RED_D; k++) { if (f2o(dot(c.xyz, red_dir(k))) == ld(bo + k)) { atomicMax(&ints[bo + 32u + k], key); } }
+  if (f2o(-c.w) == ld(bo + RED_D)) { atomicMax(&ints[bo + 32u + RED_D], key); }
 }
 @compute @workgroup_size(64) fn red_apply(@builtin(global_invocation_id) g: vec3u) {
   let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
   let h = red_slot(mi); if (h == 0xffffffffu) { return; }
   let big = ld(P.o_ptab + 3u * h + 2u); if (big == 0u || big > RED_NBIG) { return; }
   let bo = P.o_big + (big - 1u) * 64u;
-  for (var k = 32u; k <= 32u + RED_D; k++) { if (ld(bo + k) == mi + 1u) { return; } }
+  let key = mkey(P.cur_base + mi);
+  for (var k = 32u; k <= 32u + RED_D; k++) { if (ld(bo + k) == key) { return; } }
   // not kept: marked (+8 on the point count) so the colouring and the solver skip it, while its points and
   // impulses stay for the warm start of the next step (where it may be kept again)
   let base = (P.cur_base + mi) * MS; let hd = man[base];
@@ -813,25 +845,109 @@ fn mhdr(m: u32) -> vec2u { let h = man[m * MS]; return vec2u(u32(h.x), u32(h.y))
 // Contacts with the static world (or a resting body) are coloured first, in their own pass: they hold the
 // bodies up, and a body's supports left to the parallel overflow pass (a slab under hundreds of pieces) did not
 // converge and pushed it up (GPU test stumps).
-@compute @workgroup_size(64) fn color_support(@builtin(global_invocation_id) g: vec3u) { color_one(g.x, true); }
-@compute @workgroup_size(64) fn color(@builtin(global_invocation_id) g: vec3u) { color_one(g.x, false); }
-fn color_one(mi: u32, support: bool) {
+// Determinism: colours are claimed in rounds, not first come first served. Each round, a contact not yet coloured
+// picks a colour free at both its bodies (one of the lowest few, by its key and the round) and claims it at each
+// with its priority; it takes the colour where it is the strongest claim at both. Contacts with the static world
+// or a resting body (supports) claim first: they hold the bodies up, and a body's supports left to the parallel
+// overflow pass (a slab under hundreds of pieces) did not converge and pushed it up (GPU test stumps). What is
+// not coloured after the last round, or finds no colour free, goes to the overflow pass. A claim holds the round
+// in its top bits, so the last round's claims need no clearing.
+// (supports alone first, then everything: with supports only first in each claim, the other contacts at a body
+// took colours its supports then could not. The rounds are set in JS, colRoundsS and colRounds)
+const COL_ROUNDS = 12u; const UNC = 0xfffffffeu;
+fn col_pri(mi: u32) -> u32 {
+  let ab = mhdr(P.cur_base + mi);
+  let support = !dyn_awake(ab.x) || !dyn_awake(ab.y);
+  // 26 bits: support first, then the key
+  return select(0x2000000u, 0u, support) | (mkey(P.cur_base + mi) >> 7u);
+}
+@compute @workgroup_size(64) fn color_init(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let reduced = u32(man[(P.cur_base + mi) * MS].z) >= 8u;
+  st(P.o_mcolor + mi, select(UNC, 0xffffffffu, reduced));
+  st(P.o_mtry + mi, 0u);
+  if (mi == 0u) { st(P.o_mtry + P.max_man, 0u); }
+}
+// the round, for everyone (claims are tagged with it: a claim left from an earlier round never blocks a new one)
+@compute @workgroup_size(1) fn color_round() { st(P.o_mtry + P.max_man, ld(P.o_mtry + P.max_man) + 1u); }
+@compute @workgroup_size(64) fn color_claim_s(@builtin(global_invocation_id) g: vec3u) { claim_one(g.x, true); }
+@compute @workgroup_size(64) fn color_claim(@builtin(global_invocation_id) g: vec3u) { claim_one(g.x, false); }
+fn claim_one(mi: u32, support_only: bool) {
   if (mi >= min(ld(C_MAN), P.max_man)) { return; }
-  if (u32(man[(P.cur_base + mi) * MS].z) >= 8u) { st(P.o_mcolor + mi, 0xffffffffu); return; }   // (reduced away)
+  if (ld(P.o_mcolor + mi) != UNC) { return; }
   let ab = mhdr(P.cur_base + mi); let a = ab.x; let b = ab.y;
   let da = dyn_awake(a); let db = dyn_awake(b);
-  if ((P.dbg & 4u) != 0u) { if (support) { return; } } else if (support != (!da || !db)) { return; }
-  var col = P.color_limit;
-  for (var c = 0u; c < P.color_limit; c++) {
-    let bit = 1u << c;
-    if (da) { let o = atomicOr(&ints[P.o_mask + a], bit); if ((o & bit) != 0u) { continue; } }
-    if (db) {
-      let o = atomicOr(&ints[P.o_mask + b], bit);
-      if ((o & bit) != 0u) { if (da) { atomicAnd(&ints[P.o_mask + a], ~bit); } continue; }
-    }
-    col = c; break;
+  if (support_only && da && db) { return; }
+  let round = ld(P.o_mtry + mi) & 0xffffu;
+  let gr = ld(P.o_mtry + P.max_man);
+  var used = 0u;
+  if (da) { used |= ld(P.o_mask + a); } if (db) { used |= ld(P.o_mask + b); }
+  let all = select((1u << P.color_limit) - 1u, 0xffffffffu, P.color_limit >= 32u);
+  var free = all & ~used;
+  if (free == 0u || round >= COL_ROUNDS) { st(P.o_mcolor + mi, P.color_limit); return; }
+  // one of the lowest four free colours, by key and round
+  let pick = ((mkey(P.cur_base + mi) >> 3u) + round * 0x9E37u) % min(countOneBits(free), 4u);
+  for (var k = 0u; k < pick; k++) { free &= free - 1u; }
+  let c = firstTrailingBit(free);
+  let v = ((gr + 1u) << 27u) | (0x3ffffffu - col_pri(mi));
+  if (da) { atomicMax(&ints[P.o_claim + a * 32u + c], v); }
+  if (db) { atomicMax(&ints[P.o_claim + b * 32u + c], v); }
+  st(P.o_mtry + mi, (round + 1u) | (c << 16u) | 0x80000000u);
+}
+// Two contacts at a body with the same 26-bit priority would both take the colour there and be solved at once
+// on the same body (in a pile of 600 boxes, about a one-in-ten chance over 90 frames). The ones that tie claim
+// again with 27 more bits of a second hash.
+fn mkey2(m: u32) -> u32 {
+  let sa = u32(cold[m * CS + 4u].w); let sb = u32(cold[m * CS + 5u].w);
+  var h = (sb * 0x2545F491u) ^ ((sa + 0x68E31DA4u) * 0xB5297A4Du);
+  h ^= h >> 13u; h *= 0x1B873593u; h ^= h >> 16u;
+  return h;
+}
+fn claimed(mi: u32, stage2: bool) -> bool {
+  let t = ld(P.o_mtry + mi); let c = (t >> 16u) & 0x7fffu;
+  let ab = mhdr(P.cur_base + mi); let a = ab.x; let b = ab.y;
+  let da = dyn_awake(a); let db = dyn_awake(b);
+  let tag = (ld(P.o_mtry + P.max_man) + 1u) << 27u;
+  let v = tag | (0x3ffffffu - col_pri(mi));
+  if (da && ld(P.o_claim + a * 32u + c) != v) { return false; }
+  if (db && ld(P.o_claim + b * 32u + c) != v) { return false; }
+  let v2 = tag | (mkey2(P.cur_base + mi) >> 5u);
+  if (!stage2) {
+    if (da) { atomicMax(&ints[P.o_claim2 + a * 32u + c], v2); }
+    if (db) { atomicMax(&ints[P.o_claim2 + b * 32u + c], v2); }
+    return true;
   }
-  st(P.o_mcolor + mi, col);
+  if (da && ld(P.o_claim2 + a * 32u + c) != v2) { return false; }
+  if (db && ld(P.o_claim2 + b * 32u + c) != v2) { return false; }
+  return true;
+}
+@compute @workgroup_size(64) fn color_tie(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  if (ld(P.o_mcolor + mi) != UNC || (ld(P.o_mtry + mi) & 0x80000000u) == 0u) { return; }
+  _ = claimed(mi, false);
+}
+@compute @workgroup_size(64) fn color_resolve(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  if (ld(P.o_mcolor + mi) != UNC) { return; }
+  let t = ld(P.o_mtry + mi); if ((t & 0x80000000u) == 0u) { return; }   // (it made no claim this round)
+  let won = claimed(mi, true);
+  st(P.o_mtry + mi, t & 0x7fffffffu);
+  if (!won) { return; }
+  let c = (t >> 16u) & 0x7fffu;
+  let ab = mhdr(P.cur_base + mi); let a = ab.x; let b = ab.y;
+  let da = dyn_awake(a); let db = dyn_awake(b);
+  st(P.o_mcolor + mi, c);
+  // (the winner at a body and colour is the only one: no other contact there takes this colour this round)
+  if (da) { atomicOr(&ints[P.o_mask + a], 1u << c); }
+  if (db) { atomicOr(&ints[P.o_mask + b], 1u << c); }
+}
+@compute @workgroup_size(64) fn color_count(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  var col = ld(P.o_mcolor + mi);
+  if (col == 0xffffffffu) { return; }
+  if (col == UNC) { col = P.color_limit; st(P.o_mcolor + mi, col); }
+  let ab = mhdr(P.cur_base + mi); let a = ab.x; let b = ab.y;
+  let da = dyn_awake(a); let db = dyn_awake(b);
   atomicAdd(&ints[P.o_ccount + col], 1u);
   if (col == P.color_limit) {
     atomicAdd(&ints[C_OVF], 1u);
@@ -840,6 +956,59 @@ fn color_one(mi: u32, support: bool) {
   } else { atomicMax(&ints[C_COLORS], col + 1u); }
   if (da) { atomicAdd(&ints[P.o_bcount + a], 1u); }
   if (db) { atomicAdd(&ints[P.o_bcount + b], 1u); }
+}
+// The overflow contacts in key order: their restitution goes through them one by one (restitute_ovf), and in the
+// order color_scatter's atomics left them it differed run to run (GPU test determinism, scene stumps). A bitonic
+// sort in one workgroup; past the end counts as the largest, so every compare puts the smaller first.
+var<workgroup> wn: u32;
+fn okey_less(x: u32, y: u32) -> bool { let kx = mkey(x); let ky = mkey(y); return kx < ky || (kx == ky && x < y); }
+@compute @workgroup_size(256) fn ovf_sort(@builtin(local_invocation_index) t: u32) {
+  if (t == 0u) { let r = ovf_range(); wn = r.y - r.x; }
+  let n = workgroupUniformLoad(&wn);
+  let o = P.o_order + ld(P.o_cstart + P.color_limit);
+  var k = 2u;
+  loop {
+    if (k >= 2u * n) { break; }
+    var j = k >> 1u;
+    loop {
+      if (j == 0u) { break; }
+      for (var i = t; i < n; i += 256u) {
+        let l = select(i ^ j, i ^ (k - 1u), j == (k >> 1u));
+        if (l > i && l < n) {
+          let x = ld(o + i); let y = ld(o + l);
+          if (okey_less(y, x)) { st(o + i, y); st(o + l, x); }
+        }
+      }
+      storageBarrier(); workgroupBarrier();
+      j >>= 1u;
+    }
+    k <<= 1u;
+  }
+}
+// (debugging: two contacts of one colour on the same moving body, counted at o_cchk[0]; bit 32 of dbg)
+@compute @workgroup_size(64) fn color_check(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let col = ld(P.o_mcolor + mi); if (col >= P.color_limit) { return; }
+  let ab = mhdr(P.cur_base + mi);
+  for (var k = 0u; k < 2u; k++) {
+    let i = select(ab.y, ab.x, k == 0u);
+    if (dyn_awake(i) && atomicAdd(&ints[P.o_cchk + 1u + i * 32u + col], 1u) > 0u) { atomicAdd(&ints[P.o_cchk], 1u); }
+  }
+}
+// a body's contacts in key order (filled by atomics): its warm start sums them in that order every run
+@compute @workgroup_size(64) fn blist_sort(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x + 1u; if (i >= P.n1) { return; }
+  let s0 = ld(P.o_bstart + i); let n = ld(P.o_bcount + i);
+  for (var a = 1u; a < n; a++) {
+    let e = ld(P.o_blist + s0 + a); let ke = mkey(e >> 1u); var b = a;
+    loop {
+      if (b == 0u) { break; }
+      let f = ld(P.o_blist + s0 + b - 1u); let kf = mkey(f >> 1u);
+      if (kf < ke || (kf == ke && f <= e)) { break; }
+      st(P.o_blist + s0 + b, f); b--;
+    }
+    st(P.o_blist + s0 + b, e);
+  }
 }
 @compute @workgroup_size(64) fn color_scatter(@builtin(global_invocation_id) g: vec3u) {
   let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
@@ -1113,11 +1282,31 @@ fn ovf_item(g: u32) -> u32 { let r = ovf_range(); if (r.x + g >= r.y) { return 0
 // ---------------------------------------------------------------- end of step, sleeping
 // hard impacts this step, for the damage model: [body a, body b, shape a, shape b, point xyz, normal xyz,
 // impulse (N s), approach speed (m/s)] as raw words
+// Determinism: when there are more than the list holds, the ones kept were whoever got there first. Now they are
+// counted by energy (in eighths of a doubling over the threshold), the lowest bands that do not fit are left
+// out whole (ev_cut), and the rest written.
+fn ev_band(e: f32) -> u32 { return u32(clamp(log2(max(e / P.ev_energy, 1.0)) * 8.0, 0.0, 127.0)); }
+fn ev_energy_of(mi: u32) -> f32 {
+  let out = man[(P.cur_base + mi) * MS + M_OUT];
+  if (out.z < P.ev_speed || 0.5 * out.y * out.z < P.ev_energy) { return -1.0; }
+  return 0.5 * out.y * out.z;
+}
+@compute @workgroup_size(64) fn ev_count(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let e = ev_energy_of(mi); if (e < 0.0) { return; }
+  atomicAdd(&ints[P.o_evhist + ev_band(e)], 1u);
+}
+@compute @workgroup_size(1) fn ev_cut() {
+  let room = P.max_events - min(ld(C_EVENTS), P.max_events);
+  var tot = 0u; var cut = 128u;
+  for (var b = 127; b >= 0; b--) { tot += ld(P.o_evhist + u32(b)); if (tot > room) { break; } cut = u32(b); }
+  st(P.o_evhist + 128u, cut);
+}
 @compute @workgroup_size(64) fn events(@builtin(global_invocation_id) g: vec3u) {
   let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
   let m = P.cur_base + mi; let base = m * MS;
   let out = man[base + M_OUT];
-  if (out.z < P.ev_speed || 0.5 * out.y * out.z < P.ev_energy) { return; }
+  let e = ev_energy_of(mi); if (e < 0.0 || ev_band(e) < ld(P.o_evhist + 128u)) { return; }
   let k = atomicAdd(&ints[C_EVENTS], 1u); if (k >= P.max_events) { return; }
   let hd = man[base]; let a = u32(hd.x); let cnt = u32(hd.z) & 7u;
   var pt = vec3f(0.0); for (var q = 0u; q < cnt; q++) { pt += man[base + M_PT + 2u * q].xyz; }
@@ -1363,6 +1552,16 @@ fn near_awake(x: vec3f) -> bool {
   let st = R(i, 1).w; if (st == 0.0 || st >= 3.0) { return; }
   let G = pg(); let hc = pld(3u * G + P.p_cap + i);
   pst(3u * G + pld(G + hc) + atomicAdd(&pint[2u * G + hc], 1u), i);
+}
+// (each cell's particles in index order: the candidate lists, capped, are the same every run)
+@compute @workgroup_size(64) fn p_sort(@builtin(global_invocation_id) g: vec3u) {
+  let G = pg(); let hc = g.x; if (hc >= G) { return; }
+  let s0 = 3u * G + pld(G + hc); let n = pld(hc);
+  for (var a = 1u; a < n; a++) {
+    let v = pld(s0 + a); var b = a;
+    while (b > 0u && pld(s0 + b - 1u) > v) { pst(s0 + b, pld(s0 + b - 1u)); b--; }
+    pst(s0 + b, v);
+  }
 }
 @compute @workgroup_size(64) fn p_integrate(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }
@@ -1768,6 +1967,7 @@ class GpuWorld {
     this.capB = Math.max(n, opt.maxBodies || 0); this.capS = Math.max(ns, opt.maxShapes || 0);
     const cb1 = this.capB + 1, cs1 = this.capS + 1;
     this.substeps = opt.substeps || 12;
+    this.colorCheck = !!opt.colorCheck;
     this.colorLimit = opt.colorLimit || 24;
     // most sequential colours per solve; contacts beyond go to the parallel (Jacobi) pass. Each colour is a
     // dispatch per sub-step, and dispatch count is what a step costs at this scale
@@ -1804,6 +2004,7 @@ class GpuWorld {
     this.maxEvents = 512; take('events', 12 * this.maxEvents);
     this.maxInherit = 4096; take('inherit', 12 * this.maxInherit);
     take('plan', 24 * cb1); take('spart', cs1); take('snap', 1 + 4 * 256);
+    take('claim', 32 * cb1); take('claim2', 32 * cb1); take('sorted2', cs1); take('evhist', 129); if (this.colorCheck) take('cchk', 1 + 32 * cb1); take('mtry', this.maxMan + 1);
     this.L = L; this.nInts = o;
 
     const bod = new Float32Array(cb1 * 20), sol = new Float32Array(cb1 * 24), shp = new Float32Array(cs1 * 32);
@@ -1824,7 +2025,7 @@ class GpuWorld {
     d.queue.writeBuffer(this.shpBuf, shp.byteLength, HULLS.data); this.oHull = shp.byteLength / 16;
     this.intBuf = buf(this.nInts * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC);
     this.manBuf = buf(2 * this.maxMan * 17 * 16, U.STORAGE | U.COPY_SRC);
-    this.coldBuf = buf(2 * this.maxMan * 6 * 16, U.STORAGE);
+    this.coldBuf = buf(2 * this.maxMan * 6 * 16, U.STORAGE | U.COPY_SRC);
     this.parBuf = buf(1024, U.UNIFORM | U.COPY_DST);
     const cu = new Uint32Array(64 * 33); for (let c = 0; c < 33; c++) cu[c * 64] = c;
     this.colBuf = buf(256 * 33, U.UNIFORM | U.COPY_DST, cu);
@@ -1872,12 +2073,12 @@ class GpuWorld {
     const mod = await compile(WGSL, 'WGSL'), modA = await compile(WGSL_ARGS, 'WGSL args');
     const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
-    const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color_support', 'color', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_score', 'red_pick', 'red_apply', 'crush', 'snap_acc', 'snap_split', 'snap_shapes'];
+    const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color_init', 'color_round', 'color_claim_s', 'color_claim', 'color_tie', 'color_resolve', 'color_count', 'color_check', 'ev_count', 'ev_cut', 'blist_sort', 'ovf_sort', 'sort_cells', 'color_scatter', 'adj_scan', 'integrate_warm',
+                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_big', 'red_score', 'red_pick', 'red_apply', 'crush', 'snap_acc', 'snap_split', 'snap_shapes'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'hull_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
-      ...(modP ? ['p_gather', 'p_place', 'p_prep', 'p_scan', 'p_scatter', 'p_integrate', 'p_contact', 'p_apply', 'p_finish'] : []).map(async k => { this.pl[k] = await mk(k, partL, modP); })]);
+      ...(modP ? ['p_gather', 'p_place', 'p_prep', 'p_scan', 'p_scatter', 'p_sort', 'p_integrate', 'p_contact', 'p_apply', 'p_finish'] : []).map(async k => { this.pl[k] = await mk(k, partL, modP); })]);
     this.ts = d.features.has('timestamp-query');
     this.stages = ['broad', 'narrow', 'chunks', 'colour', 'sub-steps', 'particles', 'sleep'];
     if (this.ts) {
@@ -1915,7 +2116,7 @@ class GpuWorld {
     let tp = 1024; while (tp < 2 * ((this.stats.manifolds || 0) * 1.5 + 2048) && tp < this.TP) tp *= 2; this.TPeff = tp;
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
     u[136] = this.oHull; u[137] = L.hl; f[139] = this.ovfPush ?? 1; u[138] = this.dbgBits || 0;
-    u[140] = L.plan; u[141] = L.spart; u[142] = L.snap;
+    u[140] = L.plan; u[141] = L.spart; u[142] = L.snap; u[143] = L.claim; u[144] = L.mtry; u[145] = L.claim2; u[146] = L.sorted2; u[147] = L.evhist; u[148] = L.cchk || 0;
     u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 3;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
@@ -1937,7 +2138,18 @@ class GpuWorld {
       this.frame++; this.skipped = (this.skipped || 0) + 1; return;
     }
     if (this.pendingInherit && this.pendingInherit.length) {
-      const list = this.pendingInherit.splice(0, this.maxInherit);
+      // (one generation a step: an entry whose parent is placed by this same batch would read that parent while
+      // it is being placed, in whatever order the threads ran; it waits for the next step)
+      const kids = new Set(), parents = new Set(); let cut = 0;
+      for (const e of this.pendingInherit) {
+        if (cut >= this.maxInherit || kids.has(e[1] & 0x3fffffff) || parents.has(e[0])) break;
+        parents.add(e[1] & 0x3fffffff);
+        if (e[0] !== 0 && (e[0] & 0x80000000) === 0) kids.add(e[0]);   // (high bit: a particle, never a parent)
+        cut++;
+      }
+      const list = this.pendingInherit.splice(0, cut);
+      // (the parents this batch retires: their slots are free after it, not before, whatever waits)
+      this.retiredNow = list.filter(e => e[0] === 0).map(e => e[1] & 0x3fffffff);
       const u = new Uint32Array(list.length * 12), f = new Float32Array(u.buffer);
       list.forEach((e, k) => { u[k * 12] = e[0]; u[k * 12 + 1] = e[1]; for (let q = 2; q < 12; q++) f[k * 12 + q] = e[q]; });
       d.queue.writeBuffer(this.intBuf, this.L.inherit * 4, u);
@@ -1949,6 +2161,7 @@ class GpuWorld {
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
     // counters; impact events keep accumulating until a step copies them out (a pending read-back skips the copy)
     if (this.statCopied === false) { clr(0, 7); clr(8, 7); } else { clr(0, 16); clr(L.snap, 1); }   // (events, crushes and breaks gather until copied)
+    clr(L.evhist, 128);
     clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.hl, 1); clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (this.reduce !== false) { clr(L.ptab, 3 * this.TPeff); clr(L.big, 64 * 4096); }
@@ -1989,7 +2202,7 @@ class GpuWorld {
       if (this.capP) { p.setBindGroup(2, this.bgP); run(p, 'p_place', Math.ceil(this.inheritCount / 64)); }
       run(p, 'retire', Math.ceil(this.inheritCount / 64)); p.end();
     }
-    p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'pairs', nsh); p.end();
+    p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'sort_cells', nsh); run(p, 'pairs', nsh); p.end();
     p = pass(null, true); run(p, 'pair_args', 1); p.end();
     p = pass('narrow'); ind(p, 'narrow', 99 * 4); p.end();
     // the chunk pairs listed by narrow, always sized by their real count (one indirect dispatch)
@@ -1997,11 +2210,19 @@ class GpuWorld {
     p = pass('chunks'); p.setPipeline(this.pl.narrow_hull); p.dispatchWorkgroupsIndirect(this.argBuf, 102 * 4); p.end();
     p = pass(null, true); run(p, 'man_args', 1); p.end();
     p = pass('colour');
-    if (this.reduce !== false) for (const k of ['red_count', 'red_score', 'red_pick', 'red_apply']) ind(p, k, 96 * 4);
-    ind(p, 'color_support', 96 * 4); ind(p, 'color', 96 * 4); run(p, 'adj_scan', 1); p.end();
+    if (this.reduce !== false) { ind(p, 'red_count', 96 * 4); run(p, 'red_big', Math.ceil(this.TPeff / 64)); for (const k of ['red_score', 'red_pick', 'red_apply']) ind(p, k, 96 * 4); }
+    ind(p, 'color_init', 96 * 4);
+    // (rounds: 2 for supports, then 4 for all. Each is 4 dispatches, and on the software GPU a dispatch costs
+    // milliseconds: 12 rounds made the colour stage of the lab's collapse 38 -> 880 ms at its slowest step. With
+    // 2 + 4 the 2,000-box pile left 10 contacts to the overflow pass against 1; with 1 + 3, 67)
+    const RS = this.colRoundsS ?? 2, RA = this.colRounds ?? 4;
+    for (let r = 0; r < RS + RA; r++) { ind(p, r < RS ? 'color_claim_s' : 'color_claim', 96 * 4); ind(p, 'color_tie', 96 * 4); ind(p, 'color_resolve', 96 * 4); run(p, 'color_round', 1); }
+    ind(p, 'color_count', 96 * 4); run(p, 'adj_scan', 1);
+    if (this.colorCheck) { p.end(); enc.clearBuffer(this.intBuf, (L.cchk + 1) * 4, 32 * this.n1 * 4); p = pass(null); ind(p, 'color_check', 96 * 4); }
+    p.end();
     p = pass(null, true); run(p, 'color_scan', 1); p.end();
     p = pass('sub-steps');
-    ind(p, 'color_scatter', 96 * 4);
+    ind(p, 'color_scatter', 96 * 4); run(p, 'blist_sort', nb); if (!globalThis.NO_OVF_SORT) run(p, 'ovf_sort', 1);
     const C = this.colorLimit;
     const colors = (k) => {
       p.setPipeline(this.pl[k]);
@@ -2023,7 +2244,7 @@ class GpuWorld {
     }
     colors('restitute');
     run(p, 'finish', nb);
-    if (this.evEnergy > 0) ind(p, 'events', 96 * 4);
+    if (this.evEnergy > 0) { ind(p, 'ev_count', 96 * 4); run(p, 'ev_cut', 1); ind(p, 'events', 96 * 4); }
     if (this.crushing !== false) ind(p, 'crush', 96 * 4);
     if (this.plans) { ind(p, 'snap_acc', 96 * 4); run(p, 'snap_split', nb); run(p, 'snap_shapes', nsh); }
     p.end();
@@ -2032,7 +2253,7 @@ class GpuWorld {
     if (this.capP && this.np) {
       p.setBindGroup(2, this.bgP);
       const np = Math.ceil(this.np / 64);
-      run(p, 'p_prep', np); run(p, 'p_scan', 1); run(p, 'p_scatter', np);
+      run(p, 'p_prep', np); run(p, 'p_scan', 1); run(p, 'p_scatter', np); run(p, 'p_sort', Math.ceil(this.PGeff / 64));
       // with no particle moving at the last stats and no new input, only the wake check runs (a particle woken now
       // starts moving a few steps later, when the stats show it)
       if (this.stats.pActive > 0 || pBusy) {
@@ -2062,8 +2283,8 @@ class GpuWorld {
     if (this.inheritCount) {
       this.inheritCount = 0;
       // the retired parents' slots are free from now on (their pieces have been placed from them)
-      for (const b of this.retiring) (this.freeBodies = this.freeBodies || []).push(b);
-      this.retiring = [];
+      for (const b of this.retiredNow || []) (this.freeBodies = this.freeBodies || []).push(b);
+      this.retiredNow = [];
     }
     this.frame++;
   }
@@ -2204,6 +2425,10 @@ class GpuWorld {
     const b = this.bodies[i - 1]; if (b) { b.im = pl.A.im; b.il = pl.A.il; b.mass = pl.A.mass; }
     this.snaps.push({ body: i, spare: j, A: pl.A, B: pl.B, impulse });
   }
+  // Wait until every step's stats submitted so far are in (events, crushes, breaks, counts). The page reads them
+  // as they come; the lab waits for them each frame, so what a frame sees does not depend on how fast the
+  // browser maps buffers (runs differed by it).
+  async flushStats() { this.pollStats(); while (this.statPending && this.statPending.size) await Promise.all([...this.statPending]); }
   // the pieces broken on the GPU since the last call: [{ body, spare, A, B (the parts' centre p and rotation q in
   // the body's frame), impulse }]
   takeSnaps() { const s = this.snaps; this.snaps = []; return s; }
@@ -2220,7 +2445,7 @@ class GpuWorld {
     b.dead = true;
     const own = this.bodyShapes && this.bodyShapes.get(parent);
     if (own) { for (const k of own) if (this.shapes[k - 1] && this.shapes[k - 1].body === parent) this.killShape(k); this.bodyShapes.delete(parent); }
-    this.pendingInherit = this.pendingInherit || []; this.retiring = this.retiring || [];
+    this.pendingInherit = this.pendingInherit || [];
     kids.forEach((kid, k) => {
       if (!kid) return;
       // dvs[k]: [dx, dy, dz] beyond the parent's motion, { v } for a velocity of its own, { noRebound: n } to
@@ -2238,7 +2463,6 @@ class GpuWorld {
       else this.pendingInherit.push([((slot + 1) | 0x80000000) >>> 0, parent, ...pr, ...qr, ...d]);
     });
     this.pendingInherit.push([0, parent, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
-    this.retiring.push(parent);
   }
   // free capacity: bodies and shapes (retired slots are reused)
   roomBodies() { return this.capB - this.n + (this.freeBodies ? this.freeBodies.length : 0); }
@@ -2321,24 +2545,31 @@ class GpuWorld {
     this.pollTimes();
     if (!this.statCopied || !this.statNext) return;
     const sb = this.statNext, seq = ++this.statSeq; this.statNext = null;
-    sb.buf.mapAsync(GPUMapMode.READ).then(() => {
+    const pr = sb.buf.mapAsync(GPUMapMode.READ).then(() => {
       const raw = sb.buf.getMappedRange().slice(0);
       sb.buf.unmap(); sb.busy = false;
       const u = new Uint32Array(raw), f = new Float32Array(raw);
       // events are never lost: every copied step's events count, even when an older copy arrives late
       if (this.evEnergy > 0) {
-        const n = Math.min(u[7], this.maxEvents);
+        const n = Math.min(u[7], this.maxEvents), batch = [];
         for (let k = 0; k < n; k++) {
           const o = 16 + k * 12;
-          this.events.push({ a: u[o], b: u[o + 1], sa: u[o + 2], sb: u[o + 3], p: [f[o + 4], f[o + 5], f[o + 6]], n: [f[o + 7], f[o + 8], f[o + 9]], impulse: f[o + 10], approach: f[o + 11] });
+          batch.push({ a: u[o], b: u[o + 1], sa: u[o + 2], sb: u[o + 3], p: [f[o + 4], f[o + 5], f[o + 6]], n: [f[o + 7], f[o + 8], f[o + 9]], impulse: f[o + 10], approach: f[o + 11] });
         }
+        // (in the order of their shapes: the GPU lists them in whatever order its threads got there)
+        batch.sort((x, y) => x.sa - y.sa || x.sb - y.sb || x.a - y.a || x.b - y.b);
+        for (const e of batch) this.events.push(e);
       }
       // crushed bodies, never lost either
       { const n = Math.min(u[15], 256), o0 = (64 + 48 * this.maxEvents + 33 * 4) / 4;
-        for (let k = 0; k < n; k++) { const o = o0 + k * 12; this.crushes.push({ body: u[o], by: u[o + 1], p: [f[o + 2], f[o + 3], f[o + 4]], q: [f[o + 5], f[o + 6], f[o + 7], f[o + 8]], v: [f[o + 9], f[o + 10], f[o + 11]] }); } }
+        const batch = [];
+        for (let k = 0; k < n; k++) { const o = o0 + k * 12; batch.push({ body: u[o], by: u[o + 1], p: [f[o + 2], f[o + 3], f[o + 4]], q: [f[o + 5], f[o + 6], f[o + 7], f[o + 8]], v: [f[o + 9], f[o + 10], f[o + 11]] }); }
+        batch.sort((x, y) => x.body - y.body); for (const c of batch) this.crushes.push(c); }
       // pieces broken on the GPU, never lost: their shapes' records here follow (as the kernels did)
       { const o0 = (64 + 48 * this.maxEvents + 33 * 4 + 48 * 256) / 4, n = Math.min(u[o0], 256);
-        for (let k = 0; k < n; k++) { const o = o0 + 1 + 4 * k; this.snapped(u[o], u[o + 1], f[o + 3]); } }
+        const batch = [];
+        for (let k = 0; k < n; k++) { const o = o0 + 1 + 4 * k; batch.push([u[o], u[o + 1], f[o + 3]]); }
+        batch.sort((x, y) => x[0] - y[0]); for (const b of batch) this.snapped(...b); }
       if (seq < this.statLatest) return;
       this.statLatest = seq; this.statsInputs = sb.inputs;
       this.stats = { manifolds: u[0], overflow: u[1], colors: u[2], pairs: u[3], dropped: u[4], candidates: u[5], awake: u[6], events: u[7], pActive: u[12], pLive: u[13], pairsLost: Math.max(0, u[5] - this.maxPairs) };
@@ -2348,6 +2579,8 @@ class GpuWorld {
       const cc = new Uint32Array(raw, 64 + 48 * this.maxEvents, 33);
       for (let c = 0; c < 33; c++) this.colCounts[c] = Math.max(cc[c], Math.floor(this.colCounts[c] * 0.95));
     }, () => { sb.busy = false; });
+    // (the lab waits for them each frame, so a frame sees the same stats every run: see flushStats)
+    this.statPending = this.statPending || new Set(); this.statPending.add(pr); pr.finally(() => this.statPending.delete(pr));
   }
 
   // Copy `size` bytes of `buffer` back. Staging buffers are kept per source buffer and reused (grown when
@@ -2380,15 +2613,21 @@ class GpuWorld {
     // flight must not vanish or appear early: the list and the poses are of the same moment)
     const n1 = this.n1, nb = this.n;
     const list = [], slots = [], gens = [];
-    this.shapes.forEach((s, k) => { if (s && s.body < n1 && (!minBody || (!s.dead && s.body >= minBody))) { list.push(s); slots.push(k + 1); gens.push(this.shapeGen ? this.shapeGen[k] || 0 : 0); } });
-    const bod = await this.read(this.bodBuf, n1 * 80), sol = await this.read(this.solBuf, n1 * 96);
+    // Which shapes: those the JS records list now. Each one's body and local pose: the GPU's own, copied in the
+    // same moment as the bodies. (A break on the GPU moves shapes to another body in the step it happens; the JS
+    // records follow when that step's stats come back. Poses from the live records, at whatever time the read
+    // resolved, made lab runs differ; from records copied at the read, pieces drawn from a body that had just
+    // broken jumped by its new centre, 8.7 m: lab collapse, 6,709 jumps.)
+    this.shapes.forEach((s, k) => { if (s && s.body < n1 && (!minBody || (!s.dead && s.body >= minBody))) { list.push({ mat: s.mat, col: s.col }); slots.push(k + 1); gens.push(this.shapeGen ? this.shapeGen[k] || 0 : 0); } });
+    const [bod, sol, shp] = await Promise.all([this.read(this.bodBuf, n1 * 80), this.read(this.solBuf, n1 * 96), this.read(this.shpBuf, this.ns1 * 128)]);
     const t0 = performance.now();
     const pose = new Float32Array(list.length * 10), mats = new Uint8Array(list.length), cols = new Uint16Array(list.length);
     list.forEach((s, k) => {
-      if (!s) return;
-      const b = s.body * 20, p = [bod[b], bod[b + 1], bod[b + 2]], q = [bod[b + 4], bod[b + 5], bod[b + 6], bod[b + 7]];
-      const wp = mv(q2m(q), s.lp), wq = qmulJ(q, s.lq);
-      pose.set([p[0] + wp[0], p[1] + wp[1], p[2] + wp[2], ...wq, ...s.h], k * 10);
+      const o = slots[k] * 32, bi = Math.round(shp[o]);
+      const b = bi * 20, p = [bod[b], bod[b + 1], bod[b + 2]], q = [bod[b + 4], bod[b + 5], bod[b + 6], bod[b + 7]];
+      const lp = [shp[o + 4], shp[o + 5], shp[o + 6]], lq = [shp[o + 8], shp[o + 9], shp[o + 10], shp[o + 11]], h = [shp[o + 12], shp[o + 13], shp[o + 14]];
+      const wp = mv(q2m(q), lp), wq = qmulJ(q, lq);
+      pose.set([p[0] + wp[0], p[1] + wp[1], p[2] + wp[2], ...wq, ...h], k * 10);
       mats[k] = s.mat; cols[k] = s.col ?? s.mat;
     });
     const body = new Float32Array(nb * 7), vel = new Float32Array(nb * 3), ang = new Float32Array(nb * 3), sleeping = new Uint8Array(nb), timer = new Float32Array(nb);

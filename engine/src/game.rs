@@ -66,13 +66,13 @@ pub struct Game {
     pub frac_made: usize,
     pub frac_max: usize,
     /// break plans of falling pieces, for the GPU to break them in the step of a hit (see `plan_piece`)
-    pub plans: hashbrown::HashMap<u32, Plan>,
+    pub plans: crate::Map<u32, Plan>,
     plan_todo: Vec<u32>,
     /// the plans made by the last call: [piece, impulse (N s), n, the other part's bricks as places in the piece's
     /// list (n of them)] ...
     pub plan_out: Vec<f32>,
     /// pieces parted by `snap`, and the two they became
-    pub snapped: hashbrown::HashMap<u32, (u32, u32)>,
+    pub snapped: crate::Map<u32, (u32, u32)>,
 }
 /// Where a falling piece breaks first, and how hard a hit must be to break it there: its weakest section under
 /// its own inertia, landing on its underside. The joints to cut (with their bricks, to see they are still
@@ -164,8 +164,8 @@ impl Game {
         // parts it, every bearing joint on it cut. The plane whose worst joint is the worst, with at least a
         // twentieth of the mass on the smaller side. (Cutting single joints worst first, the 4-storey tower took
         // 4,096 of its 5,140 joints to part: its worst joints are spread over the building.)
-        let rmap: hashbrown::HashMap<u32, f32> = r.iter().copied().collect();
-        let mut planes: hashbrown::HashMap<i32, (f32, Vec<u32>)> = hashbrown::HashMap::new();
+        let rmap: crate::Map<u32, f32> = r.iter().copied().collect();
+        let mut planes: crate::Map<i32, (f32, Vec<u32>)> = crate::Map::default();
         for &i in &set { let mut j = self.b.jhead[i as usize]; while j != NONE {
             if self.b.ja[j as usize] == i && self.b.jaxis[j as usize] == 1 && self.b.body[self.b.jb[j as usize] as usize] == pid {
                 let e = planes.entry(self.b.tbox(i).max[1]).or_insert((0.0, Vec::new()));
@@ -176,7 +176,7 @@ impl Game {
         pl.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(core::cmp::Ordering::Equal));
         let m = |v: &Vec<u32>| v.iter().map(|&i| structure::mass(&self.b, i)).sum::<f32>();
         let total: f32 = m(&set);
-        let parts = |cut: &hashbrown::HashSet<u32>| -> Vec<Vec<u32>> {
+        let parts = |cut: &crate::Set<u32>| -> Vec<Vec<u32>> {
             let mut idx = vec![NONE; self.b.len()];
             for (q, &i) in set.iter().enumerate() { idx[i as usize] = q as u32; }
             let mut seen = vec![false; set.len()]; let mut out = Vec::new();
@@ -193,7 +193,7 @@ impl Game {
         let mut found = None;
         for (_, q, js) in pl.iter().take(24) {
             if *q < 1e-6 { break; }
-            let cut: hashbrown::HashSet<u32> = js.iter().copied().collect();
+            let cut: crate::Set<u32> = js.iter().copied().collect();
             let mut g = parts(&cut);
             g.sort_by(|x, y| m(y).partial_cmp(&m(x)).unwrap());
             if g.len() >= 2 && m(&g[1]) >= 0.05 * total { found = Some((*q, js.clone(), g)); break; }
@@ -203,7 +203,7 @@ impl Game {
         let impulse = total * 9.81 / q / 60.0;
         // (the smaller part, and with it any bits the cut parts besides: they come away with it)
         let other: Vec<u32> = g[1..].iter().flatten().copied().collect();
-        let pos: hashbrown::HashMap<u32, usize> = set.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+        let pos: crate::Map<u32, usize> = set.iter().enumerate().map(|(k, &i)| (i, k)).collect();
         self.plan_out.extend_from_slice(&[pid as f32, impulse, other.len() as f32]);
         for i in &other { self.plan_out.push(pos[i] as f32); }
         let cut = cutj.iter().map(|&j| (j, self.b.ja[j as usize], self.b.jb[j as usize])).collect();
@@ -228,7 +228,7 @@ impl Game {
         if !ok { self.out.push(0.0); return 0; }
         for &(j, _, _) in &pl.cut { self.b.fracture_joint(j); }
         let set = core::mem::take(&mut self.pieces[pu]);
-        let other: hashbrown::HashSet<u32> = pl.other.iter().copied().collect();
+        let other: crate::Set<u32> = pl.other.iter().copied().collect();
         // (both parts in the piece's order: the GPU's shapes of each body are in it)
         let (moved, kept): (Vec<u32>, Vec<u32>) = set.into_iter().partition(|i| other.contains(i));
         let ids = [self.new_piece(kept), self.new_piece(moved)];
@@ -1155,6 +1155,25 @@ mod tests {
         // the spalled cells: one or two, never all, the same every time
         for i in 0..200u32 { for n in 2..=6u32 { let (p, m) = crate::brick::frac_cells(i, n); assert!(p < 16 && m != 0 && m.count_ones() <= 2 && m < (1 << n)); assert_eq!(crate::brick::frac_cells(i, n), (p, m)); } }
     }
+    #[test] fn the_same_game_gives_the_same_result() {
+        // determinism: the same blasts, structure checks and break plans, twice in fresh games, give the same
+        // outputs bit for bit. (The maps' hasher is fixed, crate::Map: the default one is seeded per process, so two
+        // page loads could walk a map in different orders; within one process, as here, the seed is shared.)
+        let run = || {
+            let mut g = Game::new_kind(4, 3);
+            let mut outs: Vec<f32> = Vec::new();
+            let mut x = -11.0f32;
+            while x <= 11.0 { g.blast(v3(x, 1.6, -11.2), 0.9); outs.extend_from_slice(&g.out); x += 1.5; }
+            for _ in 0..6 { g.structure_step(64); outs.extend_from_slice(&g.out); }
+            g.plan_out.clear(); g.finish_plans(); outs.extend_from_slice(&g.plan_out);
+            outs.push(g.max_ratio); outs.push(g.b.len() as f32);
+            outs
+        };
+        let (a, b) = (run(), run());
+        std::println!("two runs of the mixed building's facade blasted: {} numbers out each", a.len());
+        assert_eq!(a.len(), b.len());
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "bit for bit");
+    }
     #[test] fn a_falling_piece_has_a_break_plan_and_snaps_by_it() {
         // the 4-storey tower's ground storey cut: the building above falls as a piece. Its plan: the weakest section
         // under its own weight on its underside; the impulse that breaks it there (M g dt / ratio); the part that
@@ -1176,7 +1195,7 @@ mod tests {
         let (a, b) = (g.out[1] as u32, g.out[3 + 7 * g.out[2] as usize] as u32);
         assert_eq!(g.pieces[a as usize].len() + g.pieces[b as usize].len(), n);
         assert_eq!(g.pieces[b as usize].len(), k);
-        let inb: hashbrown::HashSet<u32> = g.pieces[b as usize].iter().copied().collect();
+        let inb: crate::Set<u32> = g.pieces[b as usize].iter().copied().collect();
         for &i in &g.pieces[a as usize] { let mut j = g.b.jhead[i as usize]; while j != NONE { assert!(!inb.contains(&g.b.joint_other(j, i)), "no joint between the parts"); j = g.b.joint_next(j, i); } }
         assert_eq!(g.snap(pid), 0);
         assert_eq!(g.snapped.get(&pid), Some(&(a, b)));

@@ -166,7 +166,7 @@ pub fn analyse_at(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32
 /// The last solution of a load case, per cell (brick, cell's corner x, z ticks): the next solve of the standing
 /// building starts from it. Between two checks most of the building moves the same.
 #[derive(Default)]
-pub struct Warm(hashbrown::HashMap<(u32, i32, i32), [f64; 6]>);
+pub struct Warm(crate::Map<(u32, i32, i32), [f64; 6]>);
 /// As `analyse_at`, starting from (and keeping) the last solution in `warm`.
 pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32, f32)], sink: &[bool], dir: V3, warm: Option<&mut Warm>) -> Analysis {
     let gravity = fabs(dir.y) > 0.99;
@@ -341,7 +341,7 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
     };
     // joints: their sub-links summed about the joint's face centre, then checked as one section
     let mut jsum: Vec<(u32, [f64; 3], [f64; 3], [f64; 3], f64)> = Vec::new();   // joint, force, moment, force-weighted.., area
-    let mut jslot = hashbrown::HashMap::new();
+    let mut jslot = crate::Map::default();
     let mut parts: Vec<Vec<usize>> = Vec::new();
     for (l, k) in links.iter().enumerate() {
         if k.joint == NONE || !live[k.a as usize] || !live[k.b as usize] { continue; }
@@ -661,7 +661,7 @@ impl Level {
     /// the next level: free cells grouped into blocks of `bin` m, each block rigid (K_c = T^T K T, T the rigid
     /// map from the block's centre to each cell); fixed cells stay out (they are not unknowns)
     fn coarsen(&self, bin: f64) -> Level {
-        let mut map = hashbrown::HashMap::new();
+        let mut map = crate::Map::default();
         let mut up = vec![NONE; self.n];
         let mut pos: Vec<[f64; 3]> = Vec::new(); let mut cnt: Vec<f64> = Vec::new();
         for k in 0..self.n {
@@ -677,7 +677,7 @@ impl Level {
         let mut diag = vec![[[0.0; 6]; 6]; nc];
         let add = |m: &mut M6, a: &M6| { for x in 0..6 { for y in 0..6 { m[x][y] += a[x][y]; } } };
         for k in 0..self.n { if up[k] == NONE { continue; } let m = mmul(&tr(&t[k]), &mmul(&self.diag[k], &t[k])); add(&mut diag[up[k] as usize], &m); }
-        let mut pairs: hashbrown::HashMap<(u32, u32), M6> = hashbrown::HashMap::new();
+        let mut pairs: crate::Map<(u32, u32), M6> = crate::Map::default();
         for &(a, c, ref m) in &self.off {
             let (ua, uc) = (up[a as usize], up[c as usize]);
             if ua == NONE || uc == NONE { continue; }

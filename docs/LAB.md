@@ -104,9 +104,46 @@ node game/lab.cjs quick                      # or full, or scenario names
 node game/lab.cjs collapse --frames 150      # a shortened run
 node game/lab.cjs collapse --trace 36:58     # trace the bodies made in frames 36-58
 node game/lab.cjs ball --read-lag 3 --job-lag 6
+node game/lab.cjs collapse --frames 150 --twice   # determinism: twice, compared frame by frame
 ```
 
 The runner prints the summaries and writes `lab-results/<scenario>.json` and `all.json`. It exits with 1 when a check fails. It needs Playwright and `three` (set `SF_NODE_MODULES` to a `node_modules` folder that has `three`). On the software GPU a 4-storey collapse step takes about 4 s, so 150 frames take about 10 minutes.
+
+## Determinism
+
+A lab run is now deterministic: the same build gives the same run, frame for frame.
+
+`--twice` runs each scenario twice in one browser and compares a digest of every frame. The digest covers:
+- the poses and particles read back;
+- the bodies, breaks, dust, bricks, joints, contacts and particles made;
+- the awake count, the events and the jobs queued;
+- the GPU's inputs and frame.
+
+It reports the first frame where the runs part, and which of these differ. `tools/check.sh lab` runs the collapse twice for 150 frames.
+
+Debugging switches:
+
+| Switch | What it adds to the digest |
+| --- | --- |
+| `SF_DET_DUMP=1` | hashes of the GPU's body, solver and shape records, and of the contacts' colours as a set |
+| `SF_DET_AT=f` | the raw records at frame f, from both runs, written to `det_raw.json` |
+| `SF_DET_ROWS=1` | every frame's contacts with their colours, bodies and reduction flag |
+
+Runs of 150–200 frames:
+
+| When | Result |
+| --- | --- |
+| before | parted within the first frames |
+| with the GPU fixes (docs/GPU.md, "Determinism") | parted at frames 91–127 |
+| after the last fix (the reduction table's hash) | four runs of 200 frames agreed in every frame (two pairs, run side by side) |
+
+Why runs differed:
+- **Stats arrived when the browser mapped them**, so a frame saw this step's events, crushes and counts or the last one's, by wall time. The lab now waits for them every frame (`gpu.flushStats()`).
+- **`readPose` read the velocities after the poses**, some steps later, and computed shapes' poses from JS records that a GPU break changes when its stats come back. It now copies the bodies, velocities and the GPU's own shape records in one read and computes the poses from those. (Copying the JS records at the read instead drew pieces of a just-broken body around its old centre: 6,709 jumps in `collapse --frames 150`; the lab's jump check caught it.)
+- **The engine's maps had a seeded hasher.** It is now fixed (`crate::Map`).
+- **GPU races.** Atomics' order fed choices and sums; see docs/GPU.md, "Determinism".
+
+Determinism holds on one machine and browser. A different GPU or driver rounds differently, so its runs are deterministic among themselves but differ from these.
 
 ## What it found first
 

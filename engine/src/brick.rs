@@ -1,7 +1,7 @@
 //! Adaptive brick store: real-size axis-aligned boxes on the 0.125 m tick grid, joints as shared faces with
 //! exact areas, and on-demand splitting that keeps the joint graph exact. Layout follows docs/SPEC.md.
 use alloc::vec::Vec;
-use hashbrown::HashMap;
+use crate::Map as HashMap;
 
 pub const NONE: u32 = u32::MAX;
 pub const TICK: f32 = 0.125;

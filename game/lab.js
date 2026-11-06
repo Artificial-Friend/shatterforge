@@ -237,7 +237,7 @@ function labReport(wallS) {
   return {
     scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: ['concrete frame', 'masonry', 'mass timber', 'mixed'][S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
-    pass: checks.every(c => c.pass), checks,
+    pass: checks.every(c => c.pass), checks, colConflicts: L.colConflicts || 0, colConflictAt: L.colConflictAt || null, digest: L.digest, dumpRaw: L.dumpRaw ? { ...L.dumpRaw, colRows: L.colRows, allRows: L.allRows } : (L.colRows ? { colRows: L.colRows, allRows: L.allRows } : null),
     physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps },
     perf: {
       wall_s: +wallS.toFixed(1), steps: stepsDone, steps_skipped: gpu.skipped || 0,
@@ -262,6 +262,20 @@ function labSummary(rep) {
   for (const [k, e] of Object.entries(rep.events)) lines.push(`  events ${k}: ${e.n} · first ${JSON.stringify(e.first.slice(0, 3))}`);
   return lines.join('\n');
 }
+// A frame's state as one number, to compare two runs of a scenario (node game/lab.cjs --twice): the poses read
+// back (what is drawn), the engine's bricks and joints, the bodies and breaks. Two runs of the same build agree
+// frame for frame or the lab is not deterministic.
+function labDigest() {
+  const H = () => { let h = 2166136261 >>> 0; return { mix(x) { h = Math.imul(h ^ (x >>> 0), 16777619) >>> 0; }, get v() { return h; } }; };
+  const pose = H(), parts = H(), job = H();
+  if (snapCur && snapCur.pose) { const u = new Uint32Array(snapCur.pose.buffer, snapCur.pose.byteOffset, snapCur.pose.length); for (let k = 0; k < u.length; k++) pose.mix(u[k]); }
+  const pr = snapCur && snapCur.parts;
+  if (pr && pr.data) { const u = new Uint32Array(pr.data.buffer, pr.data.byteOffset, pr.data.length); for (let k = 0; k < u.length; k++) parts.mix(u[k]); }
+  for (const j of jobs.blast) job.mix(j.op.length);
+  // (each part apart, so a difference says where it starts)
+  return [pose.v, parts.v, gpu.n, breaks, dustBricks, E.bricks_alive(), E.joints_live(), gpu.stats.manifolds || 0, partsMade, gpu.stats.awake || 0, L_events(), job.v, gpu.inputs, gpu.frame, gpu.skipped || 0, gpu.colorLimit, gpu.substeps, gpu.ns, gpu.np || 0, JSON.stringify(gpu.stats).length, (gpu.pendingInherit || []).length];
+}
+function L_events() { return (gpu.events && gpu.events.length) || 0; }
 async function labRun() {
   const L = LAB, st = LABSTATE, name = st.queue[0], S = { ...LAB_SCENARIOS[name] };
   if (st.frames) S.frames = st.frames;   // (a shortened run, for quick checks of the lab itself)
@@ -270,7 +284,7 @@ async function labRun() {
     draw: { n: 0, vol: 0, keys: new Float64Array(4096), pos: new Float32Array(4096 * 3), bound: new Float32Array(4096) },
     Thist: [], holeFrames: 0, holeMax: 0, inHole: false, holesRecovered: 0, dupFrames: 0, dupMax: 0, flickers: 0, teleports: 0, goneAt: new Map(), prevDraw: null,
     bad: 0, below: 0, bounces: 0, bounceMax: 0, launches: 0, launchMax: 0, energyGains: 0, energyGainMax: 0, prevBodies: null, quietFrom: -1,
-    injectedAt: -1000, settledAt: null, timeline: [], trace: [], traceEv: [], traceWin: st.trace || null, events: {}, series: [], jsMs: [], work: (engineMsLog.length = 0, { cs: 0, ps: 0 }), peakStages: null, peakGpu: 0, volTol: 0.05,
+    injectedAt: -1000, settledAt: null, digest: [], timeline: [], trace: [], traceEv: [], traceWin: st.trace || null, events: {}, series: [], jsMs: [], work: (engineMsLog.length = 0, { cs: 0, ps: 0 }), peakStages: null, peakGpu: 0, volTol: 0.05,
   });
   // the defaults, whatever this browser has saved (the report lists them)
   for (const [k, d] of Object.entries(SETTINGS)) { setting[k] = d.def; d.apply(d.def); }
@@ -304,8 +318,35 @@ async function labRun() {
     L.jsMs.push(performance.now() - tj);
     labParticlesMade(); labTruth();
     labFrameChecks();
+    L.digest.push(labDigest());
     // let the GPU finish this frame's work and its stats come back (the next frame sees them)
-    if (dev) { await dev.queue.onSubmittedWorkDone(); await new Promise(r => setTimeout(r, 0)); await new Promise(r => setTimeout(r, 0)); }
+    // (and wait for all of them: what the next frame sees must not depend on how fast the browser maps buffers)
+    if (dev) { await dev.queue.onSubmittedWorkDone(); await gpu.flushStats(); await new Promise(r => setTimeout(r, 0)); }
+    // (debugging determinism: the GPU's own body, solver and shape records, every frame)
+    if (window.__detDump && dev) {
+      const hb = async (buf, bytes) => { const u = new Uint32Array(await gpu.read(buf, bytes)); let h = 2166136261 >>> 0; for (let k = 0; k < u.length; k++) h = Math.imul(h ^ u[k], 16777619) >>> 0; return h; };
+      L.dump = [await hb(gpu.bodBuf, gpu.n1 * 80), await hb(gpu.solBuf, gpu.n1 * 96), await hb(gpu.shpBuf, Math.min(gpu.ns1 * 128, 64 << 20))];
+      {
+        // the colours as a set of (shapes, colour), whatever the slots
+        const nm = Math.min(gpu.stats.manifolds || 0, gpu.maxMan), cur = (gpu.frame - 1) & 1;
+        const mc = new Uint32Array((await gpu.read(gpu.intBuf, gpu.maxMan * 4, gpu.L.mcolor * 4)).buffer);
+        const cold = await gpu.read(gpu.coldBuf, 2 * gpu.maxMan * 6 * 16);
+        const keys = [];
+        for (let k = 0; k < nm; k++) { const o = ((cur * gpu.maxMan + k) * 6) * 4; keys.push(`${cold[o + 19]},${cold[o + 23]}:${mc[k]}`); }
+        if (window.__detAt === L.f || window.__detRows) {
+          const man = await gpu.read(gpu.manBuf, 2 * gpu.maxMan * 17 * 16), sol = await gpu.read(gpu.solBuf, gpu.n1 * 96);
+          const rows = [];
+          for (let k = 0; k < nm; k++) { const o = ((cur * gpu.maxMan + k) * 6) * 4, b = (cur * gpu.maxMan + k) * 68; rows.push([cold[o + 19], cold[o + 23], mc[k], man[b], man[b + 1], man[b + 2], sol[man[b] * 24 + 3] > 0 ? 1 : 0, sol[man[b + 1] * 24 + 3] > 0 ? 1 : 0]); }
+          rows.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+          L.colRows = rows; if (window.__detRows) (L.allRows = L.allRows || {})[L.f] = rows;
+        }
+        keys.sort(); let h = 2166136261 >>> 0; for (const c of keys.join('|')) h = Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0;
+        L.dump.push(h, nm);
+      }
+      const last = L.digest[L.digest.length - 1]; if (last) last.push(...L.dump);
+      if (gpu.colorCheck) { const c = new Uint32Array((await gpu.read(gpu.intBuf, 4, gpu.L.cchk * 4)).buffer)[0]; if (c) L.colConflicts = (L.colConflicts || 0) + c; if (c && !L.colConflictAt) L.colConflictAt = L.f; }
+      if (window.__detAt === L.f) L.dumpRaw = { sol: Array.from(new Float32Array(await gpu.read(gpu.solBuf, gpu.n1 * 96))), shp: Array.from(new Float32Array(await gpu.read(gpu.shpBuf, gpu.ns1 * 128))), bod: Array.from(new Float32Array(await gpu.read(gpu.bodBuf, gpu.n1 * 80))) };
+    }
     const g = gpu.gpuMs ? Object.values(gpu.gpuMs).reduce((a, b) => a + b, 0) : 0;
     if (g > L.peakGpu) { L.peakGpu = g; L.peakStages = Object.fromEntries(Object.entries(gpu.gpuMs).map(([k, v]) => [k, +v.toFixed(2)])); }
     L.work.cs += gpu.stats.manifolds * gpu.substeps; L.work.ps += (gpu.stats.pActive || 0) * (gpu.psub || 4);

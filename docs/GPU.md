@@ -206,6 +206,62 @@ Collisions: box against box keeps its own routine. Anything with a chunk uses se
 
 Particles still collide with a chunk's box.
 
+## Determinism
+
+The same inputs give the same world, bit for bit. Before this, two runs of a 600-box pile differed from the first sample on (1.4 m after 90 frames), and each lab run of the collapse came out differently.
+
+What made runs differ, and what each is now:
+
+| Source | Now |
+| --- | --- |
+| The grid's cells were filled by atomics, in whatever order threads arrived. Pairs and the particle candidate lists (capped at 24) walk them. | Each cell's list is sorted by shape index (`sort_cells`, `p_sort`). |
+| Contacts get their slots from an atomic counter, so slot numbers mean nothing. | Every choice between contacts goes by a key mixed from the two shapes (`mkey`). |
+| Colouring was first come, first served (`atomicOr` on the bodies' masks). | It is claimed in rounds (`color_claim`, `color_tie`, `color_resolve`; details below). |
+| A body's warm-start sum went over its contacts in the order `color_scatter` left them. | Its list is sorted by key first (`blist_sort`). |
+| Restitution of the overflow contacts goes through them one by one, in scatter order. | They are sorted by key first: a bitonic sort in one workgroup (`ovf_sort`). |
+| Contact reduction broke ties of the extreme contacts by slot. | Ties are broken by key. |
+| The reduction's table of body pairs hashed a pair as its key times a constant. Every pair with the static building (body 1) then started from the same slot, chains ran past the 64 probes, and contacts went uncounted depending on thread order. So the building's pair with a piece was reduced in one run and not in the next (lab collapse, frames 91–102, found by comparing every frame's contact colours of two runs). | The key is mixed (a murmur-style finaliser). |
+| A body pair to reduce got its place among the reduced pairs (at most 4,096) from whichever of its contacts came first. Every contact that saw no place yet took a new one, so a pair with hundreds of contacts used hundreds of places, and past 4,096 the pairs that came last went unreduced. In the lab collapse the colours parted at frame 91 from it. | One thread per table slot hands each pair one place (`red_big`). |
+| Events, crushes and breaks came back in the order threads wrote them. | JS sorts each batch (by shapes, by body). |
+| With more events in a step than the list holds (512), the ones kept were whoever wrote first. | Events are counted in energy bands (eighths of a doubling over the threshold), and the lowest bands that do not fit are left out whole (`ev_count`, `ev_cut`). |
+| Pieces placed from a parent that is itself placed in the same batch (a piece broken twice in one job) read it mid-placement. | One generation is placed per step; the next waits for the following step. |
+| `readPose` read the velocities only once the poses had come back, some steps later. | It copies both at once. |
+| `readPose` computed shapes' poses from the live JS records, which a GPU break changes when its stats arrive, sometimes before the read-back does. | It computes each shape's pose from the GPU's own shape record (body, local pose, size), copied with the bodies. A first fix copied the JS records at the moment of the read instead; pieces of a body that had just broken were then drawn about its old centre, up to 8.7 m off (lab collapse, 150 frames: 6,709 jumps). |
+
+How the colouring rounds work:
+- Each round, a contact not yet coloured picks one of the lowest four colours free at both its bodies (by its key and the round), and claims it at each body with a priority.
+- It takes the colour where its claim is the strongest at both bodies.
+- Claims carry the round in their top bits, so an old claim never blocks a new one.
+- Supports (contacts with the static world or a resting body) get 2 rounds of their own first, then everything gets 4 more (`colRoundsS`, `colRounds`). With 12 rounds the colour stage of the lab collapse took 880 ms at its slowest step on the software GPU, against 38 ms before; a dispatch there costs milliseconds. With 2 + 4, the 2,000-box pile left 10 contacts to the overflow pass against 1 with 12 rounds; with 1 + 3 it left 67.
+- What is still uncoloured, or finds no colour free, goes to the overflow pass.
+- Two contacts at a body could have equal 26-bit priorities. In a 600-box pile over 90 frames that is about a one-in-ten chance, and both would take the colour and be solved on the same body at once. So tied contacts claim again with 27 bits of a second hash (`color_tie`).
+- Supporting rounds of their own came from GPU test `stumps`. With supports only first within each claim, the other contacts at the slab took colours its supports then could not get, and the slab rebounded at 0.71 m/s.
+- That test's limit was 0.7 m/s, taken from the 6.3 m/s the slab starts at. It hits at 7.6 m/s, so concrete's restitution of 0.1 allows 0.76 m/s; the limit is now 0.1 × the impact speed (its own commit).
+- Each round is four dispatches (claim, tie, resolve, the round counter).
+
+What was already order-free:
+- The overflow pass sums in fixed point (integer atomics commute).
+- The contacts of one colour share no moving body.
+- Sleep islands link to the smaller root.
+- Warm-start and reduction tables are looked up by key.
+
+GPU test `determinism`: three scenes, each run twice, every pose (and particle) compared: no difference.
+- A 600-box pile, 90 frames.
+- A pile of 120 convex chunks, 90 frames.
+- Everything at once: a 7,700 t block crushing 24 pieces (24 crushed), 1,500 particles poured, a column broken on the GPU (1 break), and a body broken into pieces as it falls, one of them broken again in the same step.
+
+The lab checks the whole system (page, engine, GPU): `node game/lab.cjs collapse --frames 150 --twice` runs the collapse twice and compares a digest of every frame. The digest covers poses, particles, bodies, breaks, dust, bricks, joints, contacts and the GPU's inputs, and it reports where the two runs part. `tools/check.sh lab` runs it.
+
+Three things made lab runs differ besides the GPU's atomics, all fixed:
+- the stats were read whenever the browser had mapped them (the lab now waits for them every frame, `flushStats`);
+- the engine's maps used a seeded hasher (it is now fixed, `crate::Map`);
+- the two `readPose` faults in the table above.
+
+What is not covered:
+- **Capacities.** Contacts or pairs beyond capacity are dropped by whichever threads come last. The lab counts such steps, and there are none.
+- **Crush records.** When two heavy bodies crush the same light one in the same step, which one is named as the crusher can vary. The crush itself does not.
+- **Hardware.** The same GPU and driver give the same result; different GPUs need not, because of float rounding in their math.
+
 ## Capacity
 
 Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall through the ground. The default is now 24 per shape (it was 8, and a heap of chunks overflowed it: chunks fell to -7.8 m). `stats.pairsLost` and `lost` (steps that lost contacts or pairs) report it, and the lab checks it.

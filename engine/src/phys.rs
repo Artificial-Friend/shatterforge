@@ -3,7 +3,7 @@
 //! relax pass) in the style of Box2D v3, extended to 3D. Islands sleep when they come to rest.
 use crate::math::*;
 use alloc::vec::Vec;
-use hashbrown::HashMap;
+use crate::Map as HashMap;
 
 pub const NONE: u32 = u32::MAX;
 
@@ -131,7 +131,7 @@ fn no_clock() -> f64 { 0.0 }
 impl World {
     pub fn new() -> Self {
         World { bodies: Vec::new(), prm: Params::default(), stats: Stats::default(), clock: no_clock,
-                man: Vec::new(), old: Vec::new(), old_map: HashMap::new(), sb: Solver::default(), sidx: Vec::new(),
+                man: Vec::new(), old: Vec::new(), old_map: HashMap::default(), sb: Solver::default(), sidx: Vec::new(),
                 bp_cnt: Vec::new(), bp_ent: Vec::new(), bp_tmp: Vec::new(), uf: Vec::new() }
     }
 
