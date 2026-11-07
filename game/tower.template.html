@@ -59,6 +59,7 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Crumbs as particles <b id="v-particles"></b><input type="range" id="s-particles" min="0" max="1" step="1"><span class="hint">on: loose bricks up to 0.5 m are granular particles (pile and slide, much cheaper; they do not push larger pieces); off: every crumb is a rigid body</span></label>
   <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
   <label>Physics sub-steps <b id="v-substeps"></b><input type="range" id="s-substeps" min="4" max="16" step="1"><span class="hint">per 1/60 s step: more = stiffer, more accurate stacks, slower</span></label>
+  <label>Real-time steps <b id="v-realtime"></b><input type="range" id="s-realtime" min="0" max="1" step="1"><span class="hint">on: when the GPU cannot keep up even at the fewest sub-steps, steps cover 1/30 s with twice the sub-steps (same accuracy, less work per second); the HUD's time ×0.xx says how far behind real time physics runs</span></label>
   <label>Adaptive sub-steps <b id="v-adaptive"></b><input type="range" id="s-adaptive" min="0" max="1" step="1"><span class="hint">on: when physics falls behind real time, sub-steps drop (to 8 at least) and come back when the GPU has room</span></label>
   <label>Solver colours (max) <b id="v-colors"></b><input type="range" id="s-colors" min="8" max="31" step="1"><span class="hint">contacts beyond go to a parallel pass: fewer = faster, a little softer</span></label>
   <label>Ball speed <b id="v-bspeed"></b><input type="range" id="s-bspeed" min="20" max="300" step="10"></label>
@@ -533,6 +534,7 @@ function addPieces(list, xf, vel, cool) {
     return { e: { p: c, v: v.v, w: v.w, q: qs, r: Math.cbrt(6 * shapeVol(s) / 8 / Math.PI), mat: s.mat, wait: !!xf }, s };
   });
   const parts = gpu.addParticles ? gpu.addParticles(pent.map(x => x.e)) : [];
+  for (const b of pl) { const k = b.id === -2 ? 'spill' : b.id < 0 ? 'crumb' : 'piece'; partsBy[k] = (partsBy[k] || 0) + 1; }   // (where particles come from)
   // (h: the box of the crumb's volume; a cell keeps its hull id, to be drawn as itself)
   parts.forEach((slot, k) => { if (slot < 0) return; const s = pent[k].s, e = s.hull ? Math.cbrt(GpuWorld.hulls.hulls[s.hull].vol) : 1; const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: s.h.map(x => x * e), hull: s.hull, col: s.col, gen: g, dead: false }; partsMade++; });
   const idxs = gpu.addBodies(bodies);
@@ -551,7 +553,7 @@ function remeshDirty() {
   if (gpu) { for (const k of dirty) pendingChunks.push({ k, need: readSeq + 1 }); } else dirty.forEach(chunkMesh);
 }
 let lastBlast = '', structPending = false, structRounds = 0, failedJoints = 0, breaks = 0, structRatio = 0;
-let dustBricks = 0, impactMs = 0, dropped = 0, workerMs = 0, spillLost = 0;   // (spillLost: tick^3 of spill with no particle room)
+let dustBricks = 0, impactMs = 0, dropped = 0, workerMs = 0, spillLost = 0; const partsBy = {};   // (spillLost: tick^3 of spill with no particle room)
 // each engine job's time in the engine (ms), for the lab
 const engineMsLog = [];
 
@@ -689,6 +691,7 @@ function finishInner(r) {
 // and answers with the two pieces: the one kept by the body, and the one the spare body took.
 const SNAP_ON = !window.__noSnap;
 let jobPlans = new Map(), gpuSnaps = 0;
+const engineBroken = new Map();   // body -> when the engine broke it (see takeGpuSnaps)
 const snapPending = new Map();   // piece -> { body, spare, infB } until the engine's answer
 function readPlans(r) {
   jobPlans = new Map(); const f = r.plans; if (!f) return;
@@ -703,7 +706,11 @@ function armPlan(idx, pid) {
 function takeGpuSnaps() {
   if (!gpu.takeSnaps) return;
   for (const s of gpu.takeSnaps()) {
-    const inf = bodyInfo.get(s.body); if (!inf) continue;
+    const inf = bodyInfo.get(s.body);
+    // the engine broke the whole piece in the frame the GPU broke it by its plan (its answer came first): the
+    // engine's kids hold the spare's bricks too, so the spare goes. Left, it was a second copy of that part (the
+    // lab's mixed scenario: 21 slabs, 186 m3 of 1,542, doubled at frame 72 for good)
+    if (!inf) { const eb = engineBroken.get(s.body); if (eb !== undefined && clock() - eb < 2000) { const sp = gpu.bodies[s.spare - 1]; if (sp && !sp.dead) gpu.killBody(s.spare); } continue; }
     // a part's frame: the body's at its creation moved by the part's centre and rotation (the same tower-to-world
     // map, see frameOf)
     const fr = (part) => { const d = mv(q2m(inf.q0), part.p); return { ...inf, p0: [inf.p0[0] + d[0], inf.p0[1] + d[1], inf.p0[2] + d[2]], q0: qmulJ(inf.q0, part.q) }; };
@@ -878,7 +885,7 @@ function crushBodies() {
       }
     }
     const room = gpu.roomParticles(), keep = list.slice(0, room);
-    const parts = gpu.addParticles(keep);
+    const parts = gpu.addParticles(keep); partsBy.crushed = (partsBy.crushed || 0) + keep.length;
     parts.forEach((slot, k) => { if (slot < 0) return; const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: info[k].h, col: info[k].col, gen: g, dead: false }; partsMade++; });
     gpu.breakBody(idx, [], c.p, c.q, [], parts, parts.map(() => [0, 0, 0]));
     bodyInfo.delete(idx); crushedBodies++;
@@ -901,6 +908,7 @@ function impacts() {
   }
   if (!sides.size) return;
   const job = jobs.impacts || (jobs.impacts = { op: 'impacts', dt: 1 / 60, recs: [], ctx: new Map() });
+  job.dt = Math.max(job.dt, lastStepDt);   // (forces from impulses: over the step they came from)
   const recs = [];
   for (const [idx, list] of sides) {
     let c = job.ctx.get(idx);
@@ -979,8 +987,11 @@ function onImpacts(job, r) {
       for (let b = 0; b < n; b++, o += 7) boxes.push(f.subarray(o, o + 7));
       kids.push({ id, hit, boxes });
     }
+    // (lab: how much of a big falling part leaves as crumbs and particles when it is broken)
+    if (LAB.on) { let all = 0, fine = 0; for (const kd of kids) for (const bx of kd.boxes) { const v = bx[3] * bx[4] * bx[5] * TICK ** 3; all += v; if (kd.id < 0) fine += v; } if (all >= 50) (LAB.bigBreaks = LAB.bigBreaks || []).push([LAB.f, +all.toFixed(0), +(fine / all).toFixed(3)]); }
     const idx = pieceBody.get(parent);
     if (idx === undefined) continue;
+    if (LAB.on && (LAB.dbgBreaks = LAB.dbgBreaks || []).length < 40) { const bi = bodyInfo.get(idx); let nb = 0, vb = 0; for (const kd of kids) for (const bx of kd.boxes) { nb++; vb += bx[3] * bx[4] * bx[5] * TICK ** 3; } LAB.dbgBreaks.push({ f: LAB.f, piece: parent, body: idx, n_when_made: bi && bi.n, kid_boxes: nb, kid_box_m3: +vb.toFixed(1), kids: kids.length, shapes_gpu: (gpu.bodyShapes.get(idx) || []).length, pend: snapPending.get(parent) ? { spare: snapPending.get(parent).spare, shapes: (gpu.bodyShapes.get(snapPending.get(parent).spare) || []).length } : null, plan: gpu.planOf && gpu.planOf.get(idx) ? { spare: gpu.planOf.get(idx).spare, done: gpu.planOf.get(idx).done } : null }); }
     const c = job.ctx.get(idx) || { J: [0, 0, 0], vPost: [0, 0, 0], w0: [0, 0, 0] };
     const xf = frameOf(idx);
     const M = gpu.bodies[idx - 1].mass || 1;
@@ -1019,6 +1030,11 @@ function onImpacts(job, r) {
     }, 0);
     // the velocities were made for the bodies, then for the particles
     gpu.breakBody(idx, made.idxs, xf.p, xf.q, extra.slice(0, made.idxs.length), made.parts, extra.slice(made.idxs.length));
+    // the GPU had broken this body by its plan, and the engine broke the whole piece before its answer to that:
+    // the kids hold the spare's bricks too, so the spare goes (left, it was a second copy of that part: the lab's
+    // mixed scenario, 186 m3 of 1,542 doubled at frame 72)
+    { const pend = snapPending.get(parent); if (pend) { snapPending.delete(parent); if (!gpu.genOf || gpu.genOf(pend.spare) === pend.genB) gpu.killBody(pend.spare); } }
+    engineBroken.set(idx, clock());
     breaks++;
   }
   if (window.__dbg && nbr) console.warn(`last cut: contacts at ${f[o].toFixed(0)} ticks, plane ${f[o + 1]}, capacity ${f[o + 2].toFixed(0)} MN, ${f[o + 3].toFixed(1)} MJ/m, needed ${f[o + 4].toFixed(0)} MN, squeezed ${f[o + 5]}`);
@@ -1054,6 +1070,7 @@ function setRadius(r) { radius = r; document.querySelectorAll('#tool span').forE
 // ---- settings (engine parameters go to both the worker and the page's copy)
 const SETTINGS = {
   crush: { el: 's-crush', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: v => setParam(2, v) },
+  realtime: { el: 's-realtime', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
   adaptive: { el: 's-adaptive', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: v => { if (gpu && !+v) gpu.substeps = setting.substeps || 12; } },
   restLoads: { el: 's-restLoads', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
   // (chunks: loose bricks break into convex chunks, and the engine splits bricks on a fracture surface into
@@ -1251,7 +1268,16 @@ function frameBody(now, dt) {
       const maxSteps = stepMs * 2 < 12 ? 2 : 1;
       // and never run ahead of the read-backs: at most a few steps queued past the newest one that came back,
       // or work piles up in the GPU queue and everything (debris, breaking) shows seconds late
-      let n = 0; while (acc >= 1 / 60 && n < maxSteps && (!diag.readback || stepsDone - stepsAtRead < 3 || (n === 0 && gpu.placing()))) { gpu.step(1 / 60); acc -= 1 / 60; n++; stepsDone++; }
+      // a GPU that cannot do 60 steps a second (a laptop's, in a collapse) steps 1/60 s per frame anyway, and
+      // everything falls in slow motion (gravity itself is 9.81: GPU tests box, bounce). Behind, with the
+      // sub-steps already down to the adaptive floor, a step covers 1/30 s with twice the sub-steps: the same
+      // sub-step length, so the same accuracy (GPU tests with DT2 and 16 sub-steps match 8 at 1/60: stack drift
+      // 15.5 mm both), and half the per-step work (broad phase, pairs, colouring: about a fifth of a step)
+      let n = 0; while (acc >= 1 / 60 && n < maxSteps && (!diag.readback || stepsDone - stepsAtRead < 3 || (n === 0 && gpu.placing()))) {
+        const h = !LAB.on && setting.realtime && acc >= 2 / 60 && n === maxSteps - 1 && gpu.substeps <= Math.min(8, setting.substeps || 12) ? 2 / 60 : 1 / 60;
+        if (h > 1 / 60) { const s0 = gpu.substeps; gpu.substeps = 2 * s0; gpu.step(h); gpu.substeps = s0; } else gpu.step(h);
+        acc -= h; n++; stepsDone++; simTime += h; lastStepDt = h;
+      }
       perfAdd('step', performance.now() - ts);
       if (acc > 0.1) acc = 0;
       pullDebris();
@@ -1266,7 +1292,8 @@ function frameBody(now, dt) {
 const rate = { steps: 0, reads: 0, t: performance.now(), s0: 0, r0: 0 };
 // Adaptive sub-steps: while physics falls behind real time (a heavy collapse), fewer sub-steps per step, down
 // to 8 (a 20-box tower still stands there; at 6 it does not); back up to the setting when the GPU has room
-let physFrames = 0, frames0 = 0;
+let physFrames = 0, frames0 = 0, simTime = 0, lastStepDt = 1 / 60;
+function physicsBusy() { return gpu && ((gpu.stats.awake || 0) > 0 || (gpu.stats.pActive || 0) > 0); }
 function adaptSubsteps(busy) {
   if (!gpu || !setting.adaptive || !busy) return;
   const target = setting.substeps || 12, lo = Math.min(8, target);
@@ -1278,7 +1305,7 @@ function hud() {
   if (!E) return;
   const tn = performance.now(), dt = (tn - rate.t) / 1000;
   if (dt > 0.4) {
-    rate.steps = (stepsDone - rate.s0) / dt; rate.reads = (readsDone - rate.r0) / dt; rate.t = tn; rate.s0 = stepsDone; rate.r0 = readsDone;
+    rate.steps = (stepsDone - rate.s0) / dt; rate.reads = (readsDone - rate.r0) / dt; rate.sim = (simTime - (rate.sim0 || 0)) / dt; rate.sim0 = simTime; rate.t = tn; rate.s0 = stepsDone; rate.r0 = readsDone;
     adaptSubsteps(physFrames >= frames0 * 0.9 && physFrames > 0); physFrames = 0; frames0 = 0;
   }
   const y = E.player_get(1), storey = Math.max(0, Math.floor((y + 0.01) / 3.75));
@@ -1288,7 +1315,7 @@ function hud() {
     `<span class="k">bricks</span> ${E.bricks_alive().toLocaleString()} · <span class="k">joints</span> ${E.joints_live().toLocaleString()} · ${E.bytes_per_brick().toFixed(0)} B/brick`,
     gpu ? `<span class="k">debris</span> ${(gpu.n - 1).toLocaleString()} bodies, ${debrisShapes.toLocaleString()} pieces · ${gpu.stats.awake} awake · ${(gpu.stats.pLive || 0).toLocaleString()} particles (${gpu.stats.pActive || 0} moving)${snapCur && snapCur.pose.length / 10 > MAXD ? ` · <b>${(snapCur.pose.length / 10 - MAXD).toLocaleString()} not drawn</b>` : ''}` : `<span class="k">debris physics</span> off (no WebGPU)`,
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'} · ${gpu.substeps} sub-steps${gpu.skipped ? ` · ${gpu.skipped.toLocaleString()} steps skipped at rest` : ''}` : '',
-    gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">flicker check</span> ${flick.vanished} vanished, ${flick.jumps} jumps · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
+    gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s${rate.sim && physicsBusy() ? ` (${rate.sim < 0.95 ? '<b>' : ''}time ×${rate.sim.toFixed(2)}${rate.sim < 0.95 ? '</b>' : ''})` : ''} · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">flicker check</span> ${flick.vanished} vanished, ${flick.jumps} jumps · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
     `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${crackedJoints} cracked and holding · rubble on its floors ${(restOnFloors / 9810).toFixed(0)} t · ${breaks} pieces broke on impact · ${crushedBodies} crushed · ${dustBricks} bricks to dust${spillLost ? ` · ${(spillLost * TICK ** 3).toFixed(1)} m³ of rubble lost (particles full)` : ''} · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
     lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,

@@ -35,7 +35,10 @@ const names = args.length ? args.flatMap(a => SUITES[a] || [a]) : SUITES.quick;
     await p.addInitScript((d) => { if (d) window.__colR = d; }, process.env.SF_COLR || '');
     await p.addInitScript((d) => { if (d) window.__colCheck = true; }, !!process.env.SF_COLCHECK);
     await p.addInitScript((d) => { if (d) window.__seed = d; }, +(process.env.SF_SEED || 0));
+    await p.addInitScript((d) => { if (d) window.__shots = d.split(',').map(Number); }, process.env.SF_SHOTS || '');
+    await p.addInitScript((d) => { if (d) window.__shotView = d.split(',').map(Number); }, process.env.SF_SHOT_VIEW || '');
     await p.addInitScript((d) => { if (d) window.__pinch = true; }, !!process.env.SF_PINCH);
+    await p.addInitScript((d) => { if (d) window.__oldMasonry = true; }, !!process.env.SF_OLD_MASONRY);
     await p.addInitScript((d) => { if (d) window.__parkDbg = true; }, !!process.env.SF_PARK_DBG);
     await p.addInitScript((d) => { if (d) window.__traceBodies = d; }, process.env.SF_TRACE_BODIES || '');   // (with --trace: these bodies, every frame)
     await p.addInitScript((d) => { if (d) window.__detRows = true; }, !!process.env.SF_DET_ROWS);   // (compare without breaking on the GPU)   // (compare without irregular fracture)
@@ -47,8 +50,9 @@ const names = args.length ? args.flatMap(a => SUITES[a] || [a]) : SUITES.quick;
     await p.goto('file://' + html);
     let last = '';
     for (;;) {
-      await new Promise(r => setTimeout(r, 5000));
-      const st = await p.evaluate(() => ({ done: !!window.LAB_RESULT, err: window.LAB_ERROR || null, s: LAB.status || null }));
+      await new Promise(r => setTimeout(r, process.env.SF_SHOTS ? 500 : 5000));
+      const st = await p.evaluate(() => ({ done: !!window.LAB_RESULT, err: window.LAB_ERROR || null, s: LAB.status || null, shot: window.__shotReady || 0 }));
+      if (st.shot) { await p.screenshot({ path: path.join(outDir, `${name}_f${st.shot}.png`) }); await p.evaluate(() => { window.__shotReady = 0; }); continue; }
       if (st.err) { console.log(`[${name}] lab error: ${st.err}`); failed = true; break; }
       if (st.done) break;
       const line = st.s ? `[${name}] frame ${st.s.f} of ${st.s.frames} · ${((Date.now() - t0) / 1000).toFixed(0)} s` : '';

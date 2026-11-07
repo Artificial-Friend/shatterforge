@@ -195,17 +195,30 @@ Tests:
 
 A building eaten away bit by bit stood unchanged while every joint was under strength, however close, and then one more cut failed it all at once: it seemed to float, then to be triggered. Concrete and masonry under a sustained load above about 70-75% of their short-term strength fail in time (creep rupture). Now:
 - Each structure check carries the time since the last one (the page's virtual clock in the lab).
-- A joint or a face inside a brick loaded past SUSTAINED (0.7) of its strength wears by `dt × WEAR_RATE × x²`, where x is how far past 0.7 it is (0 at 0.7, 1 at full strength). Worn through, it fails as if over strength: reinforced concrete and brick crack first, the rest part. A crack's wear starts again from zero.
+- A joint or a face inside a brick loaded past its material's sustained share of strength wears by `dt × WEAR_RATE × x²`, where x is how far past that share it is (0 there, 1 at full strength). The shares: concrete and brick 0.75 (creep rupture), timber 0.7 (duration of load); steel and glass do not wear (no creep at room temperature). A joint takes the lower of its two bricks' shares. Worn through, it fails as if over strength: reinforced concrete and brick crack first, the rest part. A crack's wear starts again from zero.
 - A cracked joint is half as stiff, and wear softens it further, to 0.4 of that when worn through. Its load moves to its neighbours, which may then wear in turn.
 - While any joint is wearing, the page checks every 250 ms.
 
-Game time is compressed (real creep rupture takes hours): at 90% a joint wears through in about 1.5 s, at 80% in about 6 s, at 75% in about 24 s.
+Game time is compressed (real creep rupture takes hours): for concrete and brick, a joint at 90% wears through in about 2 s and one at 80% in about 17 s.
+
+**One share for all, first (7 November, the next day).** Every material wore above 0.7. In the playground, "parts of the fourth floor start falling without any reason". In the engine (test `parts_far_above_a_cut_do_not_fall_on_their_own`), with the mixed building's west wall and the west halves of its fronts shot away, a steel roof beam left at 77% at the cut's edge wore through at 14 s. The top storey then came down in pieces, 70 failures from the fourth storey up, while the storeys below stood. Steel does not creep: 0 there now.
 
 | Engine test | Result |
 | --- | --- |
-| `a_building_left_near_its_limit_wears_and_comes_down_over_time`, concrete frame, 4 storeys, ground storey cut row by row from the west until the worst joint is past 0.75 (the row at x = −4.4 m cracks 125 joints, which hold; worst 1.00) | without wear: 0 failures in 40 checks, standing for ever; with wear (checks 0.5 s apart): failures in checks 2, 3, 5, 6, 24, 32 … 74, 141 joints, 82 cracked |
+| `a_building_left_near_its_limit_wears_and_comes_down_over_time`, concrete frame, 4 storeys, ground storey cut row by row from the west until the worst joint is past 0.75 (the row at x = −4.4 m cracks 125 joints, which hold; worst 1.00) | without wear: 0 failures in 40 checks, standing for ever; with wear (checks 0.5 s apart, per-material shares): failures in checks 2, 3, 4, 6, 10, 63, 76, 148; 136 joints, 78 cracked |
 
 Deflection stays small in the linear solve: the largest displacement in that test is 10.5 mm before and 11.4 mm after the wear. The sag is not drawn; the cracks are, as before.
+
+## Falling parts landing (7 November, the next day)
+
+Reported from the playground: big parts burst into a stream of particles when they hit the ground, rather than being crushed where they hit. Lab screenshots (`SF_SHOTS`, mixed scenario) showed the brick building landing on its ground storey and bursting into loose bricks up to its roof. The new lab check "crumbled share of a big part when it breaks" found one break where a 277 m³ part went 100% to crumbs and particles.
+
+Three causes, fixed:
+- **Masonry in a falling part parted at once** wherever it was over strength (only standing masonry cracked first). Now it cracks first there too, and the mortar bears without tension until a second failure parts it. The worst crumbled share in `mixed` (150 frames) went from 1.00 to 0.14. `SF_OLD_MASONRY=1` (engine param 6) brings the old rule back, for comparison.
+- **A crushed storey crumbled whole.** Now it crumbles only as much as the impact's energy can crush (1/2 J v over the crush energy of the materials, the weaker side taking most), nearest the contacts first. The rest stays in pieces.
+- **Small fragments over the rubble budget went as particles.** Fragments of 0.25 m³ and more now stay bodies, up to 4 times the budget.
+
+A deceleration limit for a part landing (v²/2d over the crush depth) was tried and dropped: it stopped the storey-by-storey crush-down of a tower landing on its stumps (engine test `a_dropped_tower_crushes_its_stumps_and_its_lowest_storey`).
 
 ## Steel as rolled sections (7 November)
 

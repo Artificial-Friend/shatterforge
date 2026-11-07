@@ -20,7 +20,9 @@ function labInstall() {
       if (b <= 0) return;
       const gb = gpu.bodies[b - 1];
       if (L.ballNext) { L.balls.add(b); if (gb) gb.labBall = true; return; }
-      const v = list[k].shapes.reduce((s, sh) => s + labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1), 0); L.bodyVol.set(b, v); L.gpuVol += v;
+      const v = list[k].shapes.reduce((s, sh) => s + labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1), 0); L.bodyVol.set(b, v); L.gpuVol += v; if (L.jobVol) L.jobVol.bodiesIn += v;
+      // (where parts come loose: frame, the job that made them, height of the body's top and bottom, volume)
+      if (L.made && L.made.length < 4000) { const ys = list[k].shapes.map(sh => sh.p[1]); L.made.push([L.f, L.jobOp || '', +Math.min(...ys).toFixed(1), +Math.max(...ys).toFixed(1), +v.toFixed(2), list[k].shapes.length]); }
       if (gb) { gb.labVol = v; gb.labH = list[k].shapes.length === 1 ? list[k].shapes[0].h.map(x => +x.toFixed(2)) : `${list[k].shapes.length} boxes`; gb.labF = L.f; }
     });
     L.ballNext = false; return idx;
@@ -40,7 +42,10 @@ function labInstall() {
     return evs;
   };
   gpu.breakBody = (parent, ...rest) => {
-    const v = L.bodyVol.get(parent) || 0; L.gpuVol -= v; L.bodyVol.delete(parent);
+    const v = L.bodyVol.get(parent) || 0; L.gpuVol -= v; L.bodyVol.delete(parent); if (L.jobVol) L.jobVol.bodiesOut += v;
+    // (a break must not make volume: the kids, bodies and particles, against the parent; logged when over by 5%)
+    { const kv = (rest[0] || []).reduce((s, k) => s + (L.bodyVol.get(k) || 0), 0) + (L.pendingParts || []).reduce((s, i) => s + (i >= 0 && pInfo[i] ? labBoxVol(pInfo[i].h) : 0), 0);
+      if (kv > 1.05 * v + 0.5 && (L.overBreaks = L.overBreaks || []).length < 20) { const gb = gpu.bodies[parent - 1]; L.overBreaks.push({ f: L.f, op: L.jobOp, parent, parent_m3: +v.toFixed(2), kids_m3: +kv.toFixed(2), kids: (rest[0] || []).length, made_at: gb && gb.labF, what: gb && gb.labH, spare: !!(gb && gb.spare), shapes_gpu: (gpu.bodyShapes.get(parent) || []).length }); } }
     // the pieces handed over must be the ones just made: an older body among them would be moved to the parent's
     // pose and given the pieces' velocity
     (rest[0] || []).forEach((kid, k) => { const gb = kid > 0 && gpu.bodies[kid - 1]; if (gb && gb.labF !== undefined && gb.labF < L.f) { L.badKids = (L.badKids || 0) + 1; labEvent('break_gives_old_body', L.f, { parent, kid, k, made_at: gb.labF, size: gb.labH }); } });
@@ -233,12 +238,18 @@ function labReport(wallS) {
     ['steps that lost contacts or pairs (capacity)', gpu.lost || 0, 0, 'a lost ground pair lets a piece fall through'],
     ['pieces below the ground', L.below, 0, ''],
     ['body slots freed twice', gpu.doubleFree || 0, 0, 'a slot given to two bodies at once'],
+    // a big falling part broken on landing crumbles where it is crushed, not all over: the share of its volume that
+    // leaves as crumbs and particles (7 November: a brick building landing on its ground storey burst into loose
+    // bricks up to its roof, the playground's "particle waterfall")
+    ['crumbled share of a big part when it breaks (worst)', +Math.max(0, ...(L.bigBreaks || []).map(b => b[2])).toFixed(2), 0.25, 'parts bursting into crumbs'],
     ['rebounds over half the impact speed (while quiet)', L.bounces, 0, 'unnatural bouncing'],
     ['pieces thrown up faster than 5 m/s (while quiet)', L.launches, 0, 'launches'],
     ['energy gains over 5% (while quiet)', L.energyGains, 0, 'energy made from nothing'],
     // what the tools did not take out must stay in the world: standing, falling, as rubble or particles. Dust (fines
     // removed) is real but small; a whole floor gone as dust is a floor that vanished (7 November: 57% in collapse)
     ['volume lost, not to the tools (% of the building)', +(100 * (L.V0 - L.T - (L.lostBy.tool || 0)) / L.V0).toFixed(1), 2, 'parts vanishing'],
+    // (and none made: a part doubled, 7 November: the mixed building's falling part doubled where the GPU had broken it)
+    ['volume made (% of the building)', +Math.max(0, -100 * (L.V0 - L.T - (L.lostBy.tool || 0)) / L.V0).toFixed(1), 0.5, 'parts doubled'],
   ].map(([name, value, limit, what]) => ({ name, value, limit, pass: value <= limit, what }));
   if (S.expect && S.expect.gradual) {
     // a building eaten away fails progressively: joints crack (and wear through) before the upper storeys come
@@ -259,7 +270,7 @@ function labReport(wallS) {
     scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: ['concrete frame', 'masonry', 'mass timber', 'mixed'][S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
     pass: checks.every(c => c.pass), checks, colConflicts: L.colConflicts || 0, colConflictAt: L.colConflictAt || null, digest: L.digest, dumpRaw: L.dumpRaw ? { ...L.dumpRaw, colRows: L.colRows, allRows: L.allRows } : (L.colRows ? { colRows: L.colRows, allRows: L.allRows } : null),
-    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), lost_m3: Object.fromEntries(Object.entries({ ...L.lostBy, particles_crushed: L.lostParticles || 0, building: L.V0 }).map(([k, v]) => [k, +v.toFixed(1)])), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps, gradual: L.gradual || undefined },
+    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_by: { ...partsBy }, big_breaks: L.bigBreaks, made: L.made, gains: L.gains, spill_why: { crumbs: E.spill_why(0), fragments: E.spill_why(1), crushed_storey: E.spill_why(2), static: E.spill_why(3), fragment_bricks_by_mat: [0, 1, 2, 3, 4, 5, 6, 7].map(k => E.spill_mat(k)), single_brick_fragments: E.spill_mat(8) }, over_breaks: L.overBreaks, dbg_breaks: L.dbgBreaks, lost_m3: Object.fromEntries(Object.entries({ ...L.lostBy, particles_crushed: L.lostParticles || 0, building: L.V0 }).map(([k, v]) => [k, +v.toFixed(1)])), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps, gradual: L.gradual || undefined },
     perf: {
       wall_s: +wallS.toFixed(1), steps: stepsDone, steps_skipped: gpu.skipped || 0,
       gpu_ms: { median: +med(gpuMs).toFixed(2), p95: +p95(gpuMs).toFixed(2), max: +Math.max(0, ...gpuMs).toFixed(2) },
@@ -277,7 +288,7 @@ function labSummary(rep) {
   const lines = [`${rep.pass ? 'PASS' : 'FAIL'} ${rep.scenario}: ${rep.title}`];
   for (const c of rep.checks) lines.push(`  ${c.pass ? 'ok  ' : 'FAIL'} ${c.name}: ${c.value} (limit ${c.limit})${!c.pass && rep.events ? '' : ''}`);
   const p = rep.physics, q = rep.perf;
-  lines.push(`  physics: roof ${p.roof_m[0]} -> ${p.roof_m[1]} m · dust ${(p.dust_of_building * 100).toFixed(1)}% (m³ ${JSON.stringify(p.lost_m3)}) · breaks ${p.breaks} · crushed ${p.bodies_crushed} · particles ${p.particles_made} (${p.particles_crushed} crushed) · settled ${p.settled_s ?? 'no'} s · energy given to parts cut free ${((p.energy_given_by_cuts_J || 0) / 1e6).toFixed(2)} MJ · rubble on floors up to ${p.rubble_on_floors_max_t} t · ${p.joints_cracked} joints cracked · ${p.gpu_breaks} broken on the GPU`);
+  lines.push(`  physics: roof ${p.roof_m[0]} -> ${p.roof_m[1]} m · dust ${(p.dust_of_building * 100).toFixed(1)}% (m³ ${JSON.stringify(p.lost_m3)}) · particles from ${JSON.stringify(p.particles_by)} (spill bricks ${JSON.stringify(p.spill_why)}) · breaks ${p.breaks} · crushed ${p.bodies_crushed} · particles ${p.particles_made} (${p.particles_crushed} crushed) · settled ${p.settled_s ?? 'no'} s · energy given to parts cut free ${((p.energy_given_by_cuts_J || 0) / 1e6).toFixed(2)} MJ · rubble on floors up to ${p.rubble_on_floors_max_t} t · ${p.joints_cracked} joints cracked · ${p.gpu_breaks} broken on the GPU`);
   lines.push(`  perf: ${q.steps} steps (${q.steps_skipped} skipped) in ${q.wall_s} s · GPU ms median ${q.gpu_ms.median} / p95 ${q.gpu_ms.p95} / max ${q.gpu_ms.max} · JS ms median ${q.js_ms.median} / p95 ${q.js_ms.p95} · engine jobs ${q.engine_ms.jobs}, ms median ${q.engine_ms.median} / p95 ${q.engine_ms.p95} / max ${q.engine_ms.max} · peak awake ${q.peak.awake}, contacts ${q.peak.contacts}, particles ${q.peak.particles}`);
   if (q.gpu_stages_ms_at_peak) lines.push(`  GPU stages at the slowest step (ms): ${Object.entries(q.gpu_stages_ms_at_peak).map(([k, v]) => `${k} ${v}`).join(' · ')}`);
   for (const [k, e] of Object.entries(rep.events)) lines.push(`  events ${k}: ${e.n} · first ${JSON.stringify(e.first.slice(0, 3))}`);
@@ -313,12 +324,13 @@ async function labRun() {
   // fixed sub-steps: adapting them to this machine's speed would make the runs differ between machines
   setting.adaptive = 0; gpu.substeps = setting.substeps;
   Math.random = seededRandom(window.__seed || 20261104);   // (SF_SEED: another run of the same scenario, to tell a trend from one run's luck)
-  if (window.__pinch && gpu) gpu.pinching = true;   // (SF_PINCH: crushing of pinched pieces, off by default)
+  if (window.__pinch && gpu) gpu.pinching = true;
+  if (window.__oldMasonry) E.set_param(6, 1);   // (SF_OLD_MASONRY: masonry in falling parts parts at once, for comparison)   // (SF_PINCH: crushing of pinched pieces, off by default)
   fly = true; E.player_set(-20, 8, -30); yaw = Math.PI + 0.62; pitch = -0.12;
   $('start').hidden = true; physicsPaused = false;
   $('bench').hidden = false; $('bench-title').textContent = `Lab: ${name} (${st.done.length + 1} of ${st.done.length + st.queue.length})`;
   labInstall();
-  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.lostBy = {}; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
+  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.lostBy = {}; L.made = []; L.bigBreaks = []; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
   try { const info = dev.adapterInfo || (dev.adapter && dev.adapter.info); L.adapter = info ? `${info.vendor} ${info.architecture} ${info.description || ''}`.trim() : ''; } catch (e) {}
   const tw = performance.now();
   let lastShow = 0;
@@ -327,10 +339,11 @@ async function labRun() {
     for (const [fr, act, args] of S.script) if (fr === L.f) await labAct(act, args);
     // engine jobs that are due (the worker's time)
     while (L.jobq.length && L.jobq[0].due <= L.f) {
-      const j = L.jobq.shift(), nb0 = gpu.n, b0 = breaks, T0 = L.T, r = runInline(j.job);
-      finish(r); labParticlesMade(); L.staticT = labTruthStatic(); labTruth();
+      const j = L.jobq.shift(), nb0 = gpu.n, b0 = breaks, T0 = L.T, S0 = L.staticT, G0 = L.gpuVol, pm0 = partsMade, r = runInline(j.job);
+      L.jobOp = j.job.op; L.jobVol = { bodiesIn: 0, bodiesOut: 0 }; finish(r); L.jobOp = ''; labParticlesMade(); L.staticT = labTruthStatic(); labTruth();
       // (volume each kind of job took out of the world: a blast is the player's tool; the rest is lost)
-      { const lost = T0 - L.T; if (Math.abs(lost) > 1e-6) { const k = (j.job.op === 'blast' || j.job.op === 'pblast') ? 'tool' : j.job.op; L.lostBy[k] = (L.lostBy[k] || 0) + lost; } }   // (signed: a job can add what another takes away)
+      { const lost = T0 - L.T; if (lost < -1 && (L.gains = L.gains || []).length < 20) L.gains.push({ f: L.f, op: j.job.op, gain: +(-lost).toFixed(2), static: +(L.staticT - S0).toFixed(2), gpu: +(L.gpuVol - G0).toFixed(2), bodies_added: +L.jobVol.bodiesIn.toFixed(2), bodies_removed: +L.jobVol.bodiesOut.toFixed(2), particles: partsMade - pm0, dup_bricks: E.dup_bricks() });
+        if (Math.abs(lost) > 1e-6) { const k = (j.job.op === 'blast' || j.job.op === 'pblast') ? 'tool' : j.job.op; L.lostBy[k] = (L.lostBy[k] || 0) + lost; } }   // (signed: a job can add what another takes away)
       // what the engine did, frame by frame (to explain an event)
       if (L.timeline.length < 400) L.timeline.push({ f: L.f, op: j.job.op, n: r.n, sent: j.due - L.jobLag, new_bodies: gpu.n - nb0, breaks: breaks - b0, static_updates: r.out && r.out.length ? r.out[0] : 0 });
     }
@@ -346,6 +359,14 @@ async function labRun() {
     // let the GPU finish this frame's work and its stats come back (the next frame sees them)
     // (and wait for all of them: what the next frame sees must not depend on how fast the browser maps buffers)
     if (dev) { await dev.queue.onSubmittedWorkDone(); await gpu.flushStats(); await new Promise(r => setTimeout(r, 0)); }
+    // (SF_SHOTS: a picture at these frames, from outside the building, for a person or Claude to look at)
+    if (window.__shots && window.__shots.includes(L.f)) {
+      const p0 = cam.position.clone(), r0 = cam.rotation.clone(), v = window.__shotView || [-26, 14, -30];
+      if (typeof drawDebris === 'function') drawDebris(performance.now());
+      cam.position.set(v[0], v[1], v[2]); cam.lookAt(0, 6, 0); renderer.render(scene, cam);
+      window.__shotReady = L.f; while (window.__shotReady) await new Promise(r => setTimeout(r, 100));
+      cam.position.copy(p0); cam.rotation.copy(r0);
+    }
     // (debugging a bounce: chosen bodies, every frame of the trace window, straight from the GPU: pose, velocity,
     // mass, and every contact they have, with its normal, points, impulses and approach speeds)
     if (window.__traceBodies && dev && L.traceWin && L.f >= L.traceWin[0] && L.f <= L.traceWin[1]) {

@@ -81,7 +81,7 @@ static mut SNAP: Vec<u8> = Vec::new();
 /// into convex cells at most (0: fracture leaves boxes).
 #[no_mangle] pub extern "C" fn set_param(id: u32, v: f32) {
     let g = game();
-    match id { 0 => g.crumb_keep = (v.max(0.0) as usize).max(2), 1 => g.rubble_keep = v.max(0.0) as usize, 2 => g.crush_depth = v.max(0.0), 3 => g.frac_max = v.max(0.0) as usize, 4 => g.struct_dt = v.max(0.0), 5 => g.spill_on = v > 0.5, _ => {} }
+    match id { 0 => g.crumb_keep = (v.max(0.0) as usize).max(2), 1 => g.rubble_keep = v.max(0.0) as usize, 2 => g.crush_depth = v.max(0.0), 3 => g.frac_max = v.max(0.0) as usize, 4 => g.struct_dt = v.max(0.0), 5 => g.spill_on = v > 0.5, 6 => g.masonry_parts = v > 0.5, _ => {} }
 }
 #[no_mangle] pub extern "C" fn game_mesh(on: u32) { game().mesh = on != 0; }
 #[no_mangle] pub extern "C" fn chunk_count() -> u32 { game().chunks.len() as u32 }
@@ -127,6 +127,9 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn structure_ratio() -> f32 { game().max_ratio }
 #[no_mangle] pub extern "C" fn structure_wearing() -> u32 { game().wearing as u32 }
 #[no_mangle] pub extern "C" fn worn_total() -> u32 { game().worn_total as u32 }
+#[no_mangle] pub extern "C" fn dup_bricks() -> u32 { game().dup_bricks as u32 }
+#[no_mangle] pub extern "C" fn spill_why(k: u32) -> u32 { game().spill_why[(k as usize).min(3)] as u32 }
+#[no_mangle] pub extern "C" fn spill_mat(k: u32) -> u32 { if k == 8 { game().spill_single as u32 } else { game().spill_mat[(k as usize).min(7)] as u32 } }
 /// Room for `n` impact records (11 floats each, see `Game::impacts`); returns where to write them.
 #[no_mangle] pub extern "C" fn impacts_in(n: u32) -> *mut f32 { let g = game(); g.inp.clear(); g.inp.resize(n as usize * 11, 0.0); g.inp.as_mut_ptr() }
 #[no_mangle] pub extern "C" fn impacts(dt: f32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.impacts(dt) as u32; g.finish_plans(); n }

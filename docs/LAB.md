@@ -44,6 +44,8 @@ At every read-back, against the physics:
 | Roof fall, for cut scenarios | at least one storey |
 | Volume lost, not to the tools: the building's volume less what stands, falls, lies as rubble or particles, and what the player's blasts took (`lost_m3` in the report says by what) | at most 2% (fines) |
 | Body slots freed twice | 0 |
+| Volume made: the opposite of volume lost; a part doubled | at most 0.5% |
+| Crumbled share of a big part when it breaks: of a falling part of 50 m³ or more, the share of its volume that leaves as crumbs and particles (worst) | at most 0.25 |
 | For `nibble`: joints cracked before the upper storeys fall (their standing volume down a tenth), seconds from the first failure to that fall, and the share of the upper storeys' volume that came down | at least 50 cracked, 2 s, half |
 
 Also reported: the most rubble lying on the building's floors at once (t, from the weight the page sends the engine each second) and the joints cracked (brick and reinforced concrete crack first and hold; impacts refine bricks, so this counts the new joints too).
@@ -284,3 +286,42 @@ Open in `nibble`, as in the other scenarios:
 - 5 jumps (particles on the upper floors, 1–4 cm over their limit);
 - 3 rebounds;
 - 8 energy gains.
+
+## Landing parts, parts doubled, slow motion (7 November, the next day)
+
+Reported from the playground: big parts burst into particles when they land; things fall in slow motion; parts of the upper storeys fall with nothing touching them.
+
+**Seeing it.** `SF_SHOTS=40,90,140` renders the scene at those frames from outside the building and saves `<scenario>_f<frame>.png` in the output folder. `SF_SHOT_VIEW=x,y,z` moves the camera. The report now also says:
+- where the particles came from (`particles_by`), and why the engine spilled bricks (`spill_why`);
+- where each new body came loose (`made`: frame, job, lowest and highest point, volume);
+- engine jobs that added volume (`gains`), and breaks whose parts hold more than their parent (`over_breaks`).
+
+**Bursting.** See docs/STRUCTURE.md, "Falling parts landing". `mixed`, 150 frames:
+
+| Rule | Worst crumbled share | Holes |
+| --- | --- | --- |
+| old masonry rule (`SF_OLD_MASONRY=1`) | 1.00 (a 277 m³ part at frame 101) | 6 frames |
+| now | 0.14 | 0 |
+
+**A part doubled.** In `mixed` the volume check went negative: −10.1%, 186 m³ more than the building. The GPU had broken a falling part by its plan in the very frame the engine's answer broke the whole part (body 7, frame 72). The engine's pieces held the spare's 21 slabs as well, and the spare stayed: a second copy, for good. Now, when the GPU's break arrives for a body the engine has already broken, the spare goes (`takeGpuSnaps`). The same holds when the GPU's break was known but not yet answered. The check "volume made" (limit 0.5%) catches it: 10.1% → 0.
+
+**Slow motion.** Gravity is 9.81 m/s² (GPU tests `box` and `bounce` fall and bounce to the expected heights). The page steps 1/60 s per frame at most twice. A GPU too slow for 60 steps a second then runs the world slower than real time; in the real-machine bench (`bench/2026-11-05_linux-ryzen5-3600_nvidia-ampere`) a step takes 8.9 ms at the collapse's peak. Now:
+- The HUD shows the rate ("time ×0.62") while anything moves.
+- With the setting "real-time steps" on (default) and the sub-steps already at the adaptive floor (8, or the setting's if lower), a step covers 1/30 s with twice the sub-steps. The sub-step is the same length, so the accuracy is the same, and the per-step work (broad phase, pairs, colouring, about a fifth of a step) is halved.
+- GPU tests with `DT2=1` (every scene in 1/30 s steps) and 16 sub-steps match 8 at 1/60: stack drift 15.5 mm both. At 12 sub-steps in 1/30 s steps the stack fell (430 mm), so a 1/30 s step never has fewer than twice the floor.
+- Impacts from a 1/30 s step reach the engine with that step's length, since force is impulse over the step.
+
+**Parts falling far above a cut.** See docs/STRUCTURE.md, "Wear under sustained load": steel no longer wears.
+
+**Full length after these changes** (software GPU; `tools/check.sh lab`, plus `nibble` and `mixed` run in full):
+
+| Scenario | Rebounds | Launches | Volume lost | Crumbled share (worst) | Roof or upper storeys |
+| --- | --- | --- | --- | --- | --- |
+| `collapse`, 600 frames | 7 (16 the day before) | 1 (11) | 4.6% (17.4%), all particles crushed | 0.32 (over 0.25: open) | roof 18.64 → 15.38 m (→ 8.16 the day before: less of the stumps' storey crumbles) |
+| `mixed`, 600 frames | 48 | 17 | 16.5%, all particles crushed (254 m³) | 0.14 | roof 22.39 → 9.71 m |
+| `nibble`, 1,584 frames | 1 | 0 | 1.3% | 0 | 69% of the upper storeys down, 8 s after the first failure, 765 joints cracked before |
+
+Open:
+- Rubble particles crushed under heavy bodies are removed (one-way particles). This is what fails `collapse` and `mixed` on volume.
+- `collapse`'s worst crumbled share is 0.32.
+- Rebounds and launches in `mixed`.
