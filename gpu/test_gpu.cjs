@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -437,6 +437,79 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       check('crush', crushed.size >= 20 && !crushed.has(sideI) && yB < 4.2 && pmax < 1, { crushed: crushed.size, sideCrushed: crushed.has(sideI), blockY: +yB.toFixed(2), blockVy: +vB.toFixed(2), piecesMaxUp_ms: +pmax.toFixed(2) });
     }
+    if (scenes.includes('landing')) {
+      // A heavy piece lands on a light one lying on the ground (rubble under a falling slab: the collapse's
+      // rebounds). Concrete's restitution is 0.1, so neither may come back up faster than 0.1 x the impact
+      // speed (+0.1 m/s of solver noise). Without shock propagation in the relax pass the 960 kg slab came back
+      // up at 3.65 m/s from 7.7 (47%), and at 0.96 from 2; with it, 0.35 and 0.13 (see level_pass).
+      const cases = [{ hh: 0.5, v: 7.7 }, { hh: 0.5, v: 2 }, { hh: 1.0, v: 5 }, { hh: 0.3, v: 7.7 }];
+      const out = [];
+      for (const cs of cases) {
+        const hl = 0.135, v0 = -cs.v, hh = cs.hh;
+        const light = { shapes: [{ p: [0, hl + 0.05, 0], q: [0, 0, 0, 1], h: [hl, hl, hl], mat: MAT.concrete }], v: [0, v0, 0], w: [0, 0, 0] };
+        const heavy = { shapes: [{ p: [0, 0.05 + 2 * hl + hh * 0.4 + 0.0005, 0], q: [0, 0, 0, 1], h: [hh, hh * 0.4, hh], mat: MAT.concrete }], v: [0, v0, 0], w: [0, 0, 0] };
+        const w = await GpuWorld.create(dev, [light, heavy], { substeps: 12, sleep: false });
+        if (globalThis.NOSHOCK) w.shock = false;
+        w.crushing = false;   // (the solver alone)
+        let lmax = -1e9, hmax = -1e9;
+        for (let f = 1; f <= 40; f++) { w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle(); const r = await w.readPose(); lmax = Math.max(lmax, r.vel[1]); hmax = Math.max(hmax, r.vel[4]); }
+        w.destroy();
+        out.push({ heavy_kg: Math.round(2400 * 8 * hh ** 3 * 0.4), light_kg: Math.round(2400 * 8 * hl ** 3), impact_ms: cs.v, heavyUp_ms: +hmax.toFixed(2), lightUp_ms: +lmax.toFixed(2), allowed_ms: +(0.1 * cs.v + 0.1).toFixed(2), ok: hmax <= 0.1 * cs.v + 0.1 && lmax <= 0.1 * cs.v + 0.1 });
+      }
+      check('landing', out.every(o => o.ok), { cases: out });
+    }
+    if (scenes.includes('pinchdbg')) {
+      // (exploring: a light piece leading a heavier one down onto the ground, touching it; PIN_H heavy half size,
+      // PIN_V fall speed, PIN_L light half size)
+      const hh = +(globalThis.PIN_H || 0.5), hl = +(globalThis.PIN_L || 0.135), v0 = -(+(globalThis.PIN_V || 7.7));
+      const light = { shapes: [{ p: [0, hl + 0.05, 0], q: [0, 0, 0, 1], h: [hl, hl, hl], mat: MAT.concrete }], v: [0, v0, 0], w: [0, 0, 0] };
+      const heavy = { shapes: [{ p: [+(globalThis.PIN_X ?? 0.1) * hh, 0.05 + 2 * hl + hh * 0.4 + 0.0005, 0], q: [0, 0, 0, 1], h: [hh, hh * 0.4, hh], mat: MAT.concrete }], v: [0, v0, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [light, heavy], { substeps: 12, sleep: false });
+      if (globalThis.NOPINCH) w.pinching = false;
+      if (globalThis.PIN_PUSH) w.maxPush = +globalThis.PIN_PUSH; if (globalThis.PIN_RELAX) w.relaxIters = +globalThis.PIN_RELAX; if (globalThis.PIN_DBG) w.dbgBits = +globalThis.PIN_DBG; if (globalThis.PIN_NOREST) w.restOff = true; if (globalThis.NOSHOCK) w.shock = false;
+      const rows = []; let crushed = [], lmax = -1e9, wmax = 0, hmax = -1e9;
+      const fine = +(globalThis.PIN_FINE || 0); if (fine) w.substeps = 1;
+      for (let f = 1; f <= 40; f++) {
+        w.step(fine ? 1 / 60 / fine : 1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        for (const c of w.takeCrushed()) crushed.push([f, c.body]);
+        const r = await w.readPose();
+        const vl = r.vel[1], wl = Math.hypot(r.ang[0], r.ang[1], r.ang[2]), vh = r.vel[4];
+        if (f > 3) { lmax = Math.max(lmax, vl); wmax = Math.max(wmax, wl); hmax = Math.max(hmax, vh); }
+        if (f <= (fine ? 30 : 12)) rows.push([f, +r.body[1].toFixed(3), +vl.toFixed(2), +wl.toFixed(1), +r.body[8].toFixed(3), +vh.toFixed(2)]);
+      }
+      w.destroy();
+      check('pinchdbg', false, { massLight: Math.round(2400 * 8 * hl ** 3), massHeavy: Math.round(2400 * 8 * hh * hh * hh * 0.4), crushed, lightMaxUp: +lmax.toFixed(2), lightMaxSpin: +wmax.toFixed(1), heavyMaxUp: +hmax.toFixed(2), rows });
+    }
+    if (scenes.includes('pinch')) {
+      // Pieces pinched: rubble carried down under a falling block, touching it, lands on the ground. Against the
+      // block there is no approach and against the ground the static world, so the crush test (one contact at a
+      // time) never fires; the pieces were squeezed between the two and thrown out (lab collapse, frames 50-62:
+      // a 49 kg piece took 76,000 N s in one step, spun at 30 rad/s, then flew up at 7 m/s). With kernel pinch on
+      // (off by default) they must be crushed and the controls not: a piece falling alone on the ground and a
+      // piece carrying a 1 t slab at rest. (Here the crush test also crushes them once the block reaches them, so
+      // this passes with pinch off too: 24 crushed, block up 0.29 m/s. It checks pinch does no harm.)
+      const pieces = [];
+      for (let i = 0; i < 6; i++) for (let k = 0; k < 4; k++) pieces.push({ shapes: [{ p: [-7.5 + i * 3, 0.55, -6 + k * 4], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, -5.7, 0], w: [0, 0, 0] });
+      const block = { shapes: [{ p: [0, 0.8 + 4, 0], q: [0, 0, 0, 1], h: [10, 4, 10], mat: MAT.concrete }], v: [0, -5.7, 0], w: [0, 0, 0] };
+      const alone = { shapes: [{ p: [30, 0.55, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, -5.7, 0], w: [0, 0, 0] };
+      const under = { shapes: [{ p: [30, 0.25, 8], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] };
+      const slab = { shapes: [{ p: [30, 0.5 + 0.1, 8], q: [0, 0, 0, 1], h: [0.7, 0.1, 0.7], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [...pieces, alone, under, slab, block], { substeps: 12, sleep: false });
+      if (!globalThis.NOPINCH) w.pinching = true;   // (off by default)
+      const bi = w.n, aloneI = 25, underI = 26;
+      let crushed = new Set(), pmax = -1e9, bmax = -1e9, hit = null;
+      for (let f = 1; f <= 60; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        for (const c of w.takeCrushed()) crushed.add(c.body);
+        const r = await w.readPose();
+        for (let b = 1; b <= 24; b++) if (!crushed.has(b)) pmax = Math.max(pmax, r.vel[(b - 1) * 3 + 1]);
+        const vb = r.vel[(bi - 1) * 3 + 1]; if (hit === null && vb > -5) hit = f; if (hit !== null) bmax = Math.max(bmax, vb);
+        if (f === 60) { var yB = r.body[(bi - 1) * 7 + 1]; }
+      }
+      w.destroy();
+      check('pinch', crushed.size >= 20 && !crushed.has(aloneI) && !crushed.has(underI) && yB < 4.2 && pmax < 1 && bmax < 0.6,
+        { crushed: [...crushed].filter(b => b <= 24).length, aloneCrushed: crushed.has(aloneI), underSlabCrushed: crushed.has(underI), blockY: +yB.toFixed(2), blockMaxUp_ms: +bmax.toFixed(2), piecesMaxUp_ms: +pmax.toFixed(2) });
+    }
     if (scenes.includes('compound')) {
       // a big compound body (the upper building: 20 x 20 x 2 bricks of 0.5 m, one body, 400 contacts with the
       // floor) lands at 5.9 m/s on a static floor of bricks: concrete (e 0.1) gives 0.59 m/s of rebound, < 0.8 passes
@@ -764,7 +837,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR', 'NOPINCH', 'PIN_H', 'PIN_V', 'PIN_L', 'PIN_PUSH', 'PIN_RELAX', 'PIN_DBG', 'PIN_NOREST', 'PIN_X', 'PIN_FINE', 'NOSHOCK'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   // the results for docs/STATUS.md (tools/status.py): full runs only (a run of a few scenes is not the state)

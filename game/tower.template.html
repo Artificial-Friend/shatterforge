@@ -672,7 +672,7 @@ function takeGpuSnaps() {
     // map, see frameOf)
     const fr = (part) => { const d = mv(q2m(inf.q0), part.p); return { ...inf, p0: [inf.p0[0] + d[0], inf.p0[1] + d[1], inf.p0[2] + d[2]], q0: qmulJ(inf.q0, part.q) }; };
     bodyInfo.set(s.body, fr(s.A));
-    snapPending.set(inf.piece, { body: s.body, spare: s.spare, infB: fr(s.B) });
+    snapPending.set(inf.piece, { body: s.body, spare: s.spare, infB: fr(s.B), genA: gpu.genOf ? gpu.genOf(s.body) : 0, genB: gpu.genOf ? gpu.genOf(s.spare) : 0 });
     // (all of a frame's breaks in one job, first in line; the impacts after it still get their turn)
     const j = jobs.blast[0] && jobs.blast[0].op === 'snap' ? jobs.blast[0] : (jobs.blast.unshift({ op: 'snap', pieces: [] }), jobs.blast[0]);
     j.pieces.push(inf.piece);
@@ -686,13 +686,16 @@ function onSnap(job, r) {
     const pend = snapPending.get(pc); snapPending.delete(pc);
     const n = f[o++];
     // (the engine broke the piece first: its parts already include the spare's bricks)
-    if (!(n >= 2)) { if (pend) gpu.killBody(pend.spare); continue; }
+    if (!(n >= 2)) { if (pend && (!gpu.genOf || gpu.genOf(pend.spare) === pend.genB)) gpu.killBody(pend.spare); continue; }
     const idA = f[o], nA = f[o + 1]; o += 2 + 7 * nA;
     const idB = f[o], nB = f[o + 1]; o += 2 + 7 * nB;
     if (!pend) continue;
+    // (either part may have been broken or crushed while the engine worked, and its slot given to another body:
+    // the answer is then not about that slot any more. A stale entry broke a spare made later in slot 98.)
+    const live = (b, g) => { const gb = gpu.bodies[b - 1]; return gb && !gb.dead && (!gpu.genOf || gpu.genOf(b) === g); };
     const inf = bodyInfo.get(pend.body);
-    if (inf) { inf.piece = idA; inf.n = nA; }
-    bodyInfo.set(pend.spare, { ...pend.infB, piece: idB, n: nB });
+    if (inf && live(pend.body, pend.genA)) { inf.piece = idA; inf.n = nA; }
+    if (live(pend.spare, pend.genB)) bodyInfo.set(pend.spare, { ...pend.infB, piece: idB, n: nB });
     // (the parts get no plan of their own: the engine's answer to the hit refines the break from here)
   }
 }

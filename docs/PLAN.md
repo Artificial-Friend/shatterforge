@@ -80,7 +80,9 @@ Three foundation changes, in this order, before scaling to a city. Each keeps th
 
 **Determinism (6 November): done.** The GPU, the engine and the lab give the same run frame for frame on one machine (docs/GPU.md and docs/LAB.md, "Determinism").
 
-**Open:** rebounds in the collapse (docs/LAB.md), and the mixed building coming down only partly.
+**Rebounds (7 November): partly done.** Light pieces squeezed under heavy ones were thrown back up; shock propagation in the relax pass fixes the two-body case (GPU test `landing`: 3.65 → 0.42 m/s) and cuts the collapse's rebounds and launches by about half over three seeds (docs/LAB.md, "Rebounds and launches"). Two slot bugs found on the way are fixed.
+
+**Open:** the rebounds that remain (about 10 in 150 frames), and the mixed building coming down only partly.
 
 ## Later
 

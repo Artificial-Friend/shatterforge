@@ -199,3 +199,45 @@ What the kept version does:
 - 55 pieces broke on the GPU.
 
 **Open:** these launches. One of them is a body that a GPU break had just made.
+
+## Rebounds and launches (7 November)
+
+**How they were found.** Runs are now the same every time, so one bad bounce can be replayed and traced. `SF_TRACE_BODIES=42,95 node game/lab.cjs collapse --frames 66 --trace 50:65` records the chosen bodies every frame, straight from the GPU: pose, velocity, mass, and every contact with its normal, points, impulses and approach speeds (`btrace` in the report). In the first rebounds:
+- A 2.3 t piece wedged in a pocket of the 138 t upper part went from −2.1 to +1.6 m/s.
+- A 49 kg piece under a 773 kg one took 76,000 N s from the ground in one step.
+
+Both are light pieces squeezed under heavy ones. GPU test `landing` reproduces it with two bodies (docs/GPU.md, "Shock propagation").
+
+**Comparing changes.** One run cannot tell a trend from luck: the collapse is chaotic, and any change sends it another way. `SF_SEED` changes the page's random numbers (the scatter of crumbs), which gives another run of the same scenario. Each line below is three 150-frame collapse runs (seeds 0 / 7 / 8, software GPU), all with the slot fixes below. The raw lines are in `lab-results/cmp_{off,pin,sh,shp}_s*.txt`.
+
+| Run | Rebounds | Launches | Energy gains | Jumps | Roof fall (m) |
+| --- | --- | --- | --- | --- | --- |
+| neither | 13 / 26 / 16 | 7 / 6 / 8 | 0 / 0 / 0 | 0 / 36 / 0 | 7.33 / 7.23 / 7.11 |
+| pinching only (`SF_PINCH=1`) | 12 / 11 / 15 | 4 / 2 / 2 | 1 / 1 / 1 | 0 / 0 / 0 | 7.12 / 7.10 / 7.32 |
+| shock propagation (kept) | 10 / 6 / 11 | 5 / 2 / 0 | 0 / 0 / 1 | 0 / 0 / 0 | 7.15 / 5.30 / 6.16 |
+| both | 9 / 17 / 16 | 3 / 1 / 0 | 0 / 0 / 0 | 0 / 1 / 0 | 7.20 / 7.86 / 7.77 |
+
+Shock propagation is kept; pinching stays off (docs/GPU.md, "Crushing on contact").
+
+**Full length** (600 frames, `tools/check.sh lab`, software GPU, 7 November), against the run of 6 November:
+
+| Check | 6 November | 7 November |
+| --- | --- | --- |
+| Rebounds | 23 | 17 |
+| Launches | 7 | 11 |
+| Energy gains | 11 | 0 |
+| Jumps | 2 | 0 |
+| Hole frames | 8 | 6 |
+
+The building comes down much further: the roof goes from 18.64 to 4.29 m, against 10.65 m before. The launches are up over this longer run; the first are a slab and a sliver at frames 92–94 and spares later. They are open.
+
+**Slot bugs found on the way** (docs/GPU.md, "Slots"):
+- A stale engine answer about a GPU break broke a spare made later in the same slot. The slot was then freed twice, and two bodies shared it: 8 jumps of 1,000 m in a 150-frame run.
+- The new check "body slots freed twice" (limit 0) counts it.
+- The 36 jumps of seed 7 without either change are a spare thrown up about 1 m per frame at frame 142, a launch rather than a read-back fault (`read-back check` 0).
+
+**Debugging switches** (`game/lab.cjs`):
+- `SF_TRACE_BODIES` (with `--trace`)
+- `SF_SEED`
+- `SF_PINCH`
+- `SF_PARK_DBG`: shapes drawn at a parked body, and every change to a body slot (`parked`, `slotLog` in the report)

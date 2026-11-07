@@ -227,6 +227,7 @@ function labReport(wallS) {
     ['invalid poses (NaN)', L.bad, 0, ''],
     ['steps that lost contacts or pairs (capacity)', gpu.lost || 0, 0, 'a lost ground pair lets a piece fall through'],
     ['pieces below the ground', L.below, 0, ''],
+    ['body slots freed twice', gpu.doubleFree || 0, 0, 'a slot given to two bodies at once'],
     ['rebounds over half the impact speed (while quiet)', L.bounces, 0, 'unnatural bouncing'],
     ['pieces thrown up faster than 5 m/s (while quiet)', L.launches, 0, 'launches'],
     ['energy gains over 5% (while quiet)', L.energyGains, 0, 'energy made from nothing'],
@@ -248,7 +249,7 @@ function labReport(wallS) {
       peak: { bodies: Math.max(0, ...se.map(x => x.bodies)), awake: Math.max(0, ...se.map(x => x.awake)), contacts: Math.max(0, ...se.map(x => x.contacts)), particles: Math.max(0, ...se.map(x => x.parts)), particles_moving: Math.max(0, ...se.map(x => x.pAwake)), drawn: Math.max(0, ...se.map(x => x.drawn)) },
       work: { contact_substeps: L.work.cs, particle_substeps: L.work.ps },
     },
-    events: L.events, timeline: L.timeline, trace: L.trace.length ? L.trace : undefined, bursts: L.bursts || undefined, traceEvents: L.traceEv.length ? L.traceEv : undefined,
+    events: L.events, timeline: L.timeline, trace: L.trace.length ? L.trace : undefined, btrace: L.btrace || undefined, parked: globalThis.__parked || undefined, slotLog: globalThis.__slotLog || undefined, bursts: L.bursts || undefined, traceEvents: L.traceEv.length ? L.traceEv : undefined,
     series: se,
   };
 }
@@ -291,7 +292,8 @@ async function labRun() {
   setting.preset = 'high (lab defaults)';
   // fixed sub-steps: adapting them to this machine's speed would make the runs differ between machines
   setting.adaptive = 0; gpu.substeps = setting.substeps;
-  Math.random = seededRandom(20261104);
+  Math.random = seededRandom(window.__seed || 20261104);   // (SF_SEED: another run of the same scenario, to tell a trend from one run's luck)
+  if (window.__pinch && gpu) gpu.pinching = true;   // (SF_PINCH: crushing of pinched pieces, off by default)
   fly = true; E.player_set(-20, 8, -30); yaw = Math.PI + 0.62; pitch = -0.12;
   $('start').hidden = true; physicsPaused = false;
   $('bench').hidden = false; $('bench-title').textContent = `Lab: ${name} (${st.done.length + 1} of ${st.done.length + st.queue.length})`;
@@ -322,6 +324,24 @@ async function labRun() {
     // let the GPU finish this frame's work and its stats come back (the next frame sees them)
     // (and wait for all of them: what the next frame sees must not depend on how fast the browser maps buffers)
     if (dev) { await dev.queue.onSubmittedWorkDone(); await gpu.flushStats(); await new Promise(r => setTimeout(r, 0)); }
+    // (debugging a bounce: chosen bodies, every frame of the trace window, straight from the GPU: pose, velocity,
+    // mass, and every contact they have, with its normal, points, impulses and approach speeds)
+    if (window.__traceBodies && dev && L.traceWin && L.f >= L.traceWin[0] && L.f <= L.traceWin[1]) {
+      const want = new Set(String(window.__traceBodies).split(',').map(Number));
+      const nm = Math.min(gpu.stats.manifolds || 0, gpu.maxMan), cur = (gpu.frame - 1) & 1;
+      const [man, bod, sol] = await Promise.all([gpu.read(gpu.manBuf, 2 * gpu.maxMan * 17 * 16), gpu.read(gpu.bodBuf, gpu.n1 * 80), gpu.read(gpu.solBuf, gpu.n1 * 96)]);
+      const r3 = (a, o) => [a[o], a[o + 1], a[o + 2]].map(x => +x.toFixed(3));
+      const bodyRow = (b) => ({ b, p: r3(bod, b * 20), m: bod[b * 20 + 3] > 0 ? Math.round(1 / bod[b * 20 + 3]) : 0, v: r3(sol, b * 24), w: r3(sol, b * 24 + 4), asleep: bod[b * 20 + 12] > 0.5 ? 1 : 0, shapes: (gpu.bodyShapes.get(b) || []).length });
+      const row = { f: L.f, gf: gpu.frame, bodies: [...want].filter(b => b > 0 && b < gpu.n1).map(bodyRow), contacts: [] };
+      for (let k = 0; k < nm; k++) {
+        const o = (cur * gpu.maxMan + k) * 68, a = man[o], b = man[o + 1];
+        if (!want.has(a) && !want.has(b)) continue;
+        const cnt = man[o + 2] & 7, pts = [];
+        for (let q = 0; q < cnt; q++) pts.push({ ra: r3(man, o + (6 + 2 * q) * 4), jn: +man[o + 14 * 4 + q].toFixed(0), rv: +man[o + 15 * 4 + q].toFixed(2) });
+        row.contacts.push({ a, b, ma: a > 0 ? (bod[a * 20 + 3] > 0 ? Math.round(1 / bod[a * 20 + 3]) : 0) : 0, mb: bod[b * 20 + 3] > 0 ? Math.round(1 / bod[b * 20 + 3]) : 0, n: r3(man, o + 4), cnt, pts, e: +man[o + 64].toFixed(2), J: Math.round(man[o + 65]), ap: +man[o + 66].toFixed(2) });
+      }
+      (L.btrace = L.btrace || []).push(row);
+    }
     // (debugging determinism: the GPU's own body, solver and shape records, every frame)
     if (window.__detDump && dev) {
       const hb = async (buf, bytes) => { const u = new Uint32Array(await gpu.read(buf, bytes)); let h = 2166136261 >>> 0; for (let k = 0; k < u.length; k++) h = Math.imul(h ^ u[k], 16777619) >>> 0; return h; };

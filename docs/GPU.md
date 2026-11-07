@@ -101,6 +101,11 @@ All dispatches are direct, so the browser does not validate them one by one; Chr
 
 The slots of retired bodies and shapes are reused (`addBodies` returns the bodies' slots). `roomBodies()` and `roomShapes()` give the free capacity. `setVelocity` pushes a body and wakes it.
 
+Each time a body slot is given out (a new body or a spare) it gets a new generation (`genOf`). An answer that arrives later is applied only if the slot still holds the body it is about:
+- The engine's answer to a break on the GPU (`onSnap`) checks the generations of both parts. In the lab collapse, an answer re-registered a spare after it had been broken, and a later break of that piece broke the spare made since in the same slot. The slot was then freed twice, and a new body and another spare shared it. The new body's pieces were drawn 1,000 m below the ground (8 jumps in 150 frames).
+- A slot is never freed twice (`freeBody`; the lab counts attempts as "body slots freed twice", limit 0).
+- Crush records carry the step they come from, and one from before the slot was given out again is dropped.
+
 ## Sleeping
 
 A body counts as at rest when, over the last 0.5 s, both hold:
@@ -155,11 +160,41 @@ Two bodies touching through many shape pairs keep only representative contacts: 
 
 GPU test `compound` (800 bricks as one body landing at 5.9 m/s on a brick floor): rebound 1.1 → 0.44 m/s (concrete restitution allows 0.59); overflow ~1,300 contacts → 0.
 
+## Shock propagation (relax pass)
+
+A light piece on the ground under a heavy one is a sandwich the Gauss-Seidel solve does not settle. In each sub-step, the push out of the ground (the soft contact's bias) goes up through the light piece into the heavy one. The relax pass should take that push back, but at 20:1 each of its iterations returns only about 1/21 of it.
+
+In GPU test `landing` (12 sub-steps, software GPU), a 960 kg slab landing at 7.7 m/s on a 47 kg piece came back up at 3.65 m/s, 47% of the impact speed against concrete's 0.1. More relax iterations helped only slowly: 2.84 m/s with 2, 2.61 with 4, 1.41 with 8. Restitution off, a 0.1 m/s push limit, 48 sub-steps and the mass ratio limit off all left it at 2.8–3.6 m/s.
+
+**The fix.** Each body gets a level: the static world and sleeping bodies are 0, a body resting on them 1, and so on. Levels come from the contacts whose normal is within 45° of vertical, over 6 passes. Each pass reads one copy and writes the other, so the result does not depend on thread order. In the relax pass, where a vertical contact is separating (the pass is taking back a push), the lower body is held: the upper body alone gives the push back, as it would once the pass had converged. Approaching contacts, the biased solve and restitution are unchanged.
+
+A first version that also held the lower body for approaching contacts was unstable: the impulse it built up, warm-started into the light piece at its real mass, threw both bodies at 180–2,800 m/s.
+
+`landing` (rebound limit 0.1 × impact speed + 0.1 m/s), before → after:
+
+| Case | Heavy body's rebound (m/s) |
+| --- | --- |
+| 960 kg on 47 kg at 7.7 m/s | 3.65 → 0.42 |
+| 960 kg on 47 kg at 2 m/s | 0.96 → 0.10 |
+| 7,680 kg on 47 kg at 5 m/s | 0.75 → 0.37 |
+| 207 kg on 47 kg at 7.7 m/s | 2.45 → 0.20 |
+
+All other GPU tests pass unchanged. `GpuWorld.shock = false` turns it off.
+
 ## Crushing on contact
 
 A light piece pressed by a body at least 20 times heavier is crushed on the GPU (kernel `crush`), when the impulse it took in a step is more than 1.5 times what its own approach momentum needs (it is being squeezed against something) and it approached at 1 m/s or more. From then on it collides only with the static world, so the heavy body goes through it. The page (`takeCrushed`) turns it into rubble particles, its bricks split into cubes of at most 0.4 m, placed from its current pose.
 
 GPU test `crush`: a 7,700 t block landing on 24 pieces of 11 t crushes all 24 and comes down to the ground; a piece rammed from the side by a 600 t block is not crushed. In the lab's collapse (150 frames), launches went from 14 to 1 and bounces from 11 to 7.
+
+**Pinching (tried, off by default; `GpuWorld.pinching = true`).** The crush test looks at one contact at a time and needs an approach of 1 m/s. A piece pressed between two bodies, or between a body and the ground, at almost no approach speed is never crushed by it. In the lab collapse a 49 kg piece took 76,000 N s in one step between the ground and a 773 kg body, spun at 30 rad/s, then flew up at 7 m/s.
+
+Kernels `pinch_acc` and `pinch` sum each body's normal impulses as vectors and as magnitudes (fixed point, so in any order); the part that cancels is the squeeze. A piece is crushed when:
+- it is at least 20 times lighter than what squeezes it (the static world counts as infinitely heavy);
+- the squeeze is more than 3 m/s of its own momentum;
+- the squeeze over the step, over its largest contact patch, passes the crushing strength.
+
+GPU test `pinch` turns it on and passes, but it passes with it off too, because the crush test crushes those pieces once the block reaches them. In the lab collapse (150 frames, seeds 0 / 7 / 8, before shock propagation): rebounds 13 / 26 / 16 → 12 / 11 / 15, launches 7 / 6 / 8 → 4 / 2 / 2, but one energy gain in each run (0 before). With shock propagation: rebounds 10 / 6 / 11 → 9 / 17 / 16, launches 5 / 2 / 0 → 3 / 1 / 0. Three runs do not tell it apart from luck, and it adds energy gains on its own, so it stays off.
 
 ## Breaking in the step of the hit
 
@@ -267,6 +302,8 @@ What is not covered:
 Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall through the ground. The default is now 24 per shape (it was 8, and a heap of chunks overflowed it: chunks fell to -7.8 m). `stats.pairsLost` and `lost` (steps that lost contacts or pairs) report it, and the lab checks it.
 
 ## Still to do
+
+- **Rebounds in the collapse (open).** With shock propagation, the lab collapse (150 frames, seeds 0 / 7 / 8) counts 10 / 6 / 11 rebounds and 5 / 2 / 0 launches, against 13 / 26 / 16 and 7 / 6 / 8 without it. What is left is mostly pieces landing at 2–3 m/s and leaving at 1–2 m/s. Some may be real: the check reads the centre's speed, and a spinning piece that lands on one end can send its centre up. The launches left are spares and slivers at 5–14 m/s.
 
 - **Mass ratio limit.** Across one contact the heavier body responds as if at most 20 times heavier (GPU test `sandwich`: a 7,700 t block landing on 11 t rubble went from a 2.52 m/s rebound to 0.37 m/s). The limit only takes energy from the heavy body: of its response at the limited mass, the part that brings its speed down to its least is kept, and the rest is taken at its real mass (`sandwich`: 0.37 → 0.03 m/s; dropping the whole change once it overshot zero lost the slowing too, and the block sank and rebounded at 1.9 m/s). Debug switches (`dbgBits`): 1 limits before splitting, 2 turns this off, 4 colours supports with the rest. The limit is between the masses as split over a body's overflow contacts, so a split body is never made lighter than the light one. Applied both ways and before splitting, it made momentum.
 - **Supports first.** Contacts with the static world or a resting body are coloured in their own pass before the others, so a body's supports are solved in sequence, not left to the parallel overflow pass.

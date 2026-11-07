@@ -34,6 +34,10 @@ const names = args.length ? args.flatMap(a => SUITES[a] || [a]) : SUITES.quick;
     await p.addInitScript((d) => { if (d) window.__detAt = d; }, +(process.env.SF_DET_AT || 0));
     await p.addInitScript((d) => { if (d) window.__colR = d; }, process.env.SF_COLR || '');
     await p.addInitScript((d) => { if (d) window.__colCheck = true; }, !!process.env.SF_COLCHECK);
+    await p.addInitScript((d) => { if (d) window.__seed = d; }, +(process.env.SF_SEED || 0));
+    await p.addInitScript((d) => { if (d) window.__pinch = true; }, !!process.env.SF_PINCH);
+    await p.addInitScript((d) => { if (d) window.__parkDbg = true; }, !!process.env.SF_PARK_DBG);
+    await p.addInitScript((d) => { if (d) window.__traceBodies = d; }, process.env.SF_TRACE_BODIES || '');   // (with --trace: these bodies, every frame)
     await p.addInitScript((d) => { if (d) window.__detRows = true; }, !!process.env.SF_DET_ROWS);   // (compare without breaking on the GPU)   // (compare without irregular fracture)
     await p.addInitScript(([name, readLag, jobLag, frames, trace]) => {
       if (sessionStorage.getItem('lab-set')) return; sessionStorage.setItem('lab-set', '1');
