@@ -648,7 +648,7 @@ fn moving(i: u32) -> bool { return i != 0u && B(i, F_P).w > 0.0; }
 // (a contact against a particle that holds a body up, see p_support: b is the static world, sb this key, and the
 // material the particle's)
 const SUP_KEY = 0xffffffu;
-var<private> sup_mat: u32 = 0xffffffffu;
+var<private> sup_mat: u32 = 0xffffffffu; var<private> sup_cap: f32 = 0.0;   // (a support contact's material, and its points' push limit, N s a sub-step)
 fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   // a crushed body (see crush) touches only the static world until the page turns it into rubble
   if ((crushed(a) && moving(b)) || (crushed(b) && moving(a))) { return; }
@@ -670,7 +670,7 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   var mb = P.mat[P.ground_mat]; if (sb == SUP_KEY) { mb = P.mat[sup_mat]; } else if (sb != 0u) { mb = P.mat[u32(Hs(sb, H_ID).y)]; }
   let mu = sqrt(ma.x * mb.x); var rest = max(ma.y, mb.y);
   // (a heap of rubble does not bounce: no restitution against particles)
-  if (sb == SUP_KEY) { rest = 0.0; }
+  if (sb == SUP_KEY) { rest = -1.0; }   // (none; and -1 marks the contact for solve_man, see p_support)
   var cen = vec3f(0.0);
   for (var k = 0u; k < c.cnt; k++) { cen += c.pts[k].xyz; }
   cen /= f32(c.cnt);
@@ -736,6 +736,7 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   man[base + M_E0] = vec4f(e0, select(0.0, 1.0 / kt, kt > 0.0));
   man[base + M_JT] = vec4f(jt1, jt2, jtw, rad);
   man[base + M_JN] = jn;
+  if (sb == SUP_KEY) { rv = vec4f(sup_cap); }
   man[base + M_RV] = rv;
   man[base + M_OUT] = vec4f(rest, 0.0, approach, fixedNow);
   cold[cb + 4u] = vec4f(laf, f32(sa)); cold[cb + 5u] = vec4f(lbf, f32(sb));
@@ -1263,6 +1264,8 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
   let n4 = man[base + M_N]; let n = n4.xyz;
   let dn = dot(dpab, n);
   var jn = man[base + M_JN];
+  // (a contact against particles: they bear at most RUBBLE_BEAR over their cross-section, see p_support)
+  let sup = man[base + M_OUT].x < 0.0; let jcap = man[base + M_RV];
   var tot = 0.0;
   for (var k = 0u; k < cnt; k++) {
     let pa = man[base + M_PT + 2u * k]; let pb = man[base + M_PT + 2u * k + 1u];
@@ -1277,7 +1280,8 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
     let fa = select(1.0, 0.0, holdA && vn > 0.0); let fb = select(1.0, 0.0, holdB && vn > 0.0);
     var nm = pb.w;
     if (rec || fa != 1.0 || fb != 1.0) { let kk = fa * (ima + dot(raxn, imul(A0, A1, raxn))) + fb * (imb + dot(rbxn, imul(B0, B1, rbxn))); nm = select(0.0, 1.0 / kk, kk > 0.0); }
-    let nj = max(j0 - nm * ms * (vn + bias) - is_ * j0, 0.0);
+    var nj = max(j0 - nm * ms * (vn + bias) - is_ * j0, 0.0);
+    if (sup) { nj = min(nj, jcap[k]); }
     let imp = nj - j0;
     jn[k] = nj; tot += nj;
     va -= n * (imp * ima * fa); wa -= imul(A0, A1, raxn) * (imp * fa);
@@ -1366,7 +1370,7 @@ fn restitute_man(m: u32) {
   if ((P.dbg & 8u) != 0u) { return; }
   let base = m * MS;
   // only contacts that pushed during the step (the last sub-step may already be separating)
-  let out = man[base + M_OUT]; let rest = out.x; if (rest == 0.0 || out.y == 0.0) { return; }
+  let out = man[base + M_OUT]; let rest = out.x; if (rest <= 0.0 || out.y == 0.0) { return; }
   let hd = man[base]; let a = u32(hd.x); let b = u32(hd.y); let cnt = u32(hd.z);
   let va4 = S(a, S_V); let vb4 = S(b, S_V);
   var va = va4.xyz; var wa = S(a, S_W).xyz; var vb = vb4.xyz; var wb = S(b, S_W).xyz;
@@ -1964,20 +1968,27 @@ fn sup_record(s: u32, i: u32, depth: f32) {
     st(P.o_psup + 4u * P.psup_n + s * 4u + c.cnt, i);
     c.pts[c.cnt] = vec4f(cp, sep); c.cnt++; nsum += n; pm = u32(R(i, 4).w);
   }
-  if (c.cnt == 0u || !moving(body) || asleep(body) || ld(P.o_psup + 11u * P.psup_n + s) != 0u) { return; }
+  if (c.cnt == 0u || !moving(body) || asleep(body)) { return; }
   // (normals summing to nothing made a NaN normal, NaN bodies, and the engine stopped: lab collapse frame 155)
   let ln = length(nsum); if (!(ln > 1e-3)) { return; }
   c.n = nsum / ln;
   sup_mat = pm;
+  // The particles bear at most what loose rubble bears (RUBBLE_BEAR) over their cross-section (as p_contact
+  // counted it in the last step's sub-steps), shared by the points, per sub-step: a body heavier than that sinks
+  // in, decelerated by it, and the particles squeezed deep are crushed (p_contact) until enough of them bear it.
+  let area = f32(ld(P.o_psup + 9u * P.psup_n + s)) * 1e-4 * P.p_h / P.dt;
+  sup_cap = RUBBLE_BEAR * area * P.h / f32(c.cnt);
   emit(s, SUP_KEY, body, 0u, c);
   sup_mat = 0xffffffffu;
 }
 // After the bodies' solve: the load on the particles holding each shape up (its support contacts' impulse over
-// the step, see sup_acc, over all those particles' cross-section). Past what loose rubble bears (RUBBLE_BEAR, like
-// gravel fill) the shape is overloaded, and the particles under it are crushed as they press on it (p_contact)
-// instead of holding it, until enough of them bear it. A heap holds a slab (2.9 t: kPa) but not a building:
-// crumbs left in the cut under a 2,225 t tower held it up, and its roof came down 4 cm (lab collapse) instead of
-// 10 m.
+// the step, see sup_acc). The contact pushes at most RUBBLE_BEAR (like gravel fill) over the particles'
+// cross-section (p_support); a shape that took that much is overloaded, and the particles pressed deep between
+// it and what holds them are crushed (p_contact) as it sinks in, until enough of them bear it. A heap holds a
+// slab (2.9 t: kPa) but not a building: crumbs left in the cut under a 2,225 t tower held it up, and its roof came
+// down 4 cm (lab collapse) instead of 10 m. (Held outright, with the particles crushed past the limit instead:
+// the overload, judged on a landing's spike, crushed every particle pressed for 30 steps; a 21.6 t block set
+// down on crumbs on a slab went through to it, 239 crushed, GPU test heapcreep.)
 const RUBBLE_BEAR = 1.0e6;
 @compute @workgroup_size(64) fn p_sup_load(@builtin(global_invocation_id) g: vec3u) {
   let s = g.x; if (s == 0u || s >= P.ns1) { return; }
@@ -1985,18 +1996,9 @@ const RUBBLE_BEAR = 1.0e6;
   // was 4 times the real one, and the 120 t block's 1.5 MPa on 25 crumbs read 0.38 MPa, held)
   let area = f32(ld(P.o_psup + 9u * P.psup_n + s)) * 1e-4 * P.p_h / P.dt; st(P.o_psup + 9u * P.psup_n + s, 0u);
   let imp = f32(ld(P.o_psup + 8u * P.psup_n + s)); st(P.o_psup + 8u * P.psup_n + s, 0u);
-  // The load (N): the impulse over the step, at most twice the body's weight (a landing's spike is borne by more
-  // particles than are under it at that step, as it sinks in). While overloaded the shape is not held (p_support)
-  // and the load is the last one held, now over the particles it presses then. (Judged on the spike, smoothed
-  // over 5 steps, the overload lasted 30 steps after a landing and crushed every particle pressed in that time,
-  // the full layer it then came to rest on too: a 21.6 t block set down gently on crumbs on a slab went through
-  // to the slab, 239 crushed, GPU test heapcreep)
-  let o = P.o_psup + 10u * P.psup_n + s; let over = ld(P.o_psup + 11u * P.psup_n + s) != 0u;
-  let im = B(sbody(s), F_P).w;
-  var load = imp / P.dt; if (im > 0.0) { load = min(load, 2.0 * length(P.gravity) / im); }
-  if (over) { load = bitcast<f32>(ld(o)); }
-  st(o, bitcast<u32>(load));
-  st(P.o_psup + 11u * P.psup_n + s, select(0u, 1u, area > 0.0 && load > RUBBLE_BEAR * area));
+  // (overloaded: the contact pushed at its limit, see p_support; the particles then squeezed deep are crushed)
+  let load = imp / P.dt; st(P.o_psup + 10u * P.psup_n + s, bitcast<u32>(load));
+  st(P.o_psup + 11u * P.psup_n + s, select(0u, 1u, area > 0.0 && load > 0.95 * RUBBLE_BEAR * area));
 }
 @compute @workgroup_size(64) fn p_apply(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }

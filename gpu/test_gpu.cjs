@@ -627,7 +627,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       // a layer or two). Particles did not push bodies: it went through them to the ground at 6.9 m/s and the
       // particles pinched under it were crushed to dust, 981 of 1,500 (the lab's mixed scenario lost 254 m3, a
       // sixth of the building, so). Particles pressed between a body and something fixed, the ground or particles
-      // resting on it, now hold it up (p_support): it rests on them 0.21 m up, none crushed, back up at 0.48 m/s
+      // resting on it, now hold it up (p_support), up to what loose rubble bears: it sinks in to 0.16 m up, none crushed, back up at 0.06 m/s (0.48 when held outright)
       // (limit: concrete's restitution, 0.1 x the impact speed + 0.1).
       let rnd = 9; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
       const w = await GpuWorld.create(dev, [], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16, maxParticles: 4096 });
@@ -676,8 +676,8 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       // A heavy block (21.6 t) set down gently on 400 rubble particles lying on a floor slab that sleeps (a part
       // coming to rest on the storey below, crumbs between): the crumbs hold it (0.3 MPa), and it stays where it
       // settles. The overload was judged on the landing's spike, smoothed: it lasted 30 steps and crushed every
-      // particle pressed in that time, and the block went through to the slab, 239 crushed. Now held 0.31 m above
-      // the slab, 1 crushed, no rise. (And: lab collapse, 330 frames, a 565 t part resting 10 m up rose at 5 cm/s
+      // particle pressed in that time, and the block went through to the slab, 239 crushed. Now held 0.30 m above
+      // the slab, none crushed, no rise. (And: lab collapse, 330 frames, a 565 t part resting 10 m up rose at 5 cm/s
       // for 30 frames; not reproduced here.)
       let rnd = 5; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
       const w = await GpuWorld.create(dev, [{ shapes: [{ p: [0, 0.15, 0], q: [0, 0, 0, 1], h: [2.5, 0.15, 2.5], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] }], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16, maxParticles: 4096 });
