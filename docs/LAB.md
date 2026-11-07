@@ -325,3 +325,30 @@ Open:
 - Rubble particles crushed under heavy bodies are removed (one-way particles). This is what fails `collapse` and `mixed` on volume.
 - `collapse`'s worst crumbled share is 0.32.
 - Rebounds and launches in `mixed`.
+
+## Heaps that hold, and the bearing limit (7 November, evening)
+
+The three issues left open above, worked in order.
+
+**1. Particles push back on bodies.** Rubble particles pressed between a body and something fixed hold it up, up to what loose rubble bears (1 MPa over their cross-section); past that the body sinks in and the particles squeezed deep are crushed (docs/GPU.md, "Particles"; GPU tests `heap`, `heapcreep`).
+
+**Energy check.** The energy-gain events now name the bodies behind them (`most`). A body broken on the GPU keeps its slot, and the lab compared the part left with the whole at the last read-back: its centre's jump read as a gain (7.9 MJ for the 816 m³ upper part of `collapse` at frame 58, 21 MJ at frame 223). It is now compared only from 3 frames after the break, with its new volume.
+
+**Full length** (software GPU, 600 frames, commit 65d6b10 with this doc):
+
+| Scenario | Volume lost | Crumbled share (worst) | Rebounds | Launches | Energy gains | Jumps | Roof |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `collapse` | 0.4% (4.6%) | 0.07 (0.32) | 1 (7) | 0 (1) | 0 (1) | 8 (4) | 18.64 → 15.66 m (→ 15.38) |
+| `mixed` | 3.1% (16.5%) | 0.14 (0.14) | 32 (48) | 9 (17) | 0 (1) | 23 (6) | 22.39 → 12.37 m (→ 9.71) |
+
+(in brackets: the last full runs before, same day.) Screenshots of `mixed` at frames 150 and 450 (`SF_SHOTS=150,450`): the upper storeys come down onto the rubble of the cut storey and rest on the heaps.
+
+On the way:
+- Held outright with the bearing judged on a smoothed load, a 2,140 t upper part stopped 2.5 m down on crumbs (`mixed` roof fall 2.54 m, limit 3; volume lost 0.2%). With the push limited to what the rubble bears it comes down 10 m.
+- Crumbs in the cut under the 2,225 t `collapse` tower held it (roof fall 0.04 m) before there was a bearing limit.
+
+Open:
+- `mixed` loses 3.1% (limit 2): 48 m³ of particles crushed under bodies sinking in.
+- `mixed`: 32 rebounds and 9 launches, mostly single bricks and slabs, several rising over a few frames inside the pile (frames 148–304).
+- Jumps: `mixed` 23 (one 55-box part at frame 186, 0.02–0.07 m over its limit, the frame after it was made; the rest particles).
+
