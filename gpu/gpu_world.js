@@ -54,7 +54,7 @@ struct Params {
   o_plan: u32, o_spart: u32, o_snap: u32, o_claim: u32,   // breaking on the GPU (see snap_split); colour claims
   o_mtry: u32, o_claim2: u32, o_sorted2: u32, o_evhist: u32,
   o_cchk: u32, o_pinch: u32, step: u32, o_level: u32,
-  o_level2: u32, pad17: u32, pad18: u32, pad19: u32,   // (see color_claim, sort_cells); pinching (see pinch)
+  o_level2: u32, o_psup: u32, psup_n: u32, pad19: u32,   // (see color_claim, sort_cells); pinching (see pinch)
 }
 struct ColorU { c: u32 }
 
@@ -541,6 +541,10 @@ fn insert_new(sa: u32, sb: u32, idx: u32) {
 
 fn crushed(i: u32) -> bool { return i != 0u && ld(P.o_crushed + i) != 0u; }
 fn moving(i: u32) -> bool { return i != 0u && B(i, F_P).w > 0.0; }
+// (a contact against a particle that holds a body up, see p_support: b is the static world, sb this key, and the
+// material the particle's)
+const SUP_KEY = 0xffffffu;
+var<private> sup_mat: u32 = 0xffffffffu;
 fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   // a crushed body (see crush) touches only the static world until the page turns it into rubble
   if ((crushed(a) && moving(b)) || (crushed(b) && moving(a))) { return; }
@@ -559,14 +563,19 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   let ima = va.w; let imb = vb.w;
   let A0 = S(a, S_I0); let A1 = S(a, S_I1); let B0 = S(b, S_I0); let B1 = S(b, S_I1);
   let ma = P.mat[u32(Hs(sa, H_ID).y)];
-  var mb = P.mat[P.ground_mat]; if (sb != 0u) { mb = P.mat[u32(Hs(sb, H_ID).y)]; }
-  let mu = sqrt(ma.x * mb.x); let rest = max(ma.y, mb.y);
+  var mb = P.mat[P.ground_mat]; if (sb == SUP_KEY) { mb = P.mat[sup_mat]; } else if (sb != 0u) { mb = P.mat[u32(Hs(sb, H_ID).y)]; }
+  let mu = sqrt(ma.x * mb.x); var rest = max(ma.y, mb.y);
+  // (a heap of rubble does not bounce: no restitution against particles)
+  if (sb == SUP_KEY) { rest = 0.0; }
   var cen = vec3f(0.0);
   for (var k = 0u; k < c.cnt; k++) { cen += c.pts[k].xyz; }
   cen /= f32(c.cnt);
   var rad = 0.0; for (var k = 0u; k < c.cnt; k++) { rad += length(c.pts[k].xyz - cen); }
   rad /= f32(c.cnt);
   var old = find_old(sa, sb);
+  // (a contact against particles starts afresh each step: its particles change, and an impulse warm-started at
+  // other points lifted the body)
+  if (sb == SUP_KEY) { old = 0xffffffffu; }
   var jt1 = 0.0; var jt2 = 0.0; var jtw = 0.0;
   var fa = cen - pa; var fb = cen - pb; var e0 = vec3f(0.0);
   var laf = transpose(Ra) * fa; var lbf = select(transpose(Rb) * fb, cen, b == 0u);
@@ -1349,7 +1358,7 @@ fn ev_energy_of(mi: u32) -> f32 {
   pt = pt / f32(max(cnt, 1u)) + B(a, F_P).xyz;
   let n = man[base + M_N].xyz;
   let o = P.o_events + k * 12u;
-  st(o, a); st(o + 1u, u32(hd.y)); st(o + 2u, u32(cold[m * CS + 4u].w)); st(o + 3u, u32(cold[m * CS + 5u].w));
+  st(o, a); st(o + 1u, u32(hd.y)); st(o + 2u, u32(cold[m * CS + 4u].w)); { let sb = u32(cold[m * CS + 5u].w); st(o + 3u, select(sb, 0u, sb == SUP_KEY)); }
   st(o + 4u, bitcast<u32>(pt.x)); st(o + 5u, bitcast<u32>(pt.y)); st(o + 6u, bitcast<u32>(pt.z));
   st(o + 7u, bitcast<u32>(n.x)); st(o + 8u, bitcast<u32>(n.y)); st(o + 9u, bitcast<u32>(n.z));
   st(o + 10u, bitcast<u32>(out.y)); st(o + 11u, bitcast<u32>(out.z));
@@ -1473,6 +1482,16 @@ fn plan4(i: u32, k: u32) -> vec4f { return vec4f(planf(i, k), planf(i, k + 1u), 
     let i = u32(select(hd.y, hd.x, k == 0u));
     if (i != 0u && plan(i, 2u) == 1u) { atomicAdd(&ints[P.o_plan + i * SN + 3u], j); }
   }
+}
+// The load on particles holding bodies up: each support contact's impulse this step, added up per shape (N s).
+// (its slot from emit does not do: the contacts are reordered after the narrow phase, and the slot then named
+// another contact, of next to no impulse: the 120 t block on 25 crumbs read 0 Pa and stayed held, GPU test heap)
+@compute @workgroup_size(64) fn sup_acc(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man) || P.o_psup == 0u) { return; }
+  let m = P.cur_base + mi;
+  if (u32(cold[m * CS + 5u].w) != SUP_KEY) { return; }
+  let s = u32(cold[m * CS + 4u].w); if (s == 0u || s >= P.psup_n) { return; }
+  atomicAdd(&ints[P.o_psup + 8u * P.psup_n + s], u32(clamp(man[m * MS + M_OUT].y, 0.0, 4.0e9) + 0.5));
 }
 @compute @workgroup_size(64) fn snap_split(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.n1) { return; }
@@ -1669,7 +1688,7 @@ fn pfric(disp: vec3f, n: vec3f, pen: f32, mu: f32) -> vec3f {
 }
 // Candidates, gathered once per step: the particles and shapes a particle can touch during the step (its
 // sub-steps only test these). Per particle in pint after the grid: [neighbours, shapes, 24 neighbours, 12 shapes]
-const P_NN = 24u; const P_NS = 12u; const P_CS = 38u;
+const P_NN = 24u; const P_NS = 12u; const P_CS = 41u;   // (+2: resting on the ground, this sub-step and the last; see p_contact; +1: the load it holds, see p_sup_load)
 fn pcand(i: u32) -> u32 { return 3u * pg() + 2u * P.p_cap + i * P_CS; }
 @compute @workgroup_size(64) fn p_gather(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }
@@ -1720,6 +1739,7 @@ const P_SEP = 2.0;
   let r0 = R(i, 0); let xi = r0.xyz; let ri = r0.w; let xs = R(i, 3).xyz;
   let mui = P.mat[u32(R(i, 4).w)].x;
   var corr = vec3f(0.0); var n = 0.0; var touch = 0.0;
+  var grounded = false; var gPen = 0.0; var gN = vec3f(0.0);
   let cap = P_SEP * P.p_h;
   let o = pcand(i);
   // other particles first (a sleeping one does not give way); several pushes are averaged, over-relaxed (Jacobi)
@@ -1731,7 +1751,11 @@ const P_SEP = 2.0;
     // overlap and none from one sub-step to the next)
     if (d2 >= (rr + 0.01) * (rr + 0.01) || d2 < 1e-12) { continue; }
     let dist = sqrt(d2); let nn = d / dist;
+    // (resting, through j, on the ground: j is under it and itself rests on the ground, as of the last sub-step)
+    let jg = pld(pcand(j) + 38u) != 0u && nn.y > 0.5;
+    if (jg) { grounded = true; }
     touch = 1.0; if (dist >= rr) { continue; }
+    if (jg && rr - dist > gPen) { gPen = rr - dist; gN = nn; }
     let moving = R(j, 1).w == 1.0;
     let wgt = select(1.0, 0.5, moving);
     let dj = select(vec3f(0.0), rj.xyz - R(j, 3).xyz, moving);
@@ -1741,9 +1765,12 @@ const P_SEP = 2.0;
   var x = xi + corr * select(1.0, 1.5 / n, n > 1.5);
   // a particle pushed hard from opposite sides by two bodies (a box set down on it on the floor) is crushed
   var lastN = vec3f(0.0); var lastPush = 0.0; var crushed = R(i, 6).w;
+  var lastS = 0xffffffffu; var lastFixed = true;   // (the shape that pushed hardest so far; the ground: fixed)
   // then the ground and the rigid shapes, in sequence, each in full: a particle never ends inside a body
   let pg0 = ri - x.y;
-  if (pg0 > -0.01) { touch = 1.0; }
+  if (pg0 > -0.01) { touch = 1.0; grounded = true; }
+  // (pressed onto particles that rest on the ground: as good as the ground, for holding a body up)
+  if (gPen > 0.0 && pg0 <= 0.0) { lastPush = gPen; lastN = gN; }
   if (pg0 > 0.0) { let nn = vec3f(0.0, 1.0, 0.0); x += nn * pg0 + pfric(x - xs, nn, pg0, 0.5 * (mui + P.mat[P.ground_mat].x)); lastPush = pg0; lastN = nn; }
   let ns0 = pld(o + 1u);
   for (var q = 0u; q < ns0; q++) {
@@ -1772,15 +1799,105 @@ const P_SEP = 2.0;
     let push = min(pen, max(dot(vb * P.p_h - (x - xs), nn), 0.0) + cap);
     let mu = 0.5 * (mui + P.mat[u32(Hs(j, H_ID).y)].x);
     x += nn * push + pfric((x - xs) - vb * P.p_h, nn, push, mu); touch = 1.0;
-    if (lastPush > 0.3 * ri && pen > 0.3 * ri && dot(nn, lastN) < -0.5) { crushed = 1.0; }
-    if (pen > lastPush) { lastPush = pen; lastN = nn; }
+    let fixed = !moving(b) || asleep(b);
+    if (fixed && nn.y > 0.5) { grounded = true; }
+    if (lastPush > 0.0 && pen > 0.0 && dot(nn, lastN) < -0.5) {
+      // pressed between a moving body and something fixed (the ground, a static or sleeping shape): the particle
+      // holds the body up (p_support makes it a contact of the body's at the next step). Crushed as dust
+      // instead, a heap under a falling part was deleted under it: the lab's mixed scenario lost 254 m3 so
+      if (fixed != lastFixed) {
+        // (under an overloaded shape, see p_sup_load, it is not held up: it sinks in, and a particle squeezed deep
+        // between it and what holds the particle is crushed; the rest still count, for the next step's load)
+        let sh = select(j, lastS, fixed);
+        if (sh != 0xffffffffu && ld(P.o_psup + 11u * P.psup_n + sh) != 0u && min(pen, lastPush) > 0.3 * ri) { crushed = 1.0; }
+        else { sup_record(sh, i, min(pen, lastPush)); }
+      }
+      else if (!fixed && lastPush > 0.3 * ri && pen > 0.3 * ri) { crushed = 1.0; }   // (two moving bodies; between two fixed things nothing presses)
+    }
+    if (pen > lastPush) { lastPush = pen; lastN = nn; lastS = j; lastFixed = fixed; }
   }
   setR(i, 5, vec4f(x, touch));
+  pst(pcand(i) + 39u, select(0u, 1u, grounded));
   if (crushed > 0.0) { let r6 = R(i, 6); setR(i, 6, vec4f(r6.xyz, 1.0)); }
+}
+// Particles holding bodies up. Per shape, four slots (by the quarter of the shape the particle is in, in x and
+// z): the deepest-pressed particle in each, packed (depth, particle) for atomicMax, so the same in any order.
+fn sup_record(s: u32, i: u32, depth: f32) {
+  if (s == 0xffffffffu || i > 0xffffu || P.o_psup == 0u) { return; }
+  let wp = Hs(s, H_WP).xyz; let x = R(i, 0).xyz;
+  let q = select(0u, 1u, x.x > wp.x) + select(0u, 2u, x.z > wp.z);
+  atomicMax(&ints[P.o_psup + s * 4u + q], (u32(clamp(depth / 0.5, 0.0, 1.0) * 32767.0 + 1.0) << 16u) | i);
+  // (and the cross-section of all the particles holding this shape up, cm2: the load is shared among them all)
+  let r = R(i, 0).w; atomicAdd(&ints[P.o_psup + 9u * P.psup_n + s], u32(3.14159 * r * r * 1e4 + 0.5));
+}
+// At the next step, after the narrow phase: each shape's slots become one contact of its body against the static
+// world at those particles (up to four points), solved with the rest: friction, warm start, push limits. The
+// particle stays where it is, between the body and what holds it.
+@compute @workgroup_size(64) fn p_support(@builtin(global_invocation_id) g: vec3u) {
+  let s = g.x; if (s == 0u || s >= P.ns1) { return; }
+  var c: Contact; c.cnt = 0u; var nsum = vec3f(0.0); var pm = 0u;
+  let body = sbody(s);
+  let wp = Hs(s, H_WP).xyz; let Rm = qmat(Hs(s, H_WQ)); let h = Hs(s, H_H).xyz;
+  for (var q = 0u; q < 4u; q++) {
+    let v = ld(P.o_psup + s * 4u + q); if (v == 0u) { continue; }
+    st(P.o_psup + s * 4u + q, 0u);
+    let i = v & 0xffffu; let r0 = R(i, 0); let x = r0.xyz;
+    if (R(i, 1).w == 0.0 || R(i, 1).w >= 3.0) { continue; }
+    let dl = x - wp; let lc = vec3f(dot(Rm[0], dl), dot(Rm[1], dl), dot(Rm[2], dl));
+    let cl = clamp(lc, -h, h); var nl = lc - cl; var dist = length(nl);
+    // (a particle whose centre is inside the shape holds nothing up: it is on its way out of it)
+    if (dist < 1e-6) { continue; }
+    nl = nl / dist;
+    let n = Rm[0] * nl.x + Rm[1] * nl.y + Rm[2] * nl.z;
+    let cp = wp + Rm[0] * cl.x + Rm[1] * cl.y + Rm[2] * cl.z;
+    // (the contact comes a step late, by then the body is into the particle, and the heap under it springs back
+    // as its particles separate: pushed out of that, a slab landing at 6.6 m/s came back up at 1.95 m/s (GPU
+    // test heap). It is stopped where it is instead, with no push, no restitution, no warm start, and particles
+    // whose centre is inside the shape are left out: 0.48 m/s)
+    let sep = max(dist - r0.w, 0.0); if (sep > 0.05) { continue; }
+    // (one normal for the contact: the particles' must agree; one on the far side of the body is left out)
+    if (c.cnt > 0u && dot(n, nsum) <= 0.5 * length(nsum)) { continue; }
+    st(P.o_psup + 4u * P.psup_n + s * 4u + c.cnt, i);
+    c.pts[c.cnt] = vec4f(cp, sep); c.cnt++; nsum += n; pm = u32(R(i, 4).w);
+  }
+  if (c.cnt == 0u || !moving(body) || asleep(body) || ld(P.o_psup + 11u * P.psup_n + s) != 0u) { return; }
+  // (normals summing to nothing made a NaN normal, NaN bodies, and the engine stopped: lab collapse frame 155)
+  let ln = length(nsum); if (!(ln > 1e-3)) { return; }
+  c.n = nsum / ln;
+  sup_mat = pm;
+  emit(s, SUP_KEY, body, 0u, c);
+  sup_mat = 0xffffffffu;
+}
+// After the bodies' solve: the load on the particles holding each shape up (its support contacts' impulse over
+// the step, see sup_acc, over all those particles' cross-section). Past what loose rubble bears (RUBBLE_BEAR, like
+// gravel fill) the shape is overloaded, and the particles under it are crushed as they press on it (p_contact)
+// instead of holding it, until enough of them bear it. A heap holds a slab (2.9 t: kPa) but not a building:
+// crumbs left in the cut under a 2,225 t tower held it up, and its roof came down 4 cm (lab collapse) instead of
+// 10 m.
+const RUBBLE_BEAR = 1.0e6;
+@compute @workgroup_size(64) fn p_sup_load(@builtin(global_invocation_id) g: vec3u) {
+  let s = g.x; if (s == 0u || s >= P.ns1) { return; }
+  // (added at each of the particles' sub-steps: over their number, the cross-section; counted once per sub-step it
+  // was 4 times the real one, and the 120 t block's 1.5 MPa on 25 crumbs read 0.38 MPa, held)
+  let area = f32(ld(P.o_psup + 9u * P.psup_n + s)) * 1e-4 * P.p_h / P.dt; st(P.o_psup + 9u * P.psup_n + s, 0u);
+  let imp = f32(ld(P.o_psup + 8u * P.psup_n + s)); st(P.o_psup + 8u * P.psup_n + s, 0u);
+  // The load (N): the impulse over the step, at most twice the body's weight (a landing's spike is borne by more
+  // particles than are under it at that step, as it sinks in). While overloaded the shape is not held (p_support)
+  // and the load is the last one held, now over the particles it presses then. (Judged on the spike, smoothed
+  // over 5 steps, the overload lasted 30 steps after a landing and crushed every particle pressed in that time,
+  // the full layer it then came to rest on too: a 21.6 t block set down gently on crumbs on a slab went through
+  // to the slab, 239 crushed, GPU test heapcreep)
+  let o = P.o_psup + 10u * P.psup_n + s; let over = ld(P.o_psup + 11u * P.psup_n + s) != 0u;
+  let im = B(sbody(s), F_P).w;
+  var load = imp / P.dt; if (im > 0.0) { load = min(load, 2.0 * length(P.gravity) / im); }
+  if (over) { load = bitcast<f32>(ld(o)); }
+  st(o, bitcast<u32>(load));
+  st(P.o_psup + 11u * P.psup_n + s, select(0u, 1u, area > 0.0 && load > RUBBLE_BEAR * area));
 }
 @compute @workgroup_size(64) fn p_apply(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }
   let x = R(i, 5).xyz; let r0 = R(i, 0);
+  pst(pcand(i) + 38u, pld(pcand(i) + 39u));
   var v = (x - R(i, 3).xyz) / P.p_h;
   let l = length(v); if (l > 40.0) { v *= 40.0 / l; }
   setR(i, 0, vec4f(x, r0.w)); setR(i, 1, vec4f(v, 1.0));
@@ -2089,7 +2206,7 @@ class GpuWorld {
     // contact's pair slot
     let TP = 1024; while (TP < 2 * this.maxMan) TP *= 2; this.TP = TP;
     take('ptab', 3 * TP); take('big', 64 * 4096); take('mslot', this.maxMan);
-    take('hl', 1 + this.maxPairs); take('crushed', cb1); take('crush', 12 * 256); take('pinch', 8 * cb1); take('level', cb1); take('level2', cb1);
+    take('hl', 1 + this.maxPairs); take('crushed', cb1); take('crush', 12 * 256); take('pinch', 8 * cb1); take('level', cb1); take('level2', cb1); if (opt.maxParticles) take('psup', 12 * cs1);
     this.maxEvents = 512; take('events', 12 * this.maxEvents);
     this.maxInherit = 4096; take('inherit', 12 * this.maxInherit);
     take('plan', 24 * cb1); take('spart', cs1); take('snap', 1 + 4 * 256);
@@ -2155,7 +2272,7 @@ class GpuWorld {
     let PG = 256; while (PG < 2 * Math.max(1, this.capP)) PG *= 2; this.PG = PG; this.PGeff = 256;
     const cp = Math.max(1, this.capP);
     this.prtBuf = buf(cp * 112 + cp * 48, U.STORAGE | U.COPY_DST | U.COPY_SRC);
-    this.pintBuf = buf((3 * PG + 2 * cp + 38 * cp) * 4, U.STORAGE | U.COPY_DST);
+    this.pintBuf = buf((3 * PG + 2 * cp + 41 * cp) * 4, U.STORAGE | U.COPY_DST);
     const bglP = d.createBindGroupLayout({ entries: [sto(0), sto(1)] });
     const partL = d.createPipelineLayout({ bindGroupLayouts: [bgl0, bgl1, bglP] });
     this.bgP = d.createBindGroup({ layout: bglP, entries: [ent(0, this.prtBuf), ent(1, this.pintBuf)] });
@@ -2163,11 +2280,11 @@ class GpuWorld {
     const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color_init', 'color_round', 'color_claim_s', 'color_claim', 'color_tie', 'color_resolve', 'color_count', 'color_check', 'ev_count', 'ev_cut', 'blist_sort', 'ovf_sort', 'sort_cells', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_big', 'red_score', 'red_pick', 'red_apply', 'crush', 'pinch_acc', 'pinch', 'level_pass', 'snap_acc', 'snap_split', 'snap_shapes'];
+                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_big', 'red_score', 'red_pick', 'red_apply', 'crush', 'pinch_acc', 'pinch', 'level_pass', 'snap_acc', 'sup_acc', 'snap_split', 'snap_shapes'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'hull_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
-      ...(modP ? ['p_gather', 'p_place', 'p_prep', 'p_scan', 'p_scatter', 'p_sort', 'p_integrate', 'p_contact', 'p_apply', 'p_finish'] : []).map(async k => { this.pl[k] = await mk(k, partL, modP); })]);
+      ...(modP ? ['p_gather', 'p_place', 'p_prep', 'p_scan', 'p_scatter', 'p_sort', 'p_integrate', 'p_contact', 'p_apply', 'p_finish', 'p_support', 'p_sup_load'] : []).map(async k => { this.pl[k] = await mk(k, partL, modP); })]);
     this.ts = d.features.has('timestamp-query');
     this.stages = ['broad', 'narrow', 'chunks', 'colour', 'sub-steps', 'particles', 'sleep'];
     if (this.ts) {
@@ -2205,7 +2322,7 @@ class GpuWorld {
     let tp = 1024; while (tp < 2 * ((this.stats.manifolds || 0) * 1.5 + 2048) && tp < this.TP) tp *= 2; this.TPeff = tp;
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
     u[136] = this.oHull; u[137] = L.hl; f[139] = this.ovfPush ?? 1; u[138] = (this.dbgBits || 0) | (this.shock === false ? 16 : 0);
-    u[140] = L.plan; u[141] = L.spart; u[142] = L.snap; u[143] = L.claim; u[144] = L.mtry; u[145] = L.claim2; u[146] = L.sorted2; u[147] = L.evhist; u[148] = L.cchk || 0; u[149] = L.pinch; u[150] = this.frame; u[151] = L.level; u[152] = L.level2;
+    u[140] = L.plan; u[141] = L.spart; u[142] = L.snap; u[143] = L.claim; u[144] = L.mtry; u[145] = L.claim2; u[146] = L.sorted2; u[147] = L.evhist; u[148] = L.cchk || 0; u[149] = L.pinch; u[150] = this.frame; u[151] = L.level; u[152] = L.level2; u[153] = this.capP && this.support !== false ? L.psup : 0; u[154] = this.capS + 1;   // (psup's stride: the shape capacity, so its regions stay put as shapes are added)
     u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 3;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
@@ -2297,6 +2414,8 @@ class GpuWorld {
     // the chunk pairs listed by narrow, always sized by their real count (one indirect dispatch)
     p = pass(null, true); run(p, 'hull_args', 1); p.end();
     p = pass('chunks'); p.setPipeline(this.pl.narrow_hull); p.dispatchWorkgroupsIndirect(this.argBuf, 102 * 4); p.end();
+    // (particles holding bodies up, from the last step's particle stage: contacts of their bodies now)
+    if (this.capP && this.support !== false) { p = pass(null); p.setBindGroup(2, this.bgP); run(p, 'p_support', nsh); p.end(); }
     p = pass(null, true); run(p, 'man_args', 1); p.end();
     p = pass('colour');
     if (this.reduce !== false) { ind(p, 'red_count', 96 * 4); run(p, 'red_big', Math.ceil(this.TPeff / 64)); for (const k of ['red_score', 'red_pick', 'red_apply']) ind(p, k, 96 * 4); }
@@ -2337,6 +2456,7 @@ class GpuWorld {
     run(p, 'finish', nb);
     if (this.evEnergy > 0) { ind(p, 'ev_count', 96 * 4); run(p, 'ev_cut', 1); ind(p, 'events', 96 * 4); }
     if (this.crushing !== false) { ind(p, 'crush', 96 * 4); if (this.pinching === true) { ind(p, 'pinch_acc', 96 * 4); run(p, 'pinch', nb); } }   // (pinching off by default: docs/GPU.md, Crushing on contact)
+    if (this.capP && this.support !== false) ind(p, 'sup_acc', 96 * 4);
     if (this.plans) { ind(p, 'snap_acc', 96 * 4); run(p, 'snap_split', nb); run(p, 'snap_shapes', nsh); }
     p.end();
     // particles, after the bodies moved (they see this step's shapes and body velocities)
@@ -2344,6 +2464,7 @@ class GpuWorld {
     if (this.capP && this.np) {
       p.setBindGroup(2, this.bgP);
       const np = Math.ceil(this.np / 64);
+      if (this.support !== false) run(p, 'p_sup_load', nsh);
       run(p, 'p_prep', np); run(p, 'p_scan', 1); run(p, 'p_scatter', np); run(p, 'p_sort', Math.ceil(this.PGeff / 64));
       // with no particle moving at the last stats and no new input, only the wake check runs (a particle woken now
       // starts moving a few steps later, when the stats show it)

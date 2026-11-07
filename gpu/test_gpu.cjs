@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -622,6 +622,83 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       check('particles', bad.below === 0 && bad.inside === 0 && perSecond[6].onTable > 300 && asleep && skips > 20 && woke > 0 && last.inBox < 5,
         { bad, asleepAt7s: asleep, skippedSteps: skips, wokeByBox: woke, box: bp.map(v => +v.toFixed(2)), rows });
     }
+    if (scenes.includes('heap')) {
+      // A slab (2 x 0.3 x 2 m, 2.9 t) dropped flat on 1,500 rubble particles poured on the ground (they spread to
+      // a layer or two). Particles did not push bodies: it went through them to the ground at 6.9 m/s and the
+      // particles pinched under it were crushed to dust, 981 of 1,500 (the lab's mixed scenario lost 254 m3, a
+      // sixth of the building, so). Particles pressed between a body and something fixed, the ground or particles
+      // resting on it, now hold it up (p_support): it rests on them 0.21 m up, none crushed, back up at 0.48 m/s
+      // (limit: concrete's restitution, 0.1 x the impact speed + 0.1).
+      let rnd = 9; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const w = await GpuWorld.create(dev, [], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16, maxParticles: 4096 });
+      if (globalThis.NOSUP) w.support = false; if (globalThis.HEAPDBG) w.dbgBits = +globalThis.HEAPDBG;
+      const list = [];
+      if (globalThis.HEAPGRID) { for (let ix = 0; ix < 12; ix++) for (let iz = 0; iz < 12; iz++) list.push({ p: [-1.1 + ix * 0.2, 0.1, -1.1 + iz * 0.2], v: [0, 0, 0], r: 0.1, mat: MAT.concrete }); }
+      else for (let i = 0; i < 1500; i++) list.push({ p: [(rand() - 0.5) * 1.8, 0.2 + rand() * 3, (rand() - 0.5) * 1.8], v: [0, 0, 0], r: 0.1 * (0.8 + 0.4 * rand()), mat: MAT.concrete });
+      w.addParticles(list);
+      for (let f = 0; f < 300; f++) w.step(1 / 60);
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      const pr0 = await w.readParticles(); let top = 0, n0 = 0;
+      for (let i = 0; i < pr0.n; i++) { const st = pr0.data[i * 12 + 10]; if (!st || st === 3) continue; n0++; const x = pr0.data[i * 12], z = pr0.data[i * 12 + 2]; if (Math.abs(x) < 0.6 && Math.abs(z) < 0.6) top = Math.max(top, pr0.data[i * 12 + 1] + pr0.data[i * 12 + 11]); }
+      const [bi] = w.addBodies([{ shapes: [{ p: [0, Math.max(top, 1.2) + 1.0, 0], q: [0, 0, 0, 1], h: [1, 0.15, 1], mat: MAT.concrete }], v: [0, -3, 0], w: [0, 0, 0] }]);
+      let maxUp = -1e9, yEnd = 0, vEnd = 0, hit = false;
+      for (let f = 1; f <= 150; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        const r = await w.readPose(); const vy = r.vel[(bi - 1) * 3 + 1]; yEnd = r.body[(bi - 1) * 7 + 1]; vEnd = vy;
+        if (vy > -2.5) hit = true; if (hit) maxUp = Math.max(maxUp, vy);
+        (globalThis.__hv = globalThis.__hv || []).push([f, vy]);
+      }
+      const pr = await w.readParticles(); let crushed = 0, alive = 0, under = 0, topEnd = 0;
+      for (let i = 0; i < pr.n; i++) { const st = pr.data[i * 12 + 10]; if (!st) continue; if (st === 3) crushed++; else alive++; const x = pr.data[i * 12], z = pr.data[i * 12 + 2], y = pr.data[i * 12 + 1]; if (Math.abs(x) < 0.9 && Math.abs(z) < 0.9 && y < yEnd) under++; if (Math.abs(x) > 1.2 || Math.abs(z) > 1.2) topEnd = Math.max(topEnd, y); }
+      w.destroy();
+      const bottom = yEnd - 0.15;
+      // and a few crumbs do not hold a building up: a 120 t block set on 25 scattered particles (0.8 m2 of them, 1.5
+      // MPa) crushes them, past what loose rubble bears (like gravel fill: 1 MPa), and comes down to the ground.
+      // Held, crumbs left in the cut under a 2,225 t tower held it up (lab collapse: the roof came down 4 cm). On a
+      // full layer (625 particles, 20 m2, 60 kPa) it is held, as on gravel. (Before: the load was read from the
+      // contact's slot as emitted, which named another contact once the contacts were reordered, and the cross-section
+      // was counted at each particle sub-step: it read 0.38 MPa, and the block stayed 0.18 m up, none crushed. Now
+      // 25 crushed, on the ground.)
+      const w2 = await GpuWorld.create(dev, [], { substeps: 12, sleep: false, maxBodies: 8, maxShapes: 16, maxParticles: 4096 });   // (awake, as a falling building is)
+      const lay = []; for (let ix = 0; ix < 5; ix++) for (let iz = 0; iz < 5; iz++) lay.push({ p: [-2.0 + ix * 1.0, 0.1, -2.0 + iz * 1.0], v: [0, 0, 0], r: 0.1, mat: MAT.concrete });
+      if (globalThis.NOSUP) w2.support = false;
+      w2.addParticles(lay);
+      for (let f = 0; f < 30; f++) w2.step(1 / 60);
+      const [bb] = w2.addBodies([{ shapes: [{ p: [0, 0.2 + 1.0 + 0.005, 0], q: [0, 0, 0, 1], h: [2.5, 1.0, 2.5], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] }]);
+      let yB = 0; for (let f = 1; f <= 120; f++) { w2.step(1 / 60); if (f % 30 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); const r = await w2.readPose(); yB = r.body[(bb - 1) * 7 + 1] - 1.0; } }
+      const pr2 = await w2.readParticles(); let crushed2 = 0; for (let i = 0; i < pr2.n; i++) if (pr2.data[i * 12 + 10] === 3) crushed2++;
+      w2.destroy();
+      const vIn = Math.min(...(globalThis.__hv || []).map(r => r[1]));
+      check('heap', bottom > 0.1 && crushed <= 15 && maxUp <= 0.1 * -vIn + 0.1 && Math.abs(vEnd) < 0.2 && yB < 0.05,
+        { block120t_bottom_m: +yB.toFixed(3), block120t_crushed: crushed2, impact_ms: +(-vIn).toFixed(2), particles: n0, heapTop_m: +top.toFixed(2), underSlab: under, heapOutsideTop_m: +topEnd.toFixed(2), slabBottom_m: +bottom.toFixed(2), crushed, alive, slabMaxUp_ms: +maxUp.toFixed(2), slabVyEnd_ms: +vEnd.toFixed(2) });
+    }
+    if (scenes.includes('heapcreep')) {
+      // A heavy block (21.6 t) set down gently on 400 rubble particles lying on a floor slab that sleeps (a part
+      // coming to rest on the storey below, crumbs between): the crumbs hold it (0.3 MPa), and it stays where it
+      // settles. The overload was judged on the landing's spike, smoothed: it lasted 30 steps and crushed every
+      // particle pressed in that time, and the block went through to the slab, 239 crushed. Now held 0.31 m above
+      // the slab, 1 crushed, no rise. (And: lab collapse, 330 frames, a 565 t part resting 10 m up rose at 5 cm/s
+      // for 30 frames; not reproduced here.)
+      let rnd = 5; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const w = await GpuWorld.create(dev, [{ shapes: [{ p: [0, 0.15, 0], q: [0, 0, 0, 1], h: [2.5, 0.15, 2.5], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] }], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16, maxParticles: 4096 });
+      if (globalThis.NOSUP) w.support = false;
+      const list = []; for (let i = 0; i < +(globalThis.CREEP_N || 400); i++) list.push({ p: [(rand() - 0.5) * 3.6, 0.5 + rand() * 1.0, (rand() - 0.5) * 3.6], v: [0, 0, 0], r: 0.1 * (0.8 + 0.4 * rand()), mat: MAT.concrete });
+      w.addParticles(list);
+      for (let f = 0; f < 240; f++) w.step(1 / 60);
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      const slabAsleep = (await w.readPose()).sleeping[0];
+      const pr0 = await w.readParticles(); let top = 0.3; for (let i = 0; i < pr0.n; i++) { const st = pr0.data[i * 12 + 10]; if (!st || st === 3) continue; if (Math.abs(pr0.data[i * 12]) < 1.6 && Math.abs(pr0.data[i * 12 + 2]) < 1.6) top = Math.max(top, pr0.data[i * 12 + 1] + pr0.data[i * 12 + 11]); }
+      const [bb] = w.addBodies([{ shapes: [{ p: [0, top + 0.5 + 0.005, 0], q: [0, 0, 0, 1], h: [1.5, 0.5, 1.5], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] }]);
+      const ys = [], vys = [], slabSl = [];
+      for (let f = 1; f <= 360; f++) { w.step(1 / 60); if (f % 6 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); const r = await w.readPose(); ys.push(r.body[(bb - 1) * 7 + 1]); vys.push(r.vel[(bb - 1) * 3 + 1]); slabSl.push(r.sleeping[0]); }}
+      const pr = await w.readParticles(); let crushed = 0; for (let i = 0; i < pr.n; i++) if (pr.data[i * 12 + 10] === 3) crushed++;
+      w.destroy();
+      // (from 1 s after it was set down, when it has settled: how far it rises, and its fastest rise)
+      const late = ys.slice(10), lateV = vys.slice(10);
+      let rise = 0, lo = late[0]; for (const y of late) { lo = Math.min(lo, y); rise = Math.max(rise, y - lo); }
+      const maxUp = Math.max(...lateV);
+      check('heapcreep', rise < 0.01 && maxUp < 0.02 && late[late.length - 1] - 0.5 > 0.4 && crushed <= 15, { rise_m: +rise.toFixed(4), maxUp_ms: +maxUp.toFixed(3), y: late.filter((_, k) => k % 5 === 0).map(y => +y.toFixed(3)), crushed, slabAsleep, slabSl: slabSl.slice(0, 12).join(''), heapTop_m: +top.toFixed(3) });
+    }
     if (scenes.includes('snap')) {
       // breaking on the GPU in the step of the hit (setSnap): a column of two 0.5 m concrete cubes (600 kg) falls
       // 1 m onto the ground (4.4 m/s: about 2.7 kN s to stop it), armed to break between its cubes at 500 N s; a
@@ -840,7 +917,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR', 'NOPINCH', 'PIN_H', 'PIN_V', 'PIN_L', 'PIN_PUSH', 'PIN_RELAX', 'PIN_DBG', 'PIN_NOREST', 'PIN_X', 'PIN_FINE', 'NOSHOCK', 'DT2'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR', 'NOPINCH', 'PIN_H', 'PIN_V', 'PIN_L', 'PIN_PUSH', 'PIN_RELAX', 'PIN_DBG', 'PIN_NOREST', 'PIN_X', 'PIN_FINE', 'NOSHOCK', 'DT2', 'NOSUP', 'HEAPDBG', 'HEAPGRID', 'CREEP_N'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   // the results for docs/STATUS.md (tools/status.py): full runs only (a run of a few scenes is not the state)

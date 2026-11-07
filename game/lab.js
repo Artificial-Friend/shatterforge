@@ -68,7 +68,13 @@ function labInstall() {
   gpu.snapped = (i, j, imp) => {
     const r = snp(i, j, imp);
     const moved = (gpu.bodyShapes.get(j) || []).reduce((t, k) => { const sh = gpu.shapes[k - 1]; return t + (sh ? labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1) : 0); }, 0);
-    if (L.bodyVol.has(i) && moved > 0) { L.bodyVol.set(i, L.bodyVol.get(i) - moved); L.bodyVol.set(j, moved); const gb = gpu.bodies[j - 1]; if (gb) { gb.labVol = moved; gb.labF = L.f; gb.labH = 'spare'; } }
+    if (L.bodyVol.has(i) && moved > 0) {
+      L.bodyVol.set(i, L.bodyVol.get(i) - moved); L.bodyVol.set(j, moved); const gb = gpu.bodies[j - 1]; if (gb) { gb.labVol = moved; gb.labF = L.f; gb.labH = 'spare'; }
+      // (the piece left is another body from here: its mass is less and its centre elsewhere. Compared with the whole
+      // at the last read-back, its centre's jump read as a gain: 7.9 MJ for the 816 m3 upper part at frame 58 of the
+      // lab collapse, 21 MJ at frame 223, at the speed it had)
+      const gi = gpu.bodies[i - 1]; if (gi) { gi.labVol = L.bodyVol.get(i); gi.labCut = L.f; }
+    }
     return r;
   };
   gpu.killBody = (b) => { const v = L.bodyVol.get(b) || 0; L.gpuVol -= v; L.bodyVol.delete(b); return kill(b); };
@@ -159,11 +165,13 @@ function labOnRead(r, pr) {
     if (y < -1) { below++; labEvent('below_ground_body', f, { body: b, y: +y.toFixed(2), size: gb.labH, made_at: gb.labF }); }
     if (gb.labBall) continue;
     const m = (gb.labVol || 0) * 2400, ek = 0.5 * m * (vx * vx + vy * vy + vz * vz), e = ek + m * 9.81 * y;
-    now.set(b, { gb, vy, e, ek, v: [vx, vy, vz] });
+    now.set(b, { gb, vy, e, ek, v: [vx, vy, vz], y, vol: gb.labVol || 0, cut: gb.labCut });
     // the same body as at the last read-back (a reused slot holds another one)
     const was = L.prevBodies && L.prevBodies.get(b);
-    if (!was || was.gb !== gb) continue;
+    // (nor a body cut on the GPU since, or a few frames before: the poses read back lag the step)
+    if (!was || was.gb !== gb || was.cut !== gb.labCut || (gb.labCut !== undefined && f - gb.labCut <= 3)) continue;
     gain += e - was.e; ekPrev += was.ek;
+    if (e - was.e > 1000) (L.gainers = L.gainers || []).push({ body: b, gain_J: Math.round(e - was.e), size: gb.labH, made_at: gb.labF, y: [+was.y.toFixed(2), +y.toFixed(2)], vy: [+was.vy.toFixed(2), +vy.toFixed(2)], vol: +(gb.labVol || 0).toFixed(2), vol_was: +(was.vol || 0).toFixed(2), asleep: r.sleeping ? r.sleeping[b - 1] : null });
     if (quiet) {
       if (was.vy < -2 && vy > 0.5 * -was.vy) { L.bounces++; L.bounceMax = Math.max(L.bounceMax, vy / -was.vy); labEvent('bounce', f, { body: b, vy_before: +was.vy.toFixed(2), vy_after: +vy.toFixed(2), y: +y.toFixed(2), size: gb.labH, made_at: gb.labF, pushed_by_page: gb.labSetV || null }); }
       if (vy > 5 && vy > was.vy + 2) { L.launches++; L.launchMax = Math.max(L.launchMax, vy); labEvent('launch', f, { body: b, vy_before: +was.vy.toFixed(2), vy: +vy.toFixed(2), y: +y.toFixed(2), size: gb.labH, made_at: gb.labF, pushed_by_page: gb.labSetV || null }); }
@@ -176,7 +184,8 @@ function labOnRead(r, pr) {
   // the energy (kinetic + height) of the bodies present at both read-backs can only fall, unless pushed
   // (energy the page gave parts it cut free is allowed for, used up as it shows and fading over ~30 read-backs)
   const given = L.given || 0; L.given = Math.max(0, given - Math.max(0, gain)) * 0.97;
-  if (quiet && L.prevBodies && gain > 0.05 * ekPrev + 2000 + given) { L.energyGains++; L.energyGainMax = Math.max(L.energyGainMax, ekPrev > 0 ? gain / ekPrev : 0); labEvent('energy_gain', f, { gain_J: Math.round(gain), kinetic_before_J: Math.round(ekPrev) }); }
+  if (quiet && L.prevBodies && gain > 0.05 * ekPrev + 2000 + given) { L.energyGains++; L.energyGainMax = Math.max(L.energyGainMax, ekPrev > 0 ? gain / ekPrev : 0); labEvent('energy_gain', f, { gain_J: Math.round(gain), kinetic_before_J: Math.round(ekPrev), most: (L.gainers || []).sort((a, b) => b.gain_J - a.gain_J).slice(0, 3) }); }
+  L.gainers = [];
   L.prevBodies = now;
   // flight recorder: every body at the last 4 read-backs; the first 2 bursts (a launch or a gain over 1 MJ while
   // quiet) keep it, with the impact events of those frames, so a rare burst can be read from any full run
