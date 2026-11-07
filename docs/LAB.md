@@ -42,6 +42,9 @@ At every read-back, against the physics:
 | Launches: pieces thrown up faster than 5 m/s | 0 |
 | Energy gains: the kinetic plus height energy of the bodies present at both read-backs rises by more than 5% (+2 kJ), beyond the energy the page gave parts it cut free (below) | 0 |
 | Roof fall, for cut scenarios | at least one storey |
+| Volume lost, not to the tools: the building's volume less what stands, falls, lies as rubble or particles, and what the player's blasts took (`lost_m3` in the report says by what) | at most 2% (fines) |
+| Body slots freed twice | 0 |
+| For `nibble`: joints cracked before the upper storeys fall (their standing volume down a tenth), seconds from the first failure to that fall, and the share of the upper storeys' volume that came down | at least 50 cracked, 2 s, half |
 
 Also reported: the most rubble lying on the building's floors at once (t, from the weight the page sends the engine each second) and the joints cracked (brick and reinforced concrete crack first and hold; impacts refine bricks, so this counts the new joints too).
 | Settled: everything asleep before the end | yes |
@@ -90,8 +93,9 @@ Each scenario gives:
 | `timber` | mass timber, 3 storeys: ground storey cut (600) |
 | `mixed` | the mixed building (brick, steel, concrete, timber), 5 storeys: ground storey cut (600) |
 | `rubble` | concrete frame, 3 storeys: cut, then a blast into the rubble (720) |
+| `nibble` | the mixed building, 5 storeys: its ground storey eaten away with the 0.7 m tool, shot by shot, as a player does: the west wall, the south and north fronts, the western columns, the east wall, the eastern columns (about 1,650 frames) |
 
-Suites: `quick` (collapse, ball) and `full` (all six).
+Suites: `quick` (collapse, ball) and `full` (all seven).
 
 ## Running it
 
@@ -241,3 +245,42 @@ The building comes down much further: the roof goes from 18.64 to 4.29 m, agains
 - `SF_SEED`
 - `SF_PINCH`
 - `SF_PARK_DBG`: shapes drawn at a parked body, and every change to a body slot (`parked`, `slotLog` in the report)
+
+## Parts vanishing, and the building that floated (7 November)
+
+Reported from the playground (the mixed building, low settings, other devices and settings too): huge parts, even a floor, vanished for good while the building came down; and with more than half the ground storey removed the building stood, until a little more brought it all down at once.
+
+**Vanishing.** The lab compared what is drawn with what exists, and both lost the same parts, so no check saw it. The new check "volume lost, not to the tools" compares with the building's volume instead. On the first runs (240 frames, software GPU) it found:
+
+| Scenario | Lost | Of which by the engine's impacts | By particles crushed |
+| --- | --- | --- | --- |
+| `collapse` | 47.2% of 1,211 m³ | 489 m³ | 84 m³ |
+| `mixed` | 8.5% of 1,542 m³ | 114 m³ | 17 m³ |
+
+The engine removed crushed material beyond its per-impact budgets as dust: the crumbs (64 on low, 384 on high), and the crushed storey a falling part landed on. Engine test `crushed_material_over_the_budget_is_spilled_not_removed`: the 4-storey tower landing on its stumps with 64 crumbs removed 1,964 bricks, a whole storey, in one frame.
+
+Now that material is sent as spill (id −2), and the page makes rubble particles of at most 0.4 m from it, whatever the setting. It is lost only when the 65,536 particles are all in use, and the HUD then says how much. After the fix, on the same runs:
+
+| Scenario | Lost | By the engine's impacts | By particles crushed |
+| --- | --- | --- | --- |
+| `collapse` | 6.1% | 0 | 74 m³ |
+| `mixed` | 1.6% | 0 | 24 m³ |
+| `nibble` (full length) | 1.8% | 0 | 28 m³ |
+
+**Full length** (`tools/check.sh lab`, 600 frames): `collapse` loses 17.4% of its 1,211 m³, all of it from particles crushed (210.6 m³; the engine 0, the cut 78.4 m³ as the tool's). The other checks are as before: 16 rebounds, 11 launches, 12 hole frames, 2 energy gains; the roof falls 10.5 m.
+
+**Open: particles crushed.** What is still lost is rubble particles crushed to fines. Particles do not push bodies (docs/GPU.md, "Particles"), so a body landing on a heap goes through it, and the particles caught between it and the ground are removed. `collapse` fails the 2% limit on this alone (74 m³ in 240 frames).
+
+**Floating.** In the new scenario `nibble`, the mixed building's ground storey is eaten away shot by shot. The engine had nothing between "under strength, unchanged" and "over strength, fails now". Now joints loaded past 70% of their strength wear and give way in time (docs/STRUCTURE.md, "Wear under sustained load"), and steel members have their rolled sections' strength instead of a solid box's.
+
+`nibble`, full length (1,584 frames, software GPU):
+- The first failures come at frame 230.
+- 578 joints wear through and 757 crack before the upper storeys start to fall at frame 730 (8.3 s later).
+- They come down over the next 3 s: 1,293 → 1,203 → 1,012 → 489 m³ standing at frames 600, 700, 800, 900.
+- 66% of the upper storeys' volume comes down, the core stays.
+
+Open in `nibble`, as in the other scenarios:
+- 2 duplicate frames (static meshes updating a frame late);
+- 5 jumps (particles on the upper floors, 1–4 cm over their limit);
+- 3 rebounds;
+- 8 energy gains.

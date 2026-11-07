@@ -191,6 +191,34 @@ Tests:
 | `a_pier_carries_its_load_through_a_fractured_brick` | a 1 m concrete pier under 2,000 kN, its middle block split by each pattern: it stands. On a face at an angle the shear is at most σ / 2, which bounds the ratio | whole 0.070; through the cells at most 0.249 (bound 0.26) |
 | `a_blast_leaves_a_fracture_surface` | a blast in a masonry facade | 16 standing bricks split into 37 cells, every cell joined, hull ids in the output |
 
+## Wear under sustained load (7 November)
+
+A building eaten away bit by bit stood unchanged while every joint was under strength, however close, and then one more cut failed it all at once: it seemed to float, then to be triggered. Concrete and masonry under a sustained load above about 70-75% of their short-term strength fail in time (creep rupture). Now:
+- Each structure check carries the time since the last one (the page's virtual clock in the lab).
+- A joint or a face inside a brick loaded past SUSTAINED (0.7) of its strength wears by `dt × WEAR_RATE × x²`, where x is how far past 0.7 it is (0 at 0.7, 1 at full strength). Worn through, it fails as if over strength: reinforced concrete and brick crack first, the rest part. A crack's wear starts again from zero.
+- A cracked joint is half as stiff, and wear softens it further, to 0.4 of that when worn through. Its load moves to its neighbours, which may then wear in turn.
+- While any joint is wearing, the page checks every 250 ms.
+
+Game time is compressed (real creep rupture takes hours): at 90% a joint wears through in about 1.5 s, at 80% in about 6 s, at 75% in about 24 s.
+
+| Engine test | Result |
+| --- | --- |
+| `a_building_left_near_its_limit_wears_and_comes_down_over_time`, concrete frame, 4 storeys, ground storey cut row by row from the west until the worst joint is past 0.75 (the row at x = −4.4 m cracks 125 joints, which hold; worst 1.00) | without wear: 0 failures in 40 checks, standing for ever; with wear (checks 0.5 s apart): failures in checks 2, 3, 5, 6, 24, 32 … 74, 141 joints, 82 cracked |
+
+Deflection stays small in the linear solve: the largest displacement in that test is 10.5 mm before and 11.4 mm after the wear. The sag is not drawn; the cracks are, as before.
+
+## Steel as rolled sections (7 November)
+
+A steel member was its solid box: a 0.25 m column or beam had 625 cm² of steel, 6 times a 254 × 146 universal beam's 47 cm², and as much more strength, stiffness and weight. A steel member now has the section's share of the box (`STEEL_AREA` 0.16 of area and weight, `STEEL_SHEAR` 0.10, `STEEL_FLEX` 0.12 of the plastic modulus, `STEEL_STIFF` 0.17 of the second moment). The mixed building's intact worst joint goes from 0.58 to 0.56, and all the engine tests pass unchanged.
+
+Exploring (`explore_the_mixed_building_cut_away`, ignored by default) what the mixed building stands on once its ground storey is cut all at once:
+
+| Cut | Failures | Bricks fell | Worst joint left | Left beyond the core, above the ground storey |
+| --- | --- | --- | --- | --- |
+| all but the core | 4,038 | 2,634 | 0.70 | 84 t |
+| the west half | 927 | 1,878 | 0.17 | nothing |
+| the perimeter walls | 3,638 | 2,534 | 0.74 | 73 t |
+
 ## Known limits
 
 - **Solve time.** In the lab (collapse, 150 frames, software GPU, `engine_ms`), engine jobs in the page took 4–8 ms median, 50–370 ms at p95 and up to 810 ms. The load flow answered in a few ms. The building's check stays asynchronous; breaking of falling pieces now starts on the GPU (docs/GPU.md).

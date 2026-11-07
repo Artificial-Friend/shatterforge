@@ -5,6 +5,9 @@
 // after they were sent, as on a real machine. What would be drawn is checked every frame; the physics at every
 // read-back. The result is a report of checks (pass/fail with limits), events and a time series.
 function labTruthStatic() { let v = 0; for (let k = 0; k < E.chunk_count(); k++) v += E.chunk_volume(k); return v; }
+// the standing volume above the ground storey (m^3; a building with a core keeps its roof height over the core
+// while everything around it comes down)
+function labUpper() { let v = 0; for (let k = 1; k < E.chunk_count(); k++) v += E.chunk_volume(k); return v; }
 function labBoxVol(h) { return 8 * h[0] * h[1] * h[2]; }
 function labInstall() {
   // the volume of everything the GPU holds, kept as it changes (the ball is not part of the building)
@@ -65,7 +68,7 @@ function labInstall() {
   };
   gpu.killBody = (b) => { const v = L.bodyVol.get(b) || 0; L.gpuVol -= v; L.bodyVol.delete(b); return kill(b); };
   gpu.addParticles = (list) => { const s = addP(list); L.pendingParts = (L.pendingParts || []).concat(s); return s; };
-  gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); return killP(i); };
+  gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); L.lostParticles = (L.lostParticles || 0) + v; return killP(i); };
 }
 // (particle volumes are known once the page has their brick sizes: after addPieces)
 function labParticlesMade() {
@@ -201,8 +204,10 @@ async function labAct(act, a) {
     physicsPaused = true;
     for (let x = -10; x <= 10.1; x += 4) for (let z = -10; z <= 10.1; z += 4) jobs.blast.push({ op: 'blast', x, y: 1.8, z, r: 2.5, ctx: { d: [0, 0, 1], t0: clock() } });
     pump();
+    const T0 = L.T;
     while (L.jobq.length) { const j = L.jobq.shift(); finish(runInline(j.job)); labParticlesMade(); }
     L.staticT = labTruthStatic(); labTruth();
+    L.lostBy.tool = (L.lostBy.tool || 0) + Math.max(0, T0 - L.T);
     physicsPaused = false; lastActive = clock();
   } else if (act === 'ball') {
     const [x, y, z, yw, pt] = a, d = [Math.sin(yw) * Math.cos(pt), Math.sin(pt), Math.cos(yw) * Math.cos(pt)];
@@ -231,7 +236,22 @@ function labReport(wallS) {
     ['rebounds over half the impact speed (while quiet)', L.bounces, 0, 'unnatural bouncing'],
     ['pieces thrown up faster than 5 m/s (while quiet)', L.launches, 0, 'launches'],
     ['energy gains over 5% (while quiet)', L.energyGains, 0, 'energy made from nothing'],
+    // what the tools did not take out must stay in the world: standing, falling, as rubble or particles. Dust (fines
+    // removed) is real but small; a whole floor gone as dust is a floor that vanished (7 November: 57% in collapse)
+    ['volume lost, not to the tools (% of the building)', +(100 * (L.V0 - L.T - (L.lostBy.tool || 0)) / L.V0).toFixed(1), 2, 'parts vanishing'],
   ].map(([name, value, limit, what]) => ({ name, value, limit, pass: value <= limit, what }));
+  if (S.expect && S.expect.gradual) {
+    // a building eaten away fails progressively: joints crack (and wear through) before the upper storeys come
+    // down, over seconds; not all at once at one more cut, after standing unchanged
+    const up0 = (se[0] || {}).upper || 0, fall = se.find(x => x.upper < 0.9 * up0), first = se.find(x => x.failed > 0);
+    const before = fall ? (se.filter(x => x.f < fall.f).pop() || { cracked: 0, worn: 0 }) : last;
+    const warn = first ? ((fall ? fall.f : last.f) - first.f) / 60 : 0;
+    checks.push({ name: 'joints cracked before the upper storeys fall', value: before.cracked || 0, limit: '>= 50', pass: (before.cracked || 0) >= 50, what: 'cracks before the collapse' });
+    checks.push({ name: 'seconds from the first failure to the fall', value: +warn.toFixed(1), limit: '>= 2', pass: warn >= 2, what: 'a gradual failure, not a trigger' });
+    const lost = up0 > 0 ? 1 - (last.upper || 0) / up0 : 0;
+    checks.push({ name: 'upper storeys come down (share of their volume)', value: +lost.toFixed(2), limit: `>= ${S.expect.upperLoss}`, pass: lost >= S.expect.upperLoss, what: 'eaten away, it does not stand for ever' });
+    L.gradual = { fall_f: fall ? fall.f : null, first_failure_f: first ? first.f : null, worn_before: before.worn || 0, worn_total: last.worn || 0 };
+  }
   if (S.expect && S.expect.roofDrop) checks.push({ name: 'roof fall (m)', value: +(roof0 - (last.roof || 0)).toFixed(2), limit: `>= ${S.expect.roofDrop}`, pass: roof0 - (last.roof || 0) >= S.expect.roofDrop, what: 'the cut storey brings the building down' });
   if (S.expect && S.expect.settle) checks.push({ name: 'settled (s)', value: L.settledAt == null ? 'no' : +(L.settledAt / 60).toFixed(1), limit: `by ${(S.frames / 60).toFixed(0)}`, pass: L.settledAt != null, what: 'everything asleep before the end' });
   const gpuMs = se.map(x => x.gpu), jsMs = L.jsMs;
@@ -239,7 +259,7 @@ function labReport(wallS) {
     scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: ['concrete frame', 'masonry', 'mass timber', 'mixed'][S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
     pass: checks.every(c => c.pass), checks, colConflicts: L.colConflicts || 0, colConflictAt: L.colConflictAt || null, digest: L.digest, dumpRaw: L.dumpRaw ? { ...L.dumpRaw, colRows: L.colRows, allRows: L.allRows } : (L.colRows ? { colRows: L.colRows, allRows: L.allRows } : null),
-    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps },
+    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), lost_m3: Object.fromEntries(Object.entries({ ...L.lostBy, particles_crushed: L.lostParticles || 0, building: L.V0 }).map(([k, v]) => [k, +v.toFixed(1)])), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps, gradual: L.gradual || undefined },
     perf: {
       wall_s: +wallS.toFixed(1), steps: stepsDone, steps_skipped: gpu.skipped || 0,
       gpu_ms: { median: +med(gpuMs).toFixed(2), p95: +p95(gpuMs).toFixed(2), max: +Math.max(0, ...gpuMs).toFixed(2) },
@@ -257,7 +277,7 @@ function labSummary(rep) {
   const lines = [`${rep.pass ? 'PASS' : 'FAIL'} ${rep.scenario}: ${rep.title}`];
   for (const c of rep.checks) lines.push(`  ${c.pass ? 'ok  ' : 'FAIL'} ${c.name}: ${c.value} (limit ${c.limit})${!c.pass && rep.events ? '' : ''}`);
   const p = rep.physics, q = rep.perf;
-  lines.push(`  physics: roof ${p.roof_m[0]} -> ${p.roof_m[1]} m · dust ${(p.dust_of_building * 100).toFixed(1)}% · breaks ${p.breaks} · crushed ${p.bodies_crushed} · particles ${p.particles_made} (${p.particles_crushed} crushed) · settled ${p.settled_s ?? 'no'} s · energy given to parts cut free ${((p.energy_given_by_cuts_J || 0) / 1e6).toFixed(2)} MJ · rubble on floors up to ${p.rubble_on_floors_max_t} t · ${p.joints_cracked} joints cracked · ${p.gpu_breaks} broken on the GPU`);
+  lines.push(`  physics: roof ${p.roof_m[0]} -> ${p.roof_m[1]} m · dust ${(p.dust_of_building * 100).toFixed(1)}% (m³ ${JSON.stringify(p.lost_m3)}) · breaks ${p.breaks} · crushed ${p.bodies_crushed} · particles ${p.particles_made} (${p.particles_crushed} crushed) · settled ${p.settled_s ?? 'no'} s · energy given to parts cut free ${((p.energy_given_by_cuts_J || 0) / 1e6).toFixed(2)} MJ · rubble on floors up to ${p.rubble_on_floors_max_t} t · ${p.joints_cracked} joints cracked · ${p.gpu_breaks} broken on the GPU`);
   lines.push(`  perf: ${q.steps} steps (${q.steps_skipped} skipped) in ${q.wall_s} s · GPU ms median ${q.gpu_ms.median} / p95 ${q.gpu_ms.p95} / max ${q.gpu_ms.max} · JS ms median ${q.js_ms.median} / p95 ${q.js_ms.p95} · engine jobs ${q.engine_ms.jobs}, ms median ${q.engine_ms.median} / p95 ${q.engine_ms.p95} / max ${q.engine_ms.max} · peak awake ${q.peak.awake}, contacts ${q.peak.contacts}, particles ${q.peak.particles}`);
   if (q.gpu_stages_ms_at_peak) lines.push(`  GPU stages at the slowest step (ms): ${Object.entries(q.gpu_stages_ms_at_peak).map(([k, v]) => `${k} ${v}`).join(' · ')}`);
   for (const [k, e] of Object.entries(rep.events)) lines.push(`  events ${k}: ${e.n} · first ${JSON.stringify(e.first.slice(0, 3))}`);
@@ -298,7 +318,7 @@ async function labRun() {
   $('start').hidden = true; physicsPaused = false;
   $('bench').hidden = false; $('bench-title').textContent = `Lab: ${name} (${st.done.length + 1} of ${st.done.length + st.queue.length})`;
   labInstall();
-  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
+  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.lostBy = {}; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
   try { const info = dev.adapterInfo || (dev.adapter && dev.adapter.info); L.adapter = info ? `${info.vendor} ${info.architecture} ${info.description || ''}`.trim() : ''; } catch (e) {}
   const tw = performance.now();
   let lastShow = 0;
@@ -307,8 +327,10 @@ async function labRun() {
     for (const [fr, act, args] of S.script) if (fr === L.f) await labAct(act, args);
     // engine jobs that are due (the worker's time)
     while (L.jobq.length && L.jobq[0].due <= L.f) {
-      const j = L.jobq.shift(), nb0 = gpu.n, b0 = breaks, r = runInline(j.job);
+      const j = L.jobq.shift(), nb0 = gpu.n, b0 = breaks, T0 = L.T, r = runInline(j.job);
       finish(r); labParticlesMade(); L.staticT = labTruthStatic(); labTruth();
+      // (volume each kind of job took out of the world: a blast is the player's tool; the rest is lost)
+      { const lost = T0 - L.T; if (Math.abs(lost) > 1e-6) { const k = (j.job.op === 'blast' || j.job.op === 'pblast') ? 'tool' : j.job.op; L.lostBy[k] = (L.lostBy[k] || 0) + lost; } }   // (signed: a job can add what another takes away)
       // what the engine did, frame by frame (to explain an event)
       if (L.timeline.length < 400) L.timeline.push({ f: L.f, op: j.job.op, n: r.n, sent: j.due - L.jobLag, new_bodies: gpu.n - nb0, breaks: breaks - b0, static_updates: r.out && r.out.length ? r.out[0] : 0 });
     }
@@ -377,7 +399,7 @@ async function labRun() {
       for (let x = -9; x <= 9; x += 3) for (let z = -9; z <= 9; z += 3) { const ts = E.raycast(x + 0.3, 200, z + 0.3, 0, -1, 0, 300); if (ts >= 0) roof = Math.max(roof, 200 - ts); }
       if (snapCur) for (let k = 0; k < snapCur.pose.length / 10; k++) { const y = snapCur.pose[k * 10 + 1] + snapCur.pose[k * 10 + 8]; if (Number.isFinite(y) && Math.abs(snapCur.pose[k * 10]) < 12 && Math.abs(snapCur.pose[k * 10 + 2]) < 12) roof = Math.max(roof, y); }
       L.roofMin = Math.min(L.roofMin ?? 1e9, L.f > 10 ? roof : 1e9);
-      L.series.push({ f: L.f, D: +L.D.toFixed(2), T: +L.T.toFixed(2), drawn: L.draw.n, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, parts: gpu.stats.pLive || 0, pAwake: gpu.stats.pActive || 0, sub: gpu.substeps, gpu: +g.toFixed(2), js: +L.jsMs[L.jsMs.length - 1].toFixed(2), roof: +roof.toFixed(2), breaks, dust: dustBricks });
+      L.series.push({ f: L.f, D: +L.D.toFixed(2), T: +L.T.toFixed(2), drawn: L.draw.n, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, parts: gpu.stats.pLive || 0, pAwake: gpu.stats.pActive || 0, sub: gpu.substeps, gpu: +g.toFixed(2), js: +L.jsMs[L.jsMs.length - 1].toFixed(2), roof: +roof.toFixed(2), upper: +labUpper().toFixed(1), breaks, dust: dustBricks, failed: failedJoints, cracked: crackedJoints, worn: wornJoints, wearing: structWearing });
     }
     if (performance.now() - lastShow > 1000) { lastShow = performance.now(); $('bench-out').textContent = `Lab: ${name} · frame ${L.f} of ${S.frames} · ${((performance.now() - tw) / 1000).toFixed(0)} s\nholes ${L.holeFrames} · duplicates ${L.dupFrames} · flickers ${L.flickers} · jumps ${L.teleports} · bounces ${L.bounces} · launches ${L.launches}`; L.status = { f: L.f, frames: S.frames }; }
   }

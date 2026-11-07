@@ -60,7 +60,7 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
         let mut j = b.jhead[i as usize];
         while j != NONE {
             let ju = j as usize;
-            if b.jdmg[ju] > 0 {
+            if b.jdmg[ju] & 1 != 0 {
                 let a = b.jaxis[ju] as usize;
                 let o = b.tbox(b.joint_other(j, i));
                 let mut ov = TBox { min: [0; 3], max: [0; 3] };

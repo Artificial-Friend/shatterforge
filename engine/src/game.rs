@@ -61,6 +61,22 @@ pub struct Game {
     pub crumb_keep: usize,
     pub rubble_keep: usize,
     pub crush_depth: f32,
+    /// crushed material beyond the budgets: with `spill` on it is sent as spill (id -2: the page makes rubble
+    /// particles of it), not removed as dust. Removed, it was whole floors vanishing: in the lab collapse, 489 m3
+    /// of a 1,211 m3 building in 240 frames.
+    pub spill_on: bool,
+    spill: Vec<u32>,
+    /// time since the last structure check (s): joints loaded near their strength wear for that long (see
+    /// `wear_joints`); 0 = no wear (the tests' checks)
+    pub struct_dt: f32,
+    /// joints wearing at the last check (loaded above SUSTAINED of their strength)
+    pub wearing: usize,
+    /// joints and faces that gave way by wear so far
+    pub worn_total: usize,
+    /// wear of faces inside bricks (brick, axis, plane), and of joints (the joint's `jdmg` keeps a coarse copy for
+    /// its stiffness: in 1/127 steps alone, a check's wear at 75% of strength, 0.0035, rounded to nothing)
+    inner_wear: crate::Map<(u32, u8, i32), f32>,
+    joint_wear: crate::Map<u32, f32>,
     /// standing bricks split into convex cells so far, and at most how many (each cell is a shape on the GPU:
     /// the cut of the lab's collapse marks thousands of bricks, and as cells they ran the GPU out of shapes)
     pub frac_made: usize,
@@ -85,6 +101,9 @@ pub const FRAC_MAX: usize = 1500;
 /// impacts call stay as bodies
 const RUBBLE_MIN: usize = 48;
 const RUBBLE_KEEP: usize = 64;
+/// load (share of strength) above which a joint wears, and how fast (per second at full strength); see wear_joints
+const SUSTAINED: f32 = 0.7;
+const WEAR_RATE: f32 = 1.5;
 /// crumbs kept as bodies per impacts call (the rest of the crushed material goes as dust)
 const CRUMB_KEEP: usize = 256;
 /// how deep a section that gives way is crushed before what is beyond it moves freely (m)
@@ -99,7 +118,7 @@ impl Game {
         let b = tower::build_kind(storeys, 1, kind);
         let n = (storeys + 2) as usize;
         let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
+                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, wearing: 0, worn_total: 0, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
         for k in 0..n as i32 { g.remesh(k); }
         g
     }
@@ -250,6 +269,16 @@ impl Game {
     }
 
     /// Write the static change log (from the store's log) and the new bodies; remesh what changed.
+    /// Keep an even sample of `v` within `keep`; the rest is returned as spill (with `spill_on`) or counted as dust.
+    fn shed(&mut self, v: &mut Vec<u32>, keep: usize) -> Vec<u32> {
+        if v.len() <= keep { return Vec::new(); }
+        let n = v.len();
+        let pick: Vec<bool> = { let mut p = vec![false; n]; for k in 0..keep { p[k * n / keep.max(1)] = true; } p };
+        let (mut kept, mut rest) = (Vec::with_capacity(keep), Vec::new());
+        for (k, &i) in v.iter().enumerate() { if pick[k] && keep > 0 { kept.push(i) } else { rest.push(i) } }
+        *v = kept;
+        if self.spill_on { rest } else { self.dust += rest.len(); Vec::new() }
+    }
     fn emit(&mut self, crumbs: &[u32], pieces: &[u32]) {
         let mut out = Vec::new();
         let mut log = core::mem::take(&mut self.b.log);
@@ -265,8 +294,10 @@ impl Game {
             out.extend_from_slice(&[i as f32, if alive { 1.0 } else { 0.0 }]);
             Self::push_box(&mut out, &self.b, i);
         }
-        out.push((crumbs.len() + pieces.len()) as f32);
+        let spill = core::mem::take(&mut self.spill);
+        out.push((crumbs.len() + spill.len() + pieces.len()) as f32);
         for &i in crumbs { out.extend_from_slice(&[-1.0, 1.0]); Self::push_box(&mut out, &self.b, i); }
+        for &i in &spill { out.extend_from_slice(&[-2.0, 1.0]); Self::push_box(&mut out, &self.b, i); }
         for &p in pieces {
             out.push(p as f32); out.push(self.pieces[p as usize].len() as f32);
             for k in 0..self.pieces[p as usize].len() { let i = self.pieces[p as usize][k]; Self::push_box(&mut out, &self.b, i); }
@@ -346,14 +377,57 @@ impl Game {
         // (the worst ratio with rubble on the floors: since the spring network, the building's worst)
         self.panel_ratio = a.max_ratio;
         self.max_ratio = a.max_ratio;
+        let mut a = a;
+        self.wear_joints(&mut a);
         let work = self.apply_failures(&a, max_fail);
         self.failed_total += work.len();
         let mut crumbs = self.shatter_pending();
         let keep = self.crumb_keep;
-        if crumbs.len() > keep { let n = crumbs.len(); let kept: Vec<u32> = (0..keep).map(|k| crumbs[k * n / keep]).collect(); self.dust += n - keep; crumbs = kept; }
+        let sp = self.shed(&mut crumbs, keep); self.spill.extend(sp);
         let pieces = if work.is_empty() { Vec::new() } else { self.detach() };
         self.emit(&crumbs, &pieces);
         work.len()
+    }
+
+    /// Joints carrying more than SUSTAINED of their strength wear: concrete and masonry under a sustained load
+    /// above about 70-75% of their short-term strength fail in time (creep rupture). Wear grows with the time since
+    /// the last check and with the square of how far the load is past SUSTAINED; a joint worn through fails as if
+    /// over strength (cracks first where it would), its wear starts again from zero, and a worn joint is softer
+    /// (see `structure::spring`), so its load moves to its neighbours. Game time is compressed (real creep rupture
+    /// takes hours): at 90% a joint wears through in about 1.5 s, at 80% in about 6 s, at 75% in about 24 s
+    /// (WEAR_RATE). At 0.5 it was 4.5 / 18 / 72 s, and the lab's nibble scenario, its ground storey eaten to the
+    /// core, wore through 2 joints. A building left near its limit then cracks and comes down progressively instead
+    /// of standing unchanged until one more cut fails it all at once.
+    fn wear_joints(&mut self, a: &mut structure::Analysis) {
+        self.wearing = 0;
+        if self.struct_dt <= 0.0 { return; }
+        let dt = self.struct_dt.min(1.0);
+        let failing: crate::Set<u32> = a.failed.iter().map(|&(j, _)| j).collect();
+        for &(j, r) in &a.ratios {
+            if r < SUSTAINED || r >= 1.0 || failing.contains(&j) { continue; }
+            let ju = j as usize;
+            if ju >= self.b.jdmg.len() || self.b.ja[ju] == NONE { continue; }
+            self.wearing += 1;
+            let x = (r - SUSTAINED) / (1.0 - SUSTAINED);
+            let d = self.b.jdmg[ju];
+            let wear = self.joint_wear.get(&j).copied().unwrap_or(0.0) + dt * WEAR_RATE * x * x;
+            if wear >= 1.0 { self.b.jdmg[ju] = d & 1; self.joint_wear.remove(&j); a.failed.push((j, 1.0)); self.worn_total += 1; }
+            else { self.joint_wear.insert(j, wear); self.b.jdmg[ju] = (d & 1) | (((wear * 127.0) as u8).min(127) << 1); }
+        }
+        // (wear stays with a joint while it lasts: damage does not heal when the load moves away)
+        let b = &self.b; self.joint_wear.retain(|&j, _| (j as usize) < b.ja.len() && b.ja[j as usize] != NONE);
+        // faces inside bricks (a slab's own section, a column's): worn through, they crack there
+        let mut keep: crate::Map<(u32, u8, i32), f32> = Default::default();
+        for &(i, ax, at, r) in &a.inner {
+            if r < SUSTAINED { continue; }
+            self.wearing += 1;
+            let x = (r - SUSTAINED) / (1.0 - SUSTAINED);
+            let key = (i, ax as u8, at);
+            let w = self.inner_wear.get(&key).copied().unwrap_or(0.0) + dt * WEAR_RATE * x * x;
+            if w >= 1.0 { a.cracks.push(structure::Crack { brick: i, axis: ax, at, ratio: 1.0 }); self.worn_total += 1; } else { keep.insert(key, w); }
+        }
+        // (a face no longer loaded so far forgets its wear: the check sees the load as it is now)
+        self.inner_wear = keep;
     }
 
     /// Apply the worst `max` failures of an analysis: failed joints are removed, cracked bricks are split at
@@ -384,7 +458,7 @@ impl Game {
                 while jj != NONE {
                     if self.b.joint_other(jj, n) == c.brick {
                         // reinforced concrete cracks but the steel holds the two halves: the joint stays, cracked
-                        if reinf { self.b.jdmg[jj as usize] = self.b.jdmg[jj as usize].max(1); self.cracked_total += 1; } else { self.b.fracture_joint(jj); }
+                        if reinf { self.b.jdmg[jj as usize] = 1; self.cracked_total += 1; } else { self.b.fracture_joint(jj); }
                         break;
                     }
                     jj = self.b.joint_next(jj, n);
@@ -398,7 +472,7 @@ impl Game {
                 // brick laid in mortar (to brick, or bedded on a slab or a lintel): the mortar cracks first (the joint
                 // still bears, without tension), then parts
                 let masonry = standing && (self.b.mat[x as usize] == crate::brick::mat::MASONRY || self.b.mat[y as usize] == crate::brick::mat::MASONRY);
-                if (reinf || masonry) && self.b.jdmg[j as usize] == 0 { self.b.jdmg[j as usize] = 1; self.b.log.push(x); self.b.log.push(y); self.cracked_total += 1; done.push(j); continue; }
+                if (reinf || masonry) && self.b.jdmg[j as usize] & 1 == 0 { self.b.jdmg[j as usize] = 1; self.b.log.push(x); self.b.log.push(y); self.cracked_total += 1; done.push(j); continue; }
                 self.b.fracture_joint(j);
                 self.b.log.push(x); self.b.log.push(y);
                 done.push(j);
@@ -535,8 +609,7 @@ impl Game {
         }
         scrumbs.sort_unstable(); scrumbs.dedup();
         // crumb budget: beyond it, crushed material goes as dust (an even sample of the crumbs stays)
-        let thin = |v: &mut Vec<u32>, keep: usize, dust: &mut usize| { if v.len() > keep { let n = v.len(); let kept: Vec<u32> = (0..keep).map(|k| v[k * n / keep]).collect(); *dust += n - keep; *v = kept; } };
-        thin(&mut scrumbs, self.crumb_keep / 2, &mut self.dust);
+        { let keep = self.crumb_keep / 2; let sp = self.shed(&mut scrumbs, keep); self.spill.extend(sp); }
         // what is left of the budgets for the falling pieces (shared by all of this call's pieces)
         let mut crumb_room = self.crumb_keep - scrumbs.len().min(self.crumb_keep);
         let mut rubble_room = self.rubble_keep;
@@ -578,7 +651,7 @@ impl Game {
             }
             // the fracture surfaces: cells, and what spalls off them falls as crumbs (within the budget left)
             let mut sp = self.shatter_pending();
-            thin(&mut sp, crumb_room, &mut self.dust);
+            { let more = self.shed(&mut sp, crumb_room); self.spill.extend(more); }
             crumb_room -= sp.len();
             scrumbs.extend(sp);
             spieces = self.detach();
@@ -612,7 +685,7 @@ impl Game {
                 }
             }
             for &i in &crumbs { self.b.flags[i as usize] &= !F_DYNAMIC; self.b.remove(i); self.b.flags[i as usize] |= F_DYNAMIC; }
-            { let keep = crumb_room; if crumbs.len() > keep { let n = crumbs.len(); let kept: Vec<u32> = (0..keep).map(|k| crumbs[k * n / keep.max(1)]).collect(); self.dust += n - keep; crumbs = kept; } crumb_room -= crumbs.len(); }
+            let mut fspill = self.shed(&mut crumbs, crumb_room); crumb_room -= crumbs.len();
             // crush-down: the weakest section within a storey of the contacts carries at most its crushing
             // force; when stopping the piece takes more, that section gives way and everything beyond it is cut free
             let mut cracked = 0;
@@ -685,7 +758,7 @@ impl Game {
                     for i in before..self.b.len() { set.push(i as u32); }
                 }
             }
-            if crumbs.is_empty() && cracked == 0 { self.pieces[pid] = set; continue; }
+            if crumbs.is_empty() && fspill.is_empty() && cracked == 0 { self.pieces[pid] = set; continue; }
             self.caps.push(cap_used);
             let mut kids: Vec<(i32, bool, Vec<u32>)> = crumbs.iter().map(|&i| (-1, true, vec![i])).collect();
             sever_infill(&mut self.b, &set);
@@ -697,7 +770,7 @@ impl Game {
                 if g.len() >= RUBBLE_MIN { return true; }
                 if rubble_room > 0 { rubble_room -= 1; return true; }
                 for &i in g { self.b.flags[i as usize] &= !F_DYNAMIC; self.b.remove(i); self.b.flags[i as usize] |= F_DYNAMIC; }
-                self.dust += g.len();
+                if self.spill_on { fspill.extend_from_slice(g); } else { self.dust += g.len(); }
                 false
             });
             for g in groups {
@@ -720,10 +793,11 @@ impl Game {
                 crumb_room -= keep;
                 for (k, &i) in rubble.iter().enumerate() {
                     self.b.flags[i as usize] &= !F_DYNAMIC; self.b.remove(i); self.b.flags[i as usize] |= F_DYNAMIC;
-                    if k < keep { kids.push((-1, true, vec![i])); } else { self.dust += 1; }
+                    if k < keep { kids.push((-1, true, vec![i])); } else if self.spill_on { fspill.push(i); } else { self.dust += 1; }
                 }
                 rubble.clear();
             }
+            for &i in &fspill { kids.push((-2, true, vec![i])); }
             broken.push((pid as u32, kids));
         }
         self.out.push(broken.len() as f32);
@@ -1013,6 +1087,96 @@ mod tests {
         }
         std::println!("after cutting the perimeter: {} joints failed in {rounds} rounds, biggest falling piece {biggest} bricks, worst ratio now {:.2}", g.failed_total, g.max_ratio);
         assert!(biggest > 300, "the floors above come down");
+    }
+    #[test] fn a_building_left_near_its_limit_wears_and_comes_down_over_time() {
+        // the ground storey taken away row by row (0.7 m blasts at 1.6 m, from one side) until the worst joint is
+        // past SUSTAINED but under strength, as a player nibbling at it. Without wear (dt 0) it then stands for
+        // ever, unchanged: the "floating" building. With wear (0.5 s between checks) its joints crack over the
+        // following seconds, round after round, before it comes down.
+        let prep = |kind: u8| -> Option<Game> {
+            let mut g = Game::new_kind(4, kind);
+            assert_eq!(g.structure_step(64), 0);
+            let mut x = -11.6f32;
+            while x <= 11.7 {
+                let mut z = -11.6f32; while z <= 11.7 { g.blast(v3(x, 1.6, z), 0.7); z += 0.8; }
+                let mut n = 1; let mut k = 0; while n > 0 && k < 200 { n = g.structure_step(64); k += 1; }
+                if g.failed_total > 400 { return None; }
+                if g.max_ratio >= SUSTAINED + 0.05 { return Some(g); }
+                x += 0.8;
+            }
+            None
+        };
+        // (the concrete frame: its worst joint goes 0.35 -> 0.58 as the rows go, then the row at x = -4.4 cracks 125
+        // joints, which hold at their residual strength, worst 1.00. The mixed building's brick walls give way at
+        // the first row, 3,751 joints: it is nibbled at in the lab instead, scenario nibble.)
+        for kind in [0u8] {
+            let mut still = prep(kind).expect("reaches the wear band");
+            let r0 = still.max_ratio;
+            let mut n0 = 0; for _ in 0..40 { n0 += still.structure_step(64); }
+            let mut g = prep(kind).unwrap();
+            g.struct_dt = 0.5;
+            let mut rounds_with = Vec::new();
+            for step in 0..240 { let n = g.structure_step(64); if n > 0 { rounds_with.push(step); if rounds_with.len() % 3 == 1 { std::println!("  check {step}: {} failed, worst {:.2}, largest displacement {:.1} mm", g.failed_total, g.max_ratio, g.warm.max_disp() * 1e3); } } if g.failed_total > 2000 { break; } }
+            std::println!("kind {kind}: worst {r0:.2} after the cuts (largest displacement {:.1} mm); without wear {n0} failures in 40 checks; with wear failures in checks {:?} ({} joints, {} cracked, largest displacement {:.1} mm)", still.warm.max_disp() * 1e3, &rounds_with[..rounds_with.len().min(30)], g.failed_total, g.cracked_total, g.warm.max_disp() * 1e3);
+            assert_eq!(n0, 0, "kind {kind}: without wear nothing changes");
+            assert!(!rounds_with.is_empty(), "kind {kind}: with wear its joints give way in time");
+            assert!(rounds_with[0] >= 2, "kind {kind}: not at once");
+            assert!(rounds_with.len() >= 4, "kind {kind}: in several rounds, not one");
+        }
+    }
+    #[test] #[ignore] fn explore_the_mixed_building_cut_away() {
+        // (exploring: how much of the mixed building's ground storey can go before it comes down)
+        for (name, cut) in [("all but the core", (|x: f32, z: f32| !(x.abs() < 4.4 && z.abs() < 4.4)) as fn(f32, f32) -> bool),
+                            ("west half", |x, _z| x < 0.0), ("the perimeter walls", |x, z| x.abs() > 10.0 || z.abs() > 10.0)] {
+            let mut g = Game::new_kind(5, 3);
+            assert_eq!(g.structure_step(64), 0);
+            let r0 = g.max_ratio;
+            let mut x = -11.6f32;
+            while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 { if cut(x, z) { g.blast(v3(x, 1.6, z), 0.7); } z += 0.8; } x += 0.8; }
+            let mut rounds = 0; let mut biggest = 0; let mut fell = 0usize;
+            while rounds < 300 { let n = g.structure_step(64); for (id, sz) in bodies_in(&g.out) { if id >= 0 { biggest = biggest.max(sz); fell += sz; } } rounds += 1; if n == 0 { break; } }
+            std::println!("mixed, {name}: intact worst {r0:.2}; after the cut {} failed, {} cracked in {rounds} rounds, worst now {:.2}, biggest falling piece {biggest} bricks, {fell} bricks fell", g.failed_total, g.cracked_total, g.max_ratio);
+            // then left standing, checked every 0.25 s with wear, for 60 s
+            g.struct_dt = 0.25; let mut fell2 = 0usize; let mut when = Vec::new();
+            for step in 0..240 { let n = g.structure_step(64); let mut f = 0; for (id, sz) in bodies_in(&g.out) { if id >= 0 { f += sz; } } if n > 0 { when.push((step, n, f)); } fell2 += f; }
+            std::println!("   then with wear: {} worn, {} bricks fell, {} wearing at the end, worst {:.2}; checks with failures (check, failures, bricks fell): {:?}", g.worn_total, fell2, g.wearing, g.max_ratio, &when[..when.len().min(25)]);
+            // what still stands away from the core, above the ground storey, by material
+            let mut by = [0usize; 8]; let mut mass = 0.0f32;
+            for i in 0..g.b.len() as u32 { if g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) != F_ALIVE { continue; } let c = centre(&g.b, i);
+                if (c[0].abs() > 6.0 / TICK || c[2].abs() > 6.0 / TICK) && c[1] > 4.0 / TICK { by[g.b.mat[i as usize] as usize] += 1; mass += structure::mass(&g.b, i); } }
+            std::println!("   standing beyond the core above the ground storey: bricks by material {:?}, {:.0} t", by, mass / 1000.0);
+        }
+    }
+    #[test] fn crushed_material_over_the_budget_is_spilled_not_removed() {
+        // the tower's ground storey cut, the tower landing on its stumps at 5.2 m/s (as the test above), with the low
+        // preset's budget of 64 crumbs: the crushed storey beyond it was removed as dust, whole floors vanishing
+        // (lab collapse: 489 of 1,211 m3 in 240 frames). With spill on, it comes out as spill (id -2) instead.
+        let run = |spill: bool| -> (usize, usize, usize) {
+            let mut g = Game::new(4);
+            g.crumb_keep = 64; g.spill_on = spill;
+            let mut x = -11.6f32; let mut piece = -1i32;
+            while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 { g.blast(v3(x, 1.6, z), 0.7); for (id, sz) in bodies_in(&g.out) { if id >= 0 && sz > 100 { piece = id; } } z += 0.8; } x += 0.8; }
+            assert!(piece >= 0);
+            let dust0 = g.dust;
+            let m: f32 = g.pieces[piece as usize].iter().map(|&i| structure::mass(&g.b, i)).sum();
+            let low = g.pieces[piece as usize].iter().map(|&i| g.b.y[i as usize] as i32).min().unwrap();
+            let tops: std::vec::Vec<u32> = (0..g.b.len() as u32).filter(|&i| g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && { let t = g.b.tbox(i); t.max[1] >= 5 && t.max[1] <= low && g.b.flags[i as usize] & crate::brick::F_INFILL == 0 }).collect();
+            let v = 5.2; let j = m * v / tops.len() as f32;
+            for &i in &tops { let t = g.b.tbox(i); let p = [(t.min[0] + t.max[0]) as f32 * 0.5 * TICK, t.max[1] as f32 * TICK, (t.min[2] + t.max[2]) as f32 * 0.5 * TICK]; let fall = (low - t.max[1]) as f32 * TICK;
+                g.inp.extend_from_slice(&[-1.0, p[0], p[1], p[2], 0.0, -1.0, 0.0, j, v, 0.0, 0.0]); g.inp.extend_from_slice(&[piece as f32, p[0], p[1] + fall, p[2], 0.0, 1.0, 0.0, j, v, 0.0, 0.0]); }
+            g.impacts(1.0 / 60.0);
+            let o = &g.out; let nu = o[0] as usize; let mut k = 1 + nu * 9; let nb = o[k] as usize; k += 1;
+            let mut spilled = 0; for _ in 0..nb { let id = o[k] as i32; let c = o[k + 1] as usize; if id == -2 { spilled += 1; } k += 2 + c * 7; }
+            let nbr = o[k] as usize; k += 1;
+            for _ in 0..nbr { k += 1; let nk = o[k] as usize; k += 2; for _ in 0..nk { let id = o[k] as i32; let c = o[k + 2] as usize; if id == -2 { spilled += 1; } k += 3 + c * 7; } }
+            (g.dust - dust0, spilled, 0)
+        };
+        let (dust_off, sp_off, _) = run(false);
+        let (dust_on, sp_on, _) = run(true);
+        std::println!("landing on the stumps with 64 crumbs: spill off {dust_off} bricks to dust ({sp_off} spilled); spill on {dust_on} to dust, {sp_on} spilled");
+        assert!(dust_off > 0, "(the case: over the budget)");
+        assert_eq!(dust_on, 0, "nothing removed");
+        assert!(sp_on >= dust_off, "what was dust is spilled");
     }
     #[test] fn a_tower_left_on_one_column_comes_down() {
         // the ground storey blasted away except one column: the upper building must not stand on it.

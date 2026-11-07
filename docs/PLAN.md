@@ -82,7 +82,9 @@ Three foundation changes, in this order, before scaling to a city. Each keeps th
 
 **Rebounds (7 November): partly done.** Light pieces squeezed under heavy ones were thrown back up; shock propagation in the relax pass fixes the two-body case (GPU test `landing`: 3.65 → 0.42 m/s) and cuts the collapse's rebounds and launches by about half over three seeds (docs/LAB.md, "Rebounds and launches"). Two slot bugs found on the way are fixed.
 
-**Open:** the rebounds that remain (about 10 in 150 frames), and the mixed building coming down only partly.
+**Vanishing parts and floating buildings (7 November): fixed.** Crushed material over the engine's budgets becomes rubble particles instead of vanishing; joints near their strength wear and give way over seconds; steel is a rolled section. New lab checks and the scenario `nibble` (docs/LAB.md).
+
+**Open:** the rebounds that remain (about 10 in 150 frames), rubble particles crushed to fines (one-way particles), and sag is not drawn.
 
 ## Later
 

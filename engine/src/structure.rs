@@ -14,11 +14,21 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 /// Strength in Pa: (compression, tension, shear). Reinforced concrete joints get rebar continuity in tension.
+/// a steel member's section as shares of the solid box drawn: area, shear area (web), plastic modulus, second
+/// moment (254 x 146 x 37 UB in a 0.25 m box: 47 cm2, 15 cm2 of web, 483 cm3, 5,540 cm4 against 625 cm2, 3,906 cm3
+/// and 32,552 cm4)
+pub const STEEL_AREA: f32 = 0.16;
+pub const STEEL_SHEAR: f32 = 0.10;
+pub const STEEL_FLEX: f32 = 0.12;
+pub const STEEL_STIFF: f64 = 0.17;
 pub fn strength(m: u8) -> [f32; 3] {
     match m {
         mat::CONCRETE => [30e6, 4e6, 4e6],
         mat::MASONRY => [10e6, 0.3e6, 0.5e6],
-        mat::STEEL => [250e6, 250e6, 150e6],
+        // a steel member is a rolled section, not the solid box it is drawn as: a 254 x 146 universal beam has 16% of
+        // that box's area (axial strength), its web 10% (shear). Solid, the mixed building stood on its core with
+        // the whole ground storey gone, on steel 6 times too strong (STEEL_AREA, STEEL_SHEAR; bending: flexural)
+        mat::STEEL => [250e6 * STEEL_AREA, 250e6 * STEEL_AREA, 150e6 * STEEL_SHEAR],
         mat::GLASS => [50e6, 7e6, 7e6],
         // structural timber (C24 / GL24h: compression 21, tension 14, shear 4 MPa along the grain). It was 5, 5
         // and 1, a stud partition's: with bending checked at the compressed fibre too (the spring network), a
@@ -54,7 +64,9 @@ pub fn crush_energy(m: u8) -> f32 {
 }
 pub fn mass(b: &Bricks, i: u32) -> f32 {
     let s = b.size(i);
-    (s[0] * s[1] * s[2]) as f32 * TICK * TICK * TICK * mat::density(b.mat[i as usize]) * b.vol_share(i) as f32
+    // (a steel member weighs its section, not the solid box: STEEL_AREA)
+    let share = if b.mat[i as usize] == mat::STEEL { STEEL_AREA } else { 1.0 };
+    (s[0] * s[1] * s[2]) as f32 * TICK * TICK * TICK * mat::density(b.mat[i as usize]) * b.vol_share(i) as f32 * share
 }
 
 /// Flexural strength (Pa) for bending of a brick: reinforced concrete gets its rebar.
@@ -74,7 +86,7 @@ fn hinge(b: &Bricks, x: usize, y: usize) -> bool {
     ((tf(x) || tf(y)) && mx != my) || (mx == mat::STEEL && my == mat::MASONRY) || (mx == mat::MASONRY && my == mat::STEEL)
 }
 pub fn flexural(m: u8) -> f32 {
-    match m { mat::CONCRETE => 12e6, mat::MASONRY => 0.5e6, mat::STEEL => 250e6, mat::GLASS => 40e6, _ => 20e6 }
+    match m { mat::CONCRETE => 12e6, mat::MASONRY => 0.5e6, mat::STEEL => 250e6 * STEEL_FLEX, mat::GLASS => 40e6, _ => 20e6 }
 }
 
 /// A crack through a brick from bending: split brick `brick` at tick `at` across `axis`.
@@ -107,6 +119,8 @@ pub struct Analysis {
     pub worst_in: (f32, u32, usize, f32, f32, f32),
     /// every joint checked, with its ratio
     pub ratios: Vec<(u32, f32)>,
+    /// faces inside bricks loaded past 0.7 of strength but under it: (brick, axis, plane, ratio) (they wear)
+    pub inner: Vec<(u32, usize, i32, f32)>,
 }
 
 struct Node { brick: u32, lo: [i32; 3], hi: [i32; 3], load: f32, sink: bool, c: [f64; 3] }
@@ -167,6 +181,12 @@ pub fn analyse_at(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32
 /// building starts from it. Between two checks most of the building moves the same.
 #[derive(Default)]
 pub struct Warm(crate::Map<(u32, i32, i32), [f64; 6]>);
+impl Warm {
+    /// the largest displacement of any cell (m)
+    pub fn max_disp(&self) -> f64 { self.0.values().map(|x| sqrt64(x[0] * x[0] + x[1] * x[1] + x[2] * x[2])).fold(0.0, f64::max) }
+    /// a cell's displacement and rotation (brick, cell corner x, z ticks)
+    pub fn get(&self, k: &(u32, i32, i32)) -> Option<&[f64; 6]> { self.0.get(k) }
+}
 /// As `analyse_at`, starting from (and keeping) the last solution in `warm`.
 pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32, f32)], sink: &[bool], dir: V3, warm: Option<&mut Warm>) -> Analysis {
     let gravity = fabs(dir.y) > 0.99;
@@ -327,7 +347,7 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
     let x0: Option<Vec<[f64; 6]>> = warm.as_ref().map(|w| (0..n).map(|k| if fixed[k] { [0.0; 6] } else { w.0.get(&key(k)).copied().unwrap_or([0.0; 6]) }).collect());
     let (x, it) = solve_network(&springs, &ends, &fixed, &pos, &f, x0);
     if let Some(w) = warm { w.0.clear(); for k in 0..n { if !fixed[k] { w.0.insert(key(k), x[k]); } } }
-    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new() };
+    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), inner: Vec::new() };
     // forces on each face (on the max side's cell, from the min side's): force and moment about the face centre
     let face_load = |l: usize| -> ([f64; 3], [f64; 3]) {
         let sp = &springs[l];
@@ -372,7 +392,7 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
         let sect = match &jgeo { Some(g) => g.s, None => { let (u, w) = ((ax + 1) % 3, (ax + 2) % 3); Sect::rect((hi[u] - lo[u]) as f64 * tk, (hi[w] - lo[w]) as f64 * tk, b.jarea[ju] as f64 * tk * tk) } };
         let conn = connection(b, j);
         let cracked_masonry = ma == mat::MASONRY || mb == mat::MASONRY;
-        let residual: [f32; 3] = if b.jdmg[ju] == 0 { [1.0; 3] } else if cracked_masonry { [1.0, 0.05, 0.4] } else { [0.5; 3] };
+        let residual: [f32; 3] = if b.jdmg[ju] & 1 == 0 { [1.0; 3] } else if cracked_masonry { [1.0, 0.05, 0.4] } else { [0.5; 3] };
         let sa = strength(ma); let sb = strength(mb);
         let cap = [sa[0].min(sb[0]) * conn[0] * residual[0], sa[1].min(sb[1]) * conn[1] * residual[1], sa[2].min(sb[2]) * conn[2] * residual[2]];
         let flex = flexural_of(b, ia).min(flexural_of(b, ib)) * conn[1] * residual[1];
@@ -397,6 +417,7 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
         if ratio > out.worst_in.0 { out.worst_in = (ratio, i, k.axis, fo[k.axis] as f32, (mo[u] * mo[u] + mo[w] * mo[w]) as f32, 0.0); }
         if ratio > out.max_ratio { out.max_ratio = ratio; }
         if ratio > 1.0 { out.cracks.push(Crack { brick: i, axis: k.axis, at: k.face_lo[k.axis], ratio }); }
+        else if ratio > 0.7 { out.inner.push((i, k.axis, k.face_lo[k.axis], ratio)); }
     }
     let _ = gravity;
     out
@@ -440,7 +461,7 @@ impl Spring {
 /// Young's modulus of brick `i` (Pa). A timber floor is joists (50 x 225 mm at 400 mm): its plate has the
 /// bending stiffness of the joists, about a tenth of solid timber's.
 pub fn modulus_of(b: &Bricks, i: usize) -> f64 {
-    match b.mat[i] { mat::CONCRETE => 30e9, mat::MASONRY => 5e9, mat::STEEL => 200e9, mat::GLASS => 70e9, _ => if b.paint[i] == 8 { 1e9 } else { 11e9 } }
+    match b.mat[i] { mat::CONCRETE => 30e9, mat::MASONRY => 5e9, mat::STEEL => 200e9 * STEEL_STIFF, mat::GLASS => 70e9, _ => if b.paint[i] == 8 { 1e9 } else { 11e9 } }
 }
 fn spring(b: &Bricks, nodes: &[Node], l: &Link) -> Spring {
     let (na, nb) = (&nodes[l.a as usize], &nodes[l.b as usize]);
@@ -480,7 +501,10 @@ fn spring(b: &Bricks, nodes: &[Node], l: &Link) -> Spring {
     let mono = (b.flags[ia] | b.flags[ib]) & crate::brick::F_MONO != 0;
     let (mi, mo) = (b.mat[ia], b.mat[ib]);
     let pocket = l.joint != NONE && ax != 1 && ax < 3 && ((mi == mat::STEEL && mo == mat::MASONRY) || (mi == mat::MASONRY && mo == mat::STEEL));
-    let f = if infill || pocket { 0.02 } else if mono { 0.05 } else { 1.0 };
+    let mut f = if infill || pocket { 0.02 } else if mono { 0.05 } else { 1.0 };
+    // a cracked joint is about half as stiff (a cracked concrete section's I is 0.3-0.5 of the uncracked one),
+    // and wear softens it further, to a fifth when worn through (game.rs, wear_joints): its load moves on
+    if l.joint != NONE { let d = b.jdmg[l.joint as usize]; f *= (if d & 1 != 0 { 0.5 } else { 1.0 }) * (1.0 - 0.6 * (d >> 1) as f64 / 127.0); }
     for i in 0..3 { k[i] *= f; kr[i] *= f; }
     if l.joint != NONE && hinge(b, ia, ib) { if ax < 3 { kr[(ax + 1) % 3] = 0.0; kr[(ax + 2) % 3] = 0.0; } else { kr[1] = 0.0; kr[2] = 0.0; } }
     // a joist floor spans one way, along its joists (x: from the walls to the beams): across them only the
