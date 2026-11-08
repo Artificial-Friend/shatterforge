@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -319,6 +319,21 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       const last = ms[ms.length - 1] || {};
       check('quietcity', true, { stagesMs: last, pairs, note: 'timing only' });
+    }
+    if (scenes.includes('stuck')) {
+      // Crumbs left inside the standing building, at the foot of a wall (made where a cut brick was, overlapping
+      // the bricks beside it, some deep inside them): they must go to sleep. (Lab collapse and mixed at 15 s: the
+      // last 8 particles awake were crumbs at the foot of the walls, within a centimetre at 2-6 m/s, over the
+      // particles' 2 m/s sleep limit; the rule is now on the pose alone. This scene does not reproduce that
+      // jitter (it passes either way); the lab's settle check does.)
+      const shapes = []; for (let x = 0; x < 4; x++) for (let y = 0; y < 3; y++) shapes.push({ p: [x * 0.25, 0.125 + y * 0.25, 0], q: [0, 0, 0, 1], h: [0.125, 0.125, 0.125], mat: MAT.masonry });
+      const w = await GpuWorld.create(dev, [{ fixed: true, shapes }, { shapes: [{ p: [3, 0.25, 3], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] }], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 32, maxParticles: 256 });
+      const list = []; for (let k = 0; k < 12; k++) list.push(k < 6 ? { p: [0.125 + 0.25 * (k % 3) + 0.03, 0.1, (k < 3 ? 0.06 : -0.06)], v: [0, 0, 0], r: 0.1, mat: MAT.masonry } : { p: [0.25 * (k - 6) * 0.5 + 0.01, 0.125 + 0.25 * (k % 2), 0.005], v: [0, 0, 0], r: 0.1, mat: MAT.masonry });
+      w.addParticles(list);
+      const awake = [];
+      for (let f = 1; f <= 300; f++) { w.step(1 / 60); if (f % 60 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); const pr = await w.readParticles(); let a = 0; for (let i = 0; i < pr.n; i++) if (pr.data[i * 12 + 10] === 1) a++; awake.push(a); } }
+      w.destroy();
+      check('stuck', awake[awake.length - 1] === 0, { awakeEachSecond: awake });
     }
     if (scenes.includes('chain')) {
       // A thin piece (223 kg) lying on another (288 kg) on the ground, hit at 10 m/s by a 1 t block with a 259 t
