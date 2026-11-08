@@ -409,3 +409,5 @@ Fixes after the first real-GPU benchmark (bench/2026-11-08_linux-chrome152_nvidi
 
 **Open: `mixed` is two-way.** Whether the upper building (2,140 t) stays on the rubble of the cut storey or goes on down turns on small changes (the last two runs differ only by twist friction on support contacts): since the rest-rule fix it held at 18.5 m in 3 full runs, and came down to 7.5 m in the one after the twist-friction change (the runs before the fix that came down had a cause, the rest rule). One run says little about it; the next step is several seeds (SF_SEED) per change, and a check on the spread.
 
+**Last runs of phase 0** (software GPU, 960 frames, commit 4637074, removing a brick wakes only what is round it): both buildings settle, `collapse` at 15.3 s (roof 18.64 → 15.67 m, volume lost 0.1%), `mixed` at 15.5 s (roof 22.39 → 9.28 m this time, volume lost 0.7%; 27 rebounds and 12 launches while its upper part came down, crumbled share 0.54). GPU suite 38 of 38, determinism, `far` and `ball` pass.
+
