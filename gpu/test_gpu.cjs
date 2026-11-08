@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -288,6 +288,37 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       }
       w.destroy();
       check('sandwich', vmax < 0.6 && pmax < 2, { hitAt: hit, blockMaxUp_ms: +vmax.toFixed(2), piecesMaxUp_ms: +pmax.toFixed(2), blockY: yBlock, stats: statsAt });
+    }
+    if (scenes.includes('pilesleep')) {
+      // A heap of 400 crumbs beside a block that rests on the ground but stays awake (sleep is off for bodies here,
+      // as for a part in an island that has not settled): the heap must still go to sleep. (Lab mixed at 10 s:
+      // 36,879 of 36,882 particles awake, most under 0.1 m/s; any awake body nearby woke them every step;
+      // here 312 stayed awake to the end. Now only a body going somewhere wakes them: 0 awake from 4 s.)
+      let rnd = 9; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const w = await GpuWorld.create(dev, [{ shapes: [{ p: [2.2, 0.5, 0], q: [0, 0, 0, 1], h: [0.5, 0.5, 0.5], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] }], { substeps: 12, sleep: false, maxBodies: 8, maxShapes: 16, maxParticles: 4096 });
+      const list = []; for (let i = 0; i < 400; i++) list.push({ p: [(rand() - 0.5) * 2.4, 0.2 + rand() * 1.5, (rand() - 0.5) * 2.4], v: [0, 0, 0], r: 0.1 * (0.8 + 0.4 * rand()), mat: MAT.concrete });
+      w.addParticles(list);
+      const awake = [];
+      for (let f = 1; f <= 480; f++) { w.step(1 / 60); if (f % 60 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); const pr = await w.readParticles(); let a = 0; for (let i = 0; i < pr.n; i++) if (pr.data[i * 12 + 10] === 1) a++; awake.push(a); } }
+      w.destroy();
+      check('pilesleep', awake[awake.length - 1] <= 20, { awakeEachSecond: awake });
+    }
+    if (scenes.includes('quietcity')) {
+      // What a settled scene with a little still moving costs: a standing building of 20,000 boxes (one fixed body)
+      // and 8 boxes falling beside it. The broad phase should cost in proportion to what moves, not to the
+      // building. (Software GPU timings, compared with each other only. 8 November, ms per step: broad 425, narrow
+      // 77, colour 633, sub-steps 79, sleep 15, with every once-a-step contact kernel sized by capacity (160,000
+      // contacts) and every resting box searching 27 cells a level. Now, with the dispatch chosen by measurement
+      // (calibrateDispatch) and resting boxes far from anything awake skipping their search: 122, 0.02, 1.4, 16,
+      // 0.04.)
+      const shapes = []; for (let x = 0; x < 50; x++) for (let z = 0; z < 20; z++) for (let y = 0; y < 20; y++) shapes.push({ p: [x * 0.25 - 6, 0.125 + y * 0.25, z * 0.25 - 2.5], q: [0, 0, 0, 1], h: [0.12, 0.12, 0.12], mat: MAT.masonry });
+      const movers = []; for (let k = 0; k < 8; k++) movers.push({ shapes: [{ p: [-4 + k, 9, 5], q: [0, 0, 0, 1], h: [0.3, 0.3, 0.3], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] });
+      const w = await GpuWorld.create(dev, [{ fixed: true, shapes }, ...movers], { substeps: 12, sleep: true, maxBodies: 64, maxShapes: 20100 });
+      const ms = []; let pairs = 0;
+      for (let f = 1; f <= 40; f++) { w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle(); if (f > 10 && w.gpuMs) { ms.push(Object.fromEntries(Object.entries(w.gpuMs).map(([k, v]) => [k, +v.toFixed(2)]))); pairs = Math.max(pairs, w.stats.pairs || 0); } }
+      w.destroy();
+      const last = ms[ms.length - 1] || {};
+      check('quietcity', true, { stagesMs: last, pairs, note: 'timing only' });
     }
     if (scenes.includes('chain')) {
       // A thin piece (223 kg) lying on another (288 kg) on the ground, hit at 10 m/s by a 1 t block with a 259 t

@@ -154,15 +154,17 @@ function labFrameChecks() {
 // every read-back: the physics
 const LAB_RHO = [2400, 1800, 2500, 2500, 500, 7800, 2400, 2400];
 function labOnRead(r, pr) {
+  // spares parked under the ground must sleep there (woken, they fell for the rest of the run: 8 November)
+  if (r.sleeping && r.body) { let n = 0; const nb = Math.min(r.sleeping.length, r.body.length / 7); for (let b = 1; b <= nb; b++) if (!r.sleeping[b - 1] && r.body[(b - 1) * 7 + 1] < -500) n++; LAB.parkedAwake = Math.max(LAB.parkedAwake || 0, n); }
   // (what is still awake near the end, for a run that does not settle: bodies, and where the awake particles are)
   if (LAB.f >= LAB.spec.frames - 3 && r.sleeping && !LAB.awakeEnd) {
     const L = LAB, list = [], nb = Math.min(gpu.bodies.length, r.body.length / 7);
-    for (let b = 1; b <= nb; b++) { const gb = gpu.bodies[b - 1]; if (!gb || gb.dead || r.sleeping[b - 1]) continue; const o = (b - 1) * 7, vo = (b - 1) * 3;
-      if (r.body[o + 1] < -500) continue;
+    for (let b = 1; b <= nb; b++) { const gb = gpu.bodies[b - 1]; if (r.sleeping[b - 1]) continue; const o = (b - 1) * 7, vo = (b - 1) * 3;
+      if (!gb || gb.dead || r.body[o + 1] < -500) { (L.awakeOdd = L.awakeOdd || []).push({ b, dead: !gb || !!gb.dead, spare: !!(gb && gb.spare), fixed: !!(gb && gb.fixed), y: +r.body[o + 1].toFixed(1) }); continue; }
       list.push({ b, made: gb.labF, size: gb.labH, vol: +(gb.labVol || 0).toFixed(2), p: [r.body[o], r.body[o + 1], r.body[o + 2]].map(x => +x.toFixed(2)), v: [r.vel[vo], r.vel[vo + 1], r.vel[vo + 2]].map(x => +x.toFixed(3)), w: r.ang ? [r.ang[vo], r.ang[vo + 1], r.ang[vo + 2]].map(x => +x.toFixed(3)) : null }); }
     const cells = new Map();
     if (pr) for (const i of pr.list) { if (pr.data[i * 12 + 10] !== 1) continue; const k = [0, 1, 2].map(c => Math.round(pr.data[i * 12 + c] / 2) * 2).join(','); const e = cells.get(k) || { n: 0, v: 0 }; e.n++; e.v = Math.max(e.v, Math.hypot(pr.data[i * 12 + 3], pr.data[i * 12 + 4], pr.data[i * 12 + 5])); cells.set(k, e); }
-    L.awakeEnd = { bodies: list.slice(0, 20), particle_cells: [...cells.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 12).map(([k, e]) => ({ at: k, n: e.n, vmax: +e.v.toFixed(2) })) };
+    L.awakeEnd = { odd: (L.awakeOdd || []).slice(0, 20), odd_n: (L.awakeOdd || []).length, bodies: list.slice(0, 20), particle_cells: [...cells.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 12).map(([k, e]) => ({ at: k, n: e.n, vmax: +e.v.toFixed(2) })) };
   }
   // the clean-up distance: how far past it anything still in the world is from where it was first seen
   if (farDist < Infinity) {
@@ -298,6 +300,7 @@ function labReport(wallS) {
   }
   // (with the default distance, 100 m, nothing in these scenarios flies that far: what goes was measured from the
   // wrong place. 8 November: spare bodies seen parked 1 km under the ground, 1,018 m3 of the mixed building went)
+  checks.push({ name: 'spare bodies awake while parked (most at once)', value: L.parkedAwake || 0, limit: 0, pass: !(L.parkedAwake > 0), what: 'the world never at rest' });
   if (S.far == null) checks.push({ name: 'removed past the clean-up distance (% of the building)', value: +(100 * (L.lostBy.far || 0) / L.V0).toFixed(1), limit: 0.5, pass: 100 * (L.lostBy.far || 0) / L.V0 <= 0.5, what: 'parts removed that did not fly that far' });
   if (S.expect && S.expect.far) {
     // past the clean-up distance things go at the next read-back (what their speed carries them over the lag is
@@ -373,7 +376,7 @@ async function labRun() {
   $('start').hidden = true; physicsPaused = false;
   $('bench').hidden = false; $('bench-title').textContent = `Lab: ${name} (${st.done.length + 1} of ${st.done.length + st.queue.length})`;
   labInstall();
-  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.lostBy = {}; L.farBodies = 0; L.farParts = 0; L.farOver = 0; L.awakeEnd = null; L.made = []; L.bigBreaks = []; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
+  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.lostBy = {}; L.farBodies = 0; L.farParts = 0; L.farOver = 0; L.awakeEnd = null; L.parkedAwake = 0; L.awakeOdd = []; L.made = []; L.bigBreaks = []; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
   try { const info = dev.adapterInfo || (dev.adapter && dev.adapter.info); L.adapter = info ? `${info.vendor} ${info.architecture} ${info.description || ''}`.trim() : ''; } catch (e) {}
   const tw = performance.now();
   let lastShow = 0;

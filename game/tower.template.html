@@ -258,11 +258,16 @@ function perfAdd(name, d) { perf[name] = perf[name] == null ? d : perf[name] * 0
 // Several read-backs are kept in flight (each resolves a frame or more after it was issued), so a fresh one
 // arrives every frame; an older one arriving after a newer is dropped.
 const MAX_READS = 3;
+let lastReadReal = -1, drawnFinal = null;
 function pullDebris() {
   if (!gpu || !diag.readback || reading >= MAX_READS) return;
   // pieces of a break wait for the next step to be placed: a read-back before it would show them where the
   // parent was, then jump
   if (gpu.placing()) return;
+  // at rest (every step since the last read-back skipped, nothing changed): the last one still holds, and the
+  // GPU and the page do nothing for it; settled rubble is scenery
+  if (!LAB.on && gpu.realFrame === lastReadReal && snapCur) return;
+  lastReadReal = gpu.realFrame;
   reading++;
   const seq = ++readSeq, issuedAt = stepsDone;
   const tr = performance.now();
@@ -341,6 +346,9 @@ function drawDebris(now) {
   // blend from the previous read-back to the latest over the interval between them (one interval behind)
   const span = p ? Math.max(r.t - p.t, 1) : 1;
   const a = p ? Math.min(1, (now - r.t) / span) : 1;
+  // (drawn once at the end of its blend, a read-back stays drawn: nothing to rebuild until the next one)
+  if (!LAB.on && a >= 1 && drawnFinal === r) return;
+  if (a >= 1) drawnFinal = r;
   const n = Math.min(MAXD, r.pose.length / 10);
   const lab = LAB.on; if (lab) labDrawBegin();
   for (let k = 0; k < n; k++) {
@@ -1206,8 +1214,25 @@ $('lab-quick').addEventListener('click', () => labStart(LAB_SUITES.quick));
 $('lab-full').addEventListener('click', () => labStart(LAB_SUITES.full));
 $('bench-copy').addEventListener('click', () => { const t = LAB.copyText || $('bench-out').textContent; navigator.clipboard.writeText(t).catch(() => { const r = document.createRange(); r.selectNodeContents($('bench-out')); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); }); });
 function benchPending() { try { if (localStorage.getItem('sf-bench') === '1') { localStorage.removeItem('sf-bench'); return true; } } catch (e) {} return false; }
+// What one compute dispatch costs on this device (empty work, 4,000 of them in one pass, wall time over the
+// queue): the solver's sub-steps are many small dispatches, so this bounds how fast a step can be here.
+async function dispatchCost() {
+  try {
+    const mod = dev.createShaderModule({ code: '@group(0) @binding(0) var<storage, read_write> o: array<u32>; @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) g: vec3u) { if (g.x == 0xffffffffu) { o[0] = 1u; } }' });
+    const pl = dev.createComputePipeline({ layout: 'auto', compute: { module: mod, entryPoint: 'main' } });
+    const buf = dev.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE });
+    const bg = dev.createBindGroup({ layout: pl.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buf } }] });
+    const run = async (n) => { const e = dev.createCommandEncoder(); const p = e.beginComputePass(); p.setPipeline(pl); p.setBindGroup(0, bg); for (let k = 0; k < n; k++) p.dispatchWorkgroups(1); p.end(); const t = performance.now(); dev.queue.submit([e.finish()]); await dev.queue.onSubmittedWorkDone(); return performance.now() - t; };
+    await run(100);
+    // (the fastest of 3 each: other work on the machine only ever adds; the difference cancels the submit's cost)
+    let a = Infinity, b = Infinity; for (let k = 0; k < 3; k++) { a = Math.min(a, await run(100)); b = Math.min(b, await run(4100)); }
+    buf.destroy();
+    return +Math.max(0, 1000 * (b - a) / 4000).toFixed(2);   // µs per dispatch
+  } catch (e) { return null; }
+}
 async function benchStart() {
   if (!gpu) return;
+  BENCH.dispatchUs = await dispatchCost();
   Math.random = seededRandom(20261103);
   BENCH.on = true; BENCH.phase = 'cutting the ground storey'; flick.vanished = 0; flick.jumps = 0;
   $('bench').hidden = false; $('bench-title').textContent = 'Benchmark: running';
@@ -1263,6 +1288,7 @@ function benchShow(done) {
   const lines = [];
   lines.push(`Shatterforge benchmark · ${['concrete frame', 'masonry', 'mass timber', 'mixed'][KIND]}, ${STOREYS} storeys · ${new Date().toISOString().slice(0, 19)}Z`);
   lines.push(`${navigator.userAgent}`);
+  if (BENCH.dispatchUs != null) lines.push(`one compute dispatch: ${BENCH.dispatchUs} µs`);
   if (window.__gpuInfo) lines.push(`GPU: ${[window.__gpuInfo.vendor, window.__gpuInfo.architecture, window.__gpuInfo.device, window.__gpuInfo.description].filter(Boolean).join(' · ') || 'not told'}`);
   lines.push(`settings: quality ${setting.preset || 'custom'} · crush depth ${setting.crush} m · crumbs ${setting.crumbs} (${setting.particles ? 'particles' : 'rigid'}) · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
   lines.push(`cut: 36 blasts in ${(BENCH.cutMs / 1000).toFixed(1)} s`);
@@ -1281,7 +1307,7 @@ function benchShow(done) {
     const rm = BENCH.restMs.slice().sort((a, b) => a - b), rg = BENCH.restGpu.slice().sort((a, b) => a - b), med = (a) => a.length ? a[a.length >> 1] : 0;
     lines.push(BENCH.settledAt != null ? `settled (nothing awake) at ${BENCH.settledAt.toFixed(1)} s · at rest: frame median ${med(rm).toFixed(1)} ms, GPU ${med(rg).toFixed(2)} ms` : `not settled by ${(BENCH.settleEnd / 60).toFixed(0)} s: ${gpu.stats.awake || 0} bodies and ${gpu.stats.pActive || 0} particles still awake`);
     // the same as data, for bench/ (paste it back)
-    BENCH.json = { date: new Date().toISOString(), ua: navigator.userAgent, gpu: window.__gpuInfo || null, building: { kind: ['concrete frame', 'masonry', 'mass timber', 'mixed'][KIND], storeys: STOREYS }, settings: { ...setting }, cut_s: +(BENCH.cutMs / 1000).toFixed(2), realtime: +(simT / wallT).toFixed(3), frame_ms: { median: +pct(0.5).toFixed(2), p95: +pct(0.95).toFixed(2), worst: +pct(1).toFixed(2) }, gpu_worst_ms: +BENCH.gpuMax.toFixed(2), settled_s: BENCH.settledAt, rest: { frame_ms: +med(rm).toFixed(2), gpu_ms: +med(rg).toFixed(3) }, rows: r };
+    BENCH.json = { date: new Date().toISOString(), ua: navigator.userAgent, gpu: window.__gpuInfo || null, building: { kind: ['concrete frame', 'masonry', 'mass timber', 'mixed'][KIND], storeys: STOREYS }, settings: { ...setting }, cut_s: +(BENCH.cutMs / 1000).toFixed(2), realtime: +(simT / wallT).toFixed(3), frame_ms: { median: +pct(0.5).toFixed(2), p95: +pct(0.95).toFixed(2), worst: +pct(1).toFixed(2) }, gpu_worst_ms: +BENCH.gpuMax.toFixed(2), dispatch_us: BENCH.dispatchUs, settled_s: BENCH.settledAt, rest: { frame_ms: +med(rm).toFixed(2), gpu_ms: +med(rg).toFixed(3) }, rows: r };
     LAB.copyText = lines.join('\n') + '\n\n' + JSON.stringify(BENCH.json);
     $('bench-title').textContent = 'Benchmark: done';
   }

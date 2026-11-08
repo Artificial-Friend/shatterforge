@@ -25,6 +25,7 @@ const MATERIALS = [
 ];
 const MAT = Object.fromEntries(MATERIALS.map((m, i) => [m.name, i]));
 const GROUND_MAT = MAT.ground;
+const CNEAR = 8192;   // (slots of the coarse awake map, see near_mark in the shader)
 
 const WGSL = /* wgsl */`
 struct Params {
@@ -42,7 +43,7 @@ struct Params {
   sleep_time: f32, sleep_lin: f32, sleep_ang: f32, ns1: u32,
   levels: u32, ground_mat: u32, sleep_dist: f32, sleep_rot: f32,
   o_ocount: u32, o_acc: u32, o_events: u32, max_events: u32,
-  ev_speed: f32, ev_energy: f32, o_cawake: u32, pad5: u32,
+  ev_speed: f32, ev_energy: f32, o_cawake: u32, o_cnear: u32,
   n_inherit: u32, o_inherit: u32, wake_speed: f32, pad7: u32,
   mat: array<vec4f, 8>,   // friction, restitution, -, -
   np1: u32, pcell: f32, pg_mask: u32, p_wake: u32,
@@ -148,6 +149,26 @@ fn tangents(n: vec3f) -> mat2x3f {
   st(P.o_mint + i, 0x7f7fffffu);
 }
 fn dead(s: u32) -> bool { return Hs(s, H_ID).z > 0.5; }
+// Where anything awake is, coarsely: 4 m cells (hashed into CNEAR slots) under each awake shape's box. A resting
+// or static shape whose box touches none of them can pair with nothing awake, and skips its search of the grid
+// (27 cells at each level: in a standing building of 20,000 boxes with 8 boxes falling, that search was most of
+// the broad phase: GPU test quietcity). A box over too many cells marks everything (the last slot).
+const CNEAR = 8192u; const CNEAR_CELL = 4.0;
+fn H_LO_v(s: u32) -> vec3f { return Hs(s, H_LO).xyz; }
+fn H_HI_v(s: u32) -> vec3f { return Hs(s, H_HI).xyz; }
+fn near_hash(c: vec3i) -> u32 { return ((u32(c.x) * 73856093u) ^ (u32(c.y) * 19349663u) ^ (u32(c.z) * 83492791u)) % CNEAR; }
+fn near_mark(lo: vec3f, hi: vec3f) {
+  let a = vec3i(floor(lo / CNEAR_CELL)); let b = vec3i(floor(hi / CNEAR_CELL)); let n = b - a + vec3i(1);
+  if (n.x * n.y * n.z > 64) { atomicOr(&ints[P.o_cnear + CNEAR], 1u); return; }
+  for (var z = a.z; z <= b.z; z++) { for (var y = a.y; y <= b.y; y++) { for (var x = a.x; x <= b.x; x++) { atomicOr(&ints[P.o_cnear + near_hash(vec3i(x, y, z))], 1u); } } }
+}
+fn near_any(lo: vec3f, hi: vec3f) -> bool {
+  if (ld(P.o_cnear + CNEAR) != 0u) { return true; }
+  let a = vec3i(floor(lo / CNEAR_CELL)); let b = vec3i(floor(hi / CNEAR_CELL)); let n = b - a + vec3i(1);
+  if (n.x * n.y * n.z > 64) { return true; }
+  for (var z = a.z; z <= b.z; z++) { for (var y = a.y; y <= b.y; y++) { for (var x = a.x; x <= b.x; x++) { if (ld(P.o_cnear + near_hash(vec3i(x, y, z))) != 0u) { return true; } } } }
+  return false;
+}
 @compute @workgroup_size(64) fn prep_shapes(@builtin(global_invocation_id) g: vec3u) {
   let s = g.x + 1u; if (s >= P.ns1 || dead(s)) { return; }
   let b = sbody(s);
@@ -169,7 +190,13 @@ fn dead(s: u32) -> bool { return Hs(s, H_ID).z > 0.5; }
   st(P.o_cell + s, hc);
   atomicAdd(&ints[P.o_gcount + hc], 1u);
   // cells holding a moving shape: resting and static shapes only look into these
-  if (dyn_awake(b)) { atomicOr(&ints[P.o_cawake + hc], 1u); }
+  if (dyn_awake(b)) { atomicOr(&ints[P.o_cawake + hc], 1u); near_mark(H_LO_v(s), H_HI_v(s)); }
+  // (and 2: one that is going somewhere, fast enough to wake what it touches (see pair_wake_emit) or moved over
+  // 1 cm in the last quarter second (its rest timer, see finish): only these wake resting particles. Any awake
+  // body woke them, one only chattering in place too, and a settled pile never slept: lab mixed at 10 s, 36,879 of
+  // 36,882 particles awake, most under 0.1 m/s. On speed alone, a block sinking slowly into a sleeping heap went
+  // through it: GPU test heapcreep, slab awake)
+  if (dyn_awake(b) && (length(v) + length(w) * (length(lp) + length(h)) > P.wake_speed || B(b, F_IL).w < 0.5 * P.sleep_time)) { atomicOr(&ints[P.o_cawake + hc], 2u); }
 }
 
 var<workgroup> wsum: array<u32, 256>;
@@ -236,6 +263,7 @@ fn push_pair(a: u32, b: u32) {
   let lo = Hs(i, H_LO).xyz; let hi = Hs(i, H_HI).xyz;
   let wp = Hs(i, H_WP); let Li = u32(wp.w);
   if (ai && lo.y < 0.0) { push_pair(i, 0u); }
+  if (!ai && !near_any(lo, hi)) { return; }
   for (var L = Li; L < P.levels; L++) {
     if (ld(C_LEVEL + L) == 0u) { continue; }
     let c = cellc(wp.xyz, L);
@@ -644,6 +672,10 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
 }
 
 fn wake(i: u32) {
+  // (never a spare parked 1 km under the ground, waiting for a break on the GPU to hand it a part: woken by a
+  // blast's wake-all, spares fell from there for the rest of the run, and the world never came to rest; lab
+  // collapse, 200 frames: 38 of 234 awake bodies)
+  if (B(i, F_P).y < -500.0) { return; }
   if (i != 0u && asleep(i)) { setB(i, F_FL, vec4f(0.0, B(i, F_P).xyz)); setB(i, F_RQ, B(i, F_Q)); let il = B(i, F_IL); setB(i, F_IL, vec4f(il.xyz, 0.0)); }
 }
 
@@ -1629,7 +1661,7 @@ fn near_awake(x: vec3f) -> bool {
     if (ld(C_LEVEL + L) == 0u) { continue; }
     let c = cellc(x, L);
     for (var cz = c.z - 1; cz <= c.z + 1; cz++) { for (var cy = c.y - 1; cy <= c.y + 1; cy++) { for (var cx = c.x - 1; cx <= c.x + 1; cx++) {
-      if (ld(P.o_cawake + chash(vec3i(cx, cy, cz), L)) != 0u) { return true; }
+      if ((ld(P.o_cawake + chash(vec3i(cx, cy, cz), L)) & 2u) != 0u) { return true; }
     } } }
   }
   return false;
@@ -1760,7 +1792,7 @@ const P_SEP = 2.0;
   let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }
   let r0 = R(i, 0); let xi = r0.xyz; let ri = r0.w; let xs = R(i, 3).xyz;
   let mui = P.mat[u32(R(i, 4).w)].x;
-  var corr = vec3f(0.0); var n = 0.0; var touch = 0.0;
+  var corr = vec3f(0.0); var n = 0.0; var touch = 0.0; var bearing = false;
   var grounded = false; var gPen = 0.0; var gN = vec3f(0.0);
   let cap = P_SEP * P.p_h;
   let o = pcand(i);
@@ -1837,13 +1869,13 @@ const P_SEP = 2.0;
         var sh = select(j, lastS, fixed); var low = select(lastS, j, fixed);
         if (!fixed && !lastFixed && nn.y > lastN.y) { sh = lastS; low = j; }
         var lowB = 0xffffffffu; if (!fixed && !lastFixed && low != 0xffffffffu) { lowB = sbody(low); }
-        if (sh != 0xffffffffu && ld(P.o_psup + 11u * P.psup_n + sh) != 0u && min(pen, lastPush) > 0.3 * ri) { crushed = 1.0; }
-        else if (sh != 0xffffffffu && (lowB == 0xffffffffu || sbody(sh) != lowB)) { sup_record(sh, i, min(pen, lastPush), lowB); }
+        if (sh != 0xffffffffu && ld(P.o_psup + 11u * P.psup_n + sh) >= 3u && min(pen, lastPush) > 0.3 * ri) { crushed = 1.0; }
+        else if (sh != 0xffffffffu && (lowB == 0xffffffffu || sbody(sh) != lowB)) { sup_record(sh, i, min(pen, lastPush), lowB); bearing = true; }
       }
     }
     if (pen > lastPush) { lastPush = pen; lastN = nn; lastS = j; lastFixed = fixed; }
   }
-  setR(i, 5, vec4f(x, touch));
+  setR(i, 5, vec4f(x, select(touch, 2.0, bearing)));   // (2: holding up a moving body, see p_finish)
   pst(pcand(i) + 39u, select(0u, 1u, grounded));
   if (crushed > 0.0) { let r6 = R(i, 6); setR(i, 6, vec4f(r6.xyz, 1.0)); }
 }
@@ -1922,7 +1954,11 @@ const RUBBLE_BEAR = 1.0e6;
   let imp = f32(ld(P.o_psup + 8u * P.psup_n + s)); st(P.o_psup + 8u * P.psup_n + s, 0u);
   // (overloaded: the contact pushed at its limit, see p_support; the particles then squeezed deep are crushed)
   let load = imp / P.dt; st(P.o_psup + 10u * P.psup_n + s, bitcast<u32>(load));
-  st(P.o_psup + 11u * P.psup_n + s, select(0u, 1u, area > 0.0 && load > 0.95 * RUBBLE_BEAR * area));
+  // (counted in steps: the particles crush once it has lasted 3 steps (50 ms), time for the rest to come to bear.
+  // At once, a 21.6 t block set on the peak of a sleeping heap crushed the 30 it first came down on, each woken
+  // that step and still 0.3 r deep; GPU test heapcreep, slab awake)
+  let wasOver = ld(P.o_psup + 11u * P.psup_n + s);
+  st(P.o_psup + 11u * P.psup_n + s, select(0u, min(wasOver + 1u, 1000u), area > 0.0 && load > 0.95 * RUBBLE_BEAR * area));
 }
 @compute @workgroup_size(64) fn p_apply(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i >= P.np1 || R(i, 1).w != 1.0) { return; }
@@ -1942,7 +1978,9 @@ const RUBBLE_BEAR = 1.0e6;
     // sleeping ones may jitter in place; that goes nowhere)
     let r6 = R(i, 6);
     if (touch > 0.0) { w = cross(vec3f(0.0, 1.0, 0.0), v) / max(r0.w, 0.01); }
-    if (touch > 0.0 && distance(r0.xyz, r6.xyz) < 0.01 && length(v) < 2.0) { t = r3.w + P.dt; } else { setR(i, 6, vec4f(r0.xyz, r6.w)); }
+    // (nor while it holds up a moving body: asleep it would no longer bear it, and the body would sink through the
+    // heap; it sleeps once the body does. GPU test heapcreep, slab awake: through to the slab, 220 crushed)
+    if (touch > 0.0 && touch < 1.5 && distance(r0.xyz, r6.xyz) < 0.01 && length(v) < 2.0) { t = r3.w + P.dt; } else { setR(i, 6, vec4f(r0.xyz, r6.w)); }
     if (t > 0.5 || r0.y < -50.0) { s = 2.0; v = vec3f(0.0); w = vec3f(0.0); }
     if (r6.w > 0.0) { s = 3.0; v = vec3f(0.0); }
     q = normalize(q + 0.5 * P.dt * qmul(vec4f(w, 0.0), q));
@@ -2181,7 +2219,34 @@ class GpuWorld {
   static async create(device, list, opt = {}) {
     const w = new GpuWorld();
     await w.init(device, list, opt);
+    if (w.manIndirect == null) await w.calibrateDispatch();
     return w;
+  }
+  // The kernels run once a step over the contacts are sized either by capacity (direct: threads past the real
+  // count return at once) or by the count itself (indirect: the browser validates each such dispatch). Which costs
+  // less depends on the GPU and the browser, so it is measured here, once: 40 of each, the fastest of 3 runs.
+  // (Only the timing differs: the kernels skip work past their real counts either way.)
+  async calibrateDispatch() {
+    const d = this.device;
+    try {
+      const mod = d.createShaderModule({ code: '@group(0) @binding(0) var<storage, read_write> o: array<u32>; @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) g: vec3u) { if (g.x >= o[0]) { return; } o[1] = o[1] + 1u; }' });
+      const pl = d.createComputePipeline({ layout: 'auto', compute: { module: mod, entryPoint: 'main' } });
+      const buf = d.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      d.queue.writeBuffer(buf, 0, new Uint32Array([1000, 0, 0, 0]));
+      const args = d.createBuffer({ size: 16, usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
+      d.queue.writeBuffer(args, 0, new Uint32Array([16, 1, 1, 0]));
+      const bg = d.createBindGroup({ layout: pl.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: buf } }] });
+      const perMan = Math.max(1, Math.ceil(this.maxMan / 64));
+      const time = async (indirect) => {
+        const e = d.createCommandEncoder(); const p = e.beginComputePass(); p.setPipeline(pl); p.setBindGroup(0, bg);
+        for (let k = 0; k < 40; k++) { if (indirect) p.dispatchWorkgroupsIndirect(args, 0); else p.dispatchWorkgroups(perMan); }
+        p.end(); const t = performance.now(); d.queue.submit([e.finish()]); await d.queue.onSubmittedWorkDone(); return performance.now() - t;
+      };
+      await time(false); await time(true);
+      let a = Infinity, b = Infinity; for (let k = 0; k < 3; k++) { a = Math.min(a, await time(false)); b = Math.min(b, await time(true)); }
+      buf.destroy(); args.destroy();
+      this.manIndirect = b < a; this.dispatchCal = { direct_ms: +a.toFixed(3), indirect_ms: +b.toFixed(3), workgroups: perMan };
+    } catch (e) { this.manIndirect = false; }
   }
   // single-box bodies from 10-float poses (p, q, h), as the wasm pose() export gives them
   static boxes(poses, mat = MAT.reference) {
@@ -2210,6 +2275,7 @@ class GpuWorld {
     this.maxColors = opt.maxColors || 16;
     this.colorLimit = Math.min(this.colorLimit, this.maxColors);
     this.indirect = !!opt.indirect;   // the old indirect-dispatch path (for comparison)
+    this.manIndirect = opt.manIndirect ?? null;   // (the once-a-step contact kernels: see calibrateDispatch)
     this.anchor = opt.anchor ?? true;
     this.sleep = opt.sleep ?? true;
     this.wakeSpeed = opt.wakeSpeed ?? 0.25;   // m/s at the contact: slower bodies do not wake what they touch
@@ -2225,7 +2291,7 @@ class GpuWorld {
     let o = 16;
     const L = {};
     const take = (k, len) => { L[k] = o; o += len; };
-    take('gcount', G); take('gstart', G); take('gfill', G); take('cawake', G);
+    take('gcount', G); take('gstart', G); take('gfill', G); take('cawake', G); take('cnear', CNEAR + 1);
     take('sorted', cs1); take('cell', cs1); take('mask', cb1);
     take('ccount', 33); take('cstart', 33); take('cfill', 33);
     take('order', this.maxMan); take('mcolor', this.maxMan);
@@ -2345,7 +2411,7 @@ class GpuWorld {
     u[40] = L.blist; u[41] = L.par; u[42] = L.mint; u[43] = this.sleep ? 1 : 0;
     f[44] = 0.5; f[45] = 0.05; f[46] = 0.08; u[47] = this.ns1;
     u[48] = this.levels; u[49] = GROUND_MAT; f[50] = 0.01; f[51] = 0.02;
-    u[52] = L.ocount; u[53] = L.acc; u[54] = L.events; u[55] = this.maxEvents; u[58] = L.cawake;
+    u[52] = L.ocount; u[53] = L.acc; u[54] = L.events; u[55] = this.maxEvents; u[58] = L.cawake; u[59] = L.cnear;
     f[56] = this.evSpeed; f[57] = this.evEnergy;
     u[60] = this.inheritCount || 0; u[61] = this.L.inherit; f[62] = this.wakeSpeed;
     // the pair table sized by the contacts there were (as the grid), up to its capacity
@@ -2398,7 +2464,7 @@ class GpuWorld {
     // counters; impact events keep accumulating until a step copies them out (a pending read-back skips the copy)
     if (this.statCopied === false) { clr(0, 7); clr(8, 7); } else { clr(0, 16); clr(L.snap, 1); }   // (events, crushes and breaks gather until copied)
     clr(L.evhist, 128); clr(L.pinch, 8 * this.n1); clr(L.level, this.n1); clr(L.level2, this.n1);
-    clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
+    clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.cnear, CNEAR + 1); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.hl, 1); clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (this.reduce !== false) { clr(L.ptab, 3 * this.TPeff); clr(L.big, 64 * 4096); }
     if (this.capP && this.np) { enc.clearBuffer(this.pintBuf, 0, this.PGeff * 4); enc.clearBuffer(this.pintBuf, 2 * this.PGeff * 4, this.PGeff * 4); }
@@ -2430,7 +2496,7 @@ class GpuWorld {
     const dirWg = { 396: pairWg, 384: perMan };   // narrow (args 99), per-manifold (args 96)
     const ind = this.indirect
       ? (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); }
-      : (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroups(k === 'restitute_ovf' ? 1 : dirWg[off] ?? perMan); };
+      : (p, k, off) => { p.setPipeline(this.pl[k]); if (this.manIndirect && (off === 384 || off === 396)) p.dispatchWorkgroupsIndirect(this.argBuf, off); else p.dispatchWorkgroups(k === 'restitute_ovf' ? 1 : dirWg[off] ?? perMan); };
     let p;
     if (this.wakeReq) { this.wakeReq = false; p = pass(null); run(p, 'wake_all', nb); p.end(); }
     if (this.inheritCount) {
@@ -2528,7 +2594,7 @@ class GpuWorld {
       for (const b of this.retiredNow || []) this.freeBody(b);
       this.retiredNow = [];
     }
-    this.frame++;
+    this.frame++; this.realFrame = this.frame;   // (the last step that moved anything: read-backs since show the same)
   }
 
   // ---- incremental edits (debris, a changing static structure)
