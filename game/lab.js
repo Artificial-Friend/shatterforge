@@ -19,7 +19,7 @@ function labInstall() {
     idx.forEach((b, k) => {
       if (b <= 0) return;
       const gb = gpu.bodies[b - 1];
-      if (L.ballNext) { L.balls.add(b); if (gb) gb.labBall = true; return; }
+      if (L.ballNext) { L.balls.add(b); if (gb) gb.labBall = true; for (const k of gpu.bodyShapes.get(b) || []) { const sh = gpu.shapes[k - 1]; if (sh) sh.labBall = true; } return; }
       const v = list[k].shapes.reduce((s, sh) => s + labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1), 0); L.bodyVol.set(b, v); L.gpuVol += v; if (L.jobVol) L.jobVol.bodiesIn += v;
       // (where parts come loose: frame, the job that made them, height of the body's top and bottom, volume)
       if (L.made && L.made.length < 4000) { const ys = list[k].shapes.map(sh => sh.p[1]); L.made.push([L.f, L.jobOp || '', +Math.min(...ys).toFixed(1), +Math.max(...ys).toFixed(1), +v.toFixed(2), list[k].shapes.length]); }
@@ -43,6 +43,10 @@ function labInstall() {
   };
   gpu.breakBody = (parent, ...rest) => {
     const v = L.bodyVol.get(parent) || 0; L.gpuVol -= v; L.bodyVol.delete(parent); if (L.jobVol) L.jobVol.bodiesOut += v;
+    // (a ball removed frees its slot: the next body there is not a ball. Left marked, a piece of the facade given
+    // that slot was left out of what is drawn, and the lab saw a 0.2 m3 hole for 214 frames, scenario far)
+    const wasBall = L.balls.has(parent); L.balls.delete(parent);
+    if (window.__farKill) { L.lostBy.far = (L.lostBy.far || 0) + v; L.farBodies = (L.farBodies || 0) + 1; const gb = gpu.bodies[parent - 1]; labEvent('removed_far', L.f, { body: parent, vol: +v.toFixed(3), ball: wasBall, size: gb && gb.labH, made_at: gb && gb.labF, shapes: (gpu.bodyShapes.get(parent) || []).length }); }   // (removed past the clean-up distance)
     // (a break must not make volume: the kids, bodies and particles, against the parent; logged when over by 5%)
     { const kv = (rest[0] || []).reduce((s, k) => s + (L.bodyVol.get(k) || 0), 0) + (L.pendingParts || []).reduce((s, i) => s + (i >= 0 && pInfo[i] ? labBoxVol(pInfo[i].h) : 0), 0);
       if (kv > 1.05 * v + 0.5 && (L.overBreaks = L.overBreaks || []).length < 20) { const gb = gpu.bodies[parent - 1]; L.overBreaks.push({ f: L.f, op: L.jobOp, parent, parent_m3: +v.toFixed(2), kids_m3: +kv.toFixed(2), kids: (rest[0] || []).length, made_at: gb && gb.labF, what: gb && gb.labH, spare: !!(gb && gb.spare), shapes_gpu: (gpu.bodyShapes.get(parent) || []).length }); } }
@@ -79,7 +83,7 @@ function labInstall() {
   };
   gpu.killBody = (b) => { const v = L.bodyVol.get(b) || 0; L.gpuVol -= v; L.bodyVol.delete(b); return kill(b); };
   gpu.addParticles = (list) => { const s = addP(list); L.pendingParts = (L.pendingParts || []).concat(s); return s; };
-  gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); L.lostParticles = (L.lostParticles || 0) + v; return killP(i); };
+  gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); if (window.__farKill) { L.lostBy.far = (L.lostBy.far || 0) + v; L.farParts = (L.farParts || 0) + 1; labEvent('removed_far', L.f, { particle: i, vol: +v.toFixed(3) }); } else L.lostParticles = (L.lostParticles || 0) + v; return killP(i); };
 }
 // (particle volumes are known once the page has their brick sizes: after addPieces)
 function labParticlesMade() {
@@ -150,6 +154,25 @@ function labFrameChecks() {
 // every read-back: the physics
 const LAB_RHO = [2400, 1800, 2500, 2500, 500, 7800, 2400, 2400];
 function labOnRead(r, pr) {
+  // (what is still awake near the end, for a run that does not settle: bodies, and where the awake particles are)
+  if (LAB.f >= LAB.spec.frames - 3 && r.sleeping && !LAB.awakeEnd) {
+    const L = LAB, list = [], nb = Math.min(gpu.bodies.length, r.body.length / 7);
+    for (let b = 1; b <= nb; b++) { const gb = gpu.bodies[b - 1]; if (!gb || gb.dead || r.sleeping[b - 1]) continue; const o = (b - 1) * 7, vo = (b - 1) * 3;
+      if (r.body[o + 1] < -500) continue;
+      list.push({ b, made: gb.labF, size: gb.labH, vol: +(gb.labVol || 0).toFixed(2), p: [r.body[o], r.body[o + 1], r.body[o + 2]].map(x => +x.toFixed(2)), v: [r.vel[vo], r.vel[vo + 1], r.vel[vo + 2]].map(x => +x.toFixed(3)), w: r.ang ? [r.ang[vo], r.ang[vo + 1], r.ang[vo + 2]].map(x => +x.toFixed(3)) : null }); }
+    const cells = new Map();
+    if (pr) for (const i of pr.list) { if (pr.data[i * 12 + 10] !== 1) continue; const k = [0, 1, 2].map(c => Math.round(pr.data[i * 12 + c] / 2) * 2).join(','); const e = cells.get(k) || { n: 0, v: 0 }; e.n++; e.v = Math.max(e.v, Math.hypot(pr.data[i * 12 + 3], pr.data[i * 12 + 4], pr.data[i * 12 + 5])); cells.set(k, e); }
+    L.awakeEnd = { bodies: list.slice(0, 20), particle_cells: [...cells.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 12).map(([k, e]) => ({ at: k, n: e.n, vmax: +e.v.toFixed(2) })) };
+  }
+  // the clean-up distance: how far past it anything still in the world is from where it was first seen
+  if (farDist < Infinity) {
+    const L = LAB; let worst = 0;
+    // (less what its speed carries it over the read-backs' lag, 3 frames: it goes at the next read-back)
+    const lag = 3 / 60;
+    for (const [b, f] of farO) { const gb = gpu.bodies[b - 1]; if (!gb || gb.dead || !r.body || (b - 1) * 7 + 2 >= r.body.length) continue; const o = (b - 1) * 7, vo = (b - 1) * 3; worst = Math.max(worst, Math.hypot(r.body[o] - f.p[0], r.body[o + 1] - f.p[1], r.body[o + 2] - f.p[2]) - farDist - lag * Math.hypot(r.vel[vo], r.vel[vo + 1], r.vel[vo + 2])); }
+    if (pr) for (const i of pr.list) { const inf = pInfo[i]; if (inf && inf.o) worst = Math.max(worst, Math.hypot(pr.data[i * 12] - inf.o[0], pr.data[i * 12 + 1] - inf.o[1], pr.data[i * 12 + 2] - inf.o[2]) - farDist - lag * Math.hypot(pr.data[i * 12 + 3], pr.data[i * 12 + 4], pr.data[i * 12 + 5])); }
+    L.farOver = Math.max(L.farOver || 0, worst);
+  }
   const L = LAB, f = L.f, nb = r.body.length / 7;
   const quiet = f > L.quietFrom;   // nothing pushed from outside lately (blast, ball, cut)
   let bad = 0, below = 0, gain = 0, ekPrev = 0;
@@ -256,9 +279,10 @@ function labReport(wallS) {
     ['energy gains over 5% (while quiet)', L.energyGains, 0, 'energy made from nothing'],
     // what the tools did not take out must stay in the world: standing, falling, as rubble or particles. Dust (fines
     // removed) is real but small; a whole floor gone as dust is a floor that vanished (7 November: 57% in collapse)
-    ['volume lost, not to the tools (% of the building)', +(100 * (L.V0 - L.T - (L.lostBy.tool || 0)) / L.V0).toFixed(1), 2, 'parts vanishing'],
+    // (what the clean-up distance removed is gone on purpose, like what the tools took)
+    ['volume lost, not to the tools (% of the building)', +(100 * (L.V0 - L.T - (L.lostBy.tool || 0) - (L.lostBy.far || 0)) / L.V0).toFixed(1), 2, 'parts vanishing'],
     // (and none made: a part doubled, 7 November: the mixed building's falling part doubled where the GPU had broken it)
-    ['volume made (% of the building)', +Math.max(0, -100 * (L.V0 - L.T - (L.lostBy.tool || 0)) / L.V0).toFixed(1), 0.5, 'parts doubled'],
+    ['volume made (% of the building)', +Math.max(0, -100 * (L.V0 - L.T - (L.lostBy.tool || 0) - (L.lostBy.far || 0)) / L.V0).toFixed(1), 0.5, 'parts doubled'],
   ].map(([name, value, limit, what]) => ({ name, value, limit, pass: value <= limit, what }));
   if (S.expect && S.expect.gradual) {
     // a building eaten away fails progressively: joints crack (and wear through) before the upper storeys come
@@ -272,6 +296,15 @@ function labReport(wallS) {
     checks.push({ name: 'upper storeys come down (share of their volume)', value: +lost.toFixed(2), limit: `>= ${S.expect.upperLoss}`, pass: lost >= S.expect.upperLoss, what: 'eaten away, it does not stand for ever' });
     L.gradual = { fall_f: fall ? fall.f : null, first_failure_f: first ? first.f : null, worn_before: before.worn || 0, worn_total: last.worn || 0 };
   }
+  // (with the default distance, 100 m, nothing in these scenarios flies that far: what goes was measured from the
+  // wrong place. 8 November: spare bodies seen parked 1 km under the ground, 1,018 m3 of the mixed building went)
+  if (S.far == null) checks.push({ name: 'removed past the clean-up distance (% of the building)', value: +(100 * (L.lostBy.far || 0) / L.V0).toFixed(1), limit: 0.5, pass: 100 * (L.lostBy.far || 0) / L.V0 <= 0.5, what: 'parts removed that did not fly that far' });
+  if (S.expect && S.expect.far) {
+    // past the clean-up distance things go at the next read-back (what their speed carries them over the lag is
+    // allowed for, see labOnRead)
+    checks.push({ name: 'removed past the clean-up distance (bodies + particles)', value: (L.farBodies || 0) + (L.farParts || 0), limit: '>= 1', pass: (L.farBodies || 0) + (L.farParts || 0) >= 1, what: 'the clean-up distance works' });
+    checks.push({ name: 'farthest past the clean-up distance, still in the world (m)', value: +(L.farOver || 0).toFixed(2), limit: 1, pass: (L.farOver || 0) <= 1, what: 'nothing stays far out' });
+  }
   if (S.expect && S.expect.roofDrop) checks.push({ name: 'roof fall (m)', value: +(roof0 - (last.roof || 0)).toFixed(2), limit: `>= ${S.expect.roofDrop}`, pass: roof0 - (last.roof || 0) >= S.expect.roofDrop, what: 'the cut storey brings the building down' });
   if (S.expect && S.expect.settle) checks.push({ name: 'settled (s)', value: L.settledAt == null ? 'no' : +(L.settledAt / 60).toFixed(1), limit: `by ${(S.frames / 60).toFixed(0)}`, pass: L.settledAt != null, what: 'everything asleep before the end' });
   const gpuMs = se.map(x => x.gpu), jsMs = L.jsMs;
@@ -279,7 +312,7 @@ function labReport(wallS) {
     scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: ['concrete frame', 'masonry', 'mass timber', 'mixed'][S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
     pass: checks.every(c => c.pass), checks, colConflicts: L.colConflicts || 0, colConflictAt: L.colConflictAt || null, digest: L.digest, dumpRaw: L.dumpRaw ? { ...L.dumpRaw, colRows: L.colRows, allRows: L.allRows } : (L.colRows ? { colRows: L.colRows, allRows: L.allRows } : null),
-    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_by: { ...partsBy }, big_breaks: L.bigBreaks, made: L.made, gains: L.gains, spill_why: { crumbs: E.spill_why(0), fragments: E.spill_why(1), crushed_storey: E.spill_why(2), static: E.spill_why(3), fragment_bricks_by_mat: [0, 1, 2, 3, 4, 5, 6, 7].map(k => E.spill_mat(k)), single_brick_fragments: E.spill_mat(8) }, over_breaks: L.overBreaks, dbg_breaks: L.dbgBreaks, lost_m3: Object.fromEntries(Object.entries({ ...L.lostBy, particles_crushed: L.lostParticles || 0, building: L.V0 }).map(([k, v]) => [k, +v.toFixed(1)])), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps, gradual: L.gradual || undefined },
+    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_by: { ...partsBy }, big_breaks: L.bigBreaks, made: L.made, gains: L.gains, spill_why: { crumbs: E.spill_why(0), fragments: E.spill_why(1), crushed_storey: E.spill_why(2), static: E.spill_why(3), fragment_bricks_by_mat: [0, 1, 2, 3, 4, 5, 6, 7].map(k => E.spill_mat(k)), single_brick_fragments: E.spill_mat(8) }, over_breaks: L.overBreaks, dbg_breaks: L.dbgBreaks, lost_m3: Object.fromEntries(Object.entries({ ...L.lostBy, particles_crushed: L.lostParticles || 0, building: L.V0 }).map(([k, v]) => [k, +v.toFixed(1)])), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, removed_far: { bodies: L.farBodies || 0, particles: L.farParts || 0, m3: +((L.lostBy.far || 0)).toFixed(2) }, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps, gradual: L.gradual || undefined, awake_at_end: L.awakeEnd || undefined },
     perf: {
       wall_s: +wallS.toFixed(1), steps: stepsDone, steps_skipped: gpu.skipped || 0,
       gpu_ms: { median: +med(gpuMs).toFixed(2), p95: +p95(gpuMs).toFixed(2), max: +Math.max(0, ...gpuMs).toFixed(2) },
@@ -320,6 +353,7 @@ function L_events() { return (gpu.events && gpu.events.length) || 0; }
 async function labRun() {
   const L = LAB, st = LABSTATE, name = st.queue[0], S = { ...LAB_SCENARIOS[name] };
   if (st.frames) S.frames = st.frames;   // (a shortened run, for quick checks of the lab itself)
+  farDist = S.far ?? 100;   // (the clean-up distance: the page's default, or the scenario's)
   Object.assign(L, {
     on: true, name, spec: S, t: 0, f: 0, readLag: st.readLag ?? 2, jobLag: st.jobLag ?? 4, render: !!st.render, gates: [], jobq: [],
     draw: { n: 0, vol: 0, keys: new Float64Array(4096), pos: new Float32Array(4096 * 3), bound: new Float32Array(4096) },
@@ -339,7 +373,7 @@ async function labRun() {
   $('start').hidden = true; physicsPaused = false;
   $('bench').hidden = false; $('bench-title').textContent = `Lab: ${name} (${st.done.length + 1} of ${st.done.length + st.queue.length})`;
   labInstall();
-  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.lostBy = {}; L.made = []; L.bigBreaks = []; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
+  L.staticT = labTruthStatic(); labTruth(); L.V0 = L.T; L.lostBy = {}; L.farBodies = 0; L.farParts = 0; L.farOver = 0; L.awakeEnd = null; L.made = []; L.bigBreaks = []; L.Thist = [L.T]; L.staticDrawn = Object.values(chunkVol).reduce((a, b) => a + b, 0);
   try { const info = dev.adapterInfo || (dev.adapter && dev.adapter.info); L.adapter = info ? `${info.vendor} ${info.architecture} ${info.description || ''}`.trim() : ''; } catch (e) {}
   const tw = performance.now();
   let lastShow = 0;

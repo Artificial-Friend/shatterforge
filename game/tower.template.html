@@ -58,6 +58,7 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Irregular chunks <b id="v-chunks"></b><input type="range" id="s-chunks" min="0" max="1" step="1"><span class="hint">on: loose bricks too big for particles break into convex chunks (real shapes, they tumble and pile); off: they stay boxes</span></label>
   <label>Crumbs as particles <b id="v-particles"></b><input type="range" id="s-particles" min="0" max="1" step="1"><span class="hint">on: loose bricks up to 0.5 m are granular particles (pile and slide, much cheaper; they do not push larger pieces); off: every crumb is a rigid body</span></label>
   <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
+  <label>Clean-up distance <b id="v-far"></b><input type="range" id="s-far" min="25" max="525" step="25"><span class="hint">rubble and pieces carried this far from where they broke off are removed (less to simulate and draw); at the far end of the slider, never</span></label>
   <label>Physics sub-steps <b id="v-substeps"></b><input type="range" id="s-substeps" min="4" max="16" step="1"><span class="hint">per 1/60 s step: more = stiffer, more accurate stacks, slower</span></label>
   <label>Real-time steps <b id="v-realtime"></b><input type="range" id="s-realtime" min="0" max="1" step="1"><span class="hint">on: when the GPU cannot keep up even at the fewest sub-steps, steps cover 1/30 s with twice the sub-steps (same accuracy, less work per second); the HUD's time ×0.xx says how far behind real time physics runs</span></label>
   <label>Adaptive sub-steps <b id="v-adaptive"></b><input type="range" id="s-adaptive" min="0" max="1" step="1"><span class="hint">on: when physics falls behind real time, sub-steps drop (to 8 at least) and come back when the GPU has room</span></label>
@@ -130,9 +131,12 @@ const LAB_SCENARIOS = {
     for (let z = -10.8; z <= 10.9; z += 0.9) { shot([16, 1.3, z], [-1, 0, 0]); shot([16, 1.3, z], [-1, 0, 0]); }
     for (let k = 0; k < 4; k++) { shot([7.5, 1.3, -16], [0, 0, 1]); shot([7.5, 1.3, 16], [0, 0, -1]); }
     return { kind: 3, storeys: 5, frames: f + 900, title: 'mixed, 5 storeys: the ground storey eaten away with the 0.7 m tool', script: s, expect: { gradual: true, upperLoss: 0.5 } }; })(),
+  // the clean-up distance, short: a steel ball fired at the facade from 30 m goes once it has flown 15 m from where
+  // it was fired (a blast into a cut building's rubble threw nothing 8 m: the scenario must throw something)
+  far: { kind: 0, storeys: 3, frames: 240, far: 15, title: 'concrete frame, 3 storeys: a steel ball fired from 30 m, clean-up distance 15 m', script: [[10, 'ball', [-4, 4, -30, 0.15, 0.02]]], expect: { far: true } },
   rubble: { kind: 0, storeys: 3, frames: 720, title: 'concrete frame, 3 storeys: cut, then a blast into the rubble', script: [[0, 'cut'], [480, 'blast', [-14, 6, -14, 1, -0.45, 1, 2.5]]], expect: { settle: true } },
 };
-const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'rubble', 'nibble'] };
+const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'rubble', 'nibble', 'far'] };
 let LABSTATE = null; try { LABSTATE = JSON.parse(localStorage.getItem('sf-lab') || 'null'); } catch (e) {}
 if (LABSTATE && !(LABSTATE.queue && LABSTATE.queue.length && LAB_SCENARIOS[LABSTATE.queue[0]])) LABSTATE = null;
 const LAB = { on: false, t: 0, f: 0 };
@@ -307,11 +311,17 @@ function pullDebris() {
         const st = d[i * 12 + 10], inf = pInfo[i];
         if (!inf || inf.dead || st === 0 || st === 4 || inf.gen !== pgen[i]) continue;
         if (st === 3) { inf.dead = true; gpu.killParticle(i); partsCrushed++; continue; }
+        if (farDist < Infinity) {
+          const x = d[i * 12], y = d[i * 12 + 1], z = d[i * 12 + 2];
+          if (!inf.o) inf.o = [x, y, z];
+          else if (Math.hypot(x - inf.o[0], y - inf.o[1], z - inf.o[2]) > farDist) { inf.dead = true; window.__farKill = true; try { gpu.killParticle(i); } finally { window.__farKill = false; } partsFar++; continue; }
+        }
         list.push(i);
       }
       pr.list = list; pr.gens = list.map(i => pInfo[i].gen);
       pr.index = new Map(); list.forEach((i, k) => pr.index.set(pInfo[i].gen * 1048576 + i, k));
     }
+    cleanFar(r);
     if (LAB.on) labOnRead(r, pr);
     velHist.unshift({ v: r.vel, frame: r.frame }); if (velHist.length > 4) velHist.pop(); lastReadFrame = r.frame; lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
     drawTargets(r);
@@ -352,7 +362,7 @@ function drawDebris(now) {
       const sh = gpu.shapes[r.slots[k] - 1], b = sh ? sh.body : 0, vo = (b - 1) * 3;
       const sp = r.vel && vo >= 0 && vo + 2 < r.vel.length ? Math.hypot(r.vel[vo], r.vel[vo + 1], r.vel[vo + 2]) : 0;
       const hv = tg > 0 ? GpuWorld.hulls.hulls[tg].vol : 1;
-      labDrawn(r.gens[k] * 1048576 + r.slots[k], PP.x, PP.y, PP.z, sp, LAB.balls.has(b) || tg === -2 ? 0 : 8 * SS.x * SS.y * SS.z * hv);
+      labDrawn(r.gens[k] * 1048576 + r.slots[k], PP.x, PP.y, PP.z, sp, (sh && sh.labBall) || tg === -2 ? 0 : 8 * SS.x * SS.y * SS.z * hv);
     }
   }
   // particles, blended the same way (matched by slot and generation)
@@ -460,6 +470,31 @@ function applyStatic(updates) {
 const PART_R = 0.25;   // largest equal-volume radius (m) made a particle
 const pInfo = [];      // particle slot -> { h, col, gen, dead }
 let partsMade = 0, partsCrushed = 0;
+// Clean-up distance: rubble particles and pieces carried farther than this from where they were first seen (where
+// they broke off, a read-back or two later) are removed: they no longer take part in the collapse, and cost steps
+// and drawing (a blast or a fall can throw crumbs a long way).
+let farDist = 100, partsFar = 0, bodiesFar = 0;
+const farO = new Map();   // body slot -> { gen, p: where it was first seen }
+function cleanFar(r) {
+  if (LAB.on && LAB.spec && LAB.spec.far != null) farDist = LAB.spec.far;   // (a lab scenario's own distance, over the setting)
+  if (!(farDist < Infinity) || !r.body) return;
+  const nb = Math.min(gpu.bodies.length, r.body.length / 7);
+  for (let b = 1; b <= nb; b++) {
+    const gb = gpu.bodies[b - 1]; if (!gb || gb.dead) { farO.delete(b); continue; }
+    const o = (b - 1) * 7, p = [r.body[o], r.body[o + 1], r.body[o + 2]], gen = gpu.genOf(b);
+    // (a spare body waits parked 1 km under the ground until a break on the GPU hands it a part: it is first
+    // seen where that part is. Seen parked, it was 1 km from there, and the mixed building's parts went: 1,018 m3)
+    if (p[1] < -500) { farO.delete(b); continue; }
+    const f = farO.get(b);
+    if (!f || f.gen !== gen) { farO.set(b, { gen, p }); continue; }
+    if (Math.hypot(p[0] - f.p[0], p[1] - f.p[1], p[2] - f.p[2]) <= farDist) continue;
+    // (not a part the engine is still splitting, nor one with a split on the GPU waiting for it)
+    if (engineBroken.has(b) || snapPending.has(b)) continue;
+    window.__farKill = true;
+    try { gpu.breakBody(b, [], p, [r.body[o + 3], r.body[o + 4], r.body[o + 5], r.body[o + 6]], [], [], []); } finally { window.__farKill = false; }
+    bodyInfo.delete(b); farO.delete(b); bodiesFar++;
+  }
+}
 function asParticle(b) {
   if (!setting.particles || !gpu.capP || b.id >= 0 || b.boxes.length !== 1) return false;
   const s = boxShape(b.boxes[0], 0);
@@ -1081,6 +1116,7 @@ const SETTINGS = {
   rubble: { el: 's-rubble', def: 64, fmt: v => `${v}`, apply: v => setParam(1, v) },
   substeps: { el: 's-substeps', def: 12, fmt: v => `${v}`, apply: v => { if (gpu) gpu.substeps = v; } },
   colors: { el: 's-colors', def: 16, fmt: v => `${v}`, apply: v => { if (gpu) { gpu.maxColors = v; gpu.colorLimit = Math.min(gpu.colorLimit, v); } } },
+  far: { el: 's-far', def: 100, fmt: v => (+v > 500 ? 'off' : `${v} m`), apply: v => { farDist = +v > 500 ? Infinity : +v; } },
   bspeed: { el: 's-bspeed', def: 60, fmt: v => `${v} m/s`, apply: () => {} },
   bsize: { el: 's-bsize', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: () => {} },
 };
@@ -1227,7 +1263,7 @@ function benchShow(done) {
     lines.push(`frame time: median ${pct(0.5).toFixed(1)} ms · 95th ${pct(0.95).toFixed(1)} ms · worst ${pct(1).toFixed(1)} ms`);
     lines.push(`GPU step: worst ${BENCH.gpuMax.toFixed(1)} ms${last.gpuStages ? ' · last ' + Object.entries(last.gpuStages).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ') : ''}`);
     lines.push(`invalid inputs refused: ${gpu.rejected || 0} · bad poses at the end: ${last.bad || 0} · flicker check: ${flick.vanished} shapes vanished unexplained, ${flick.jumps} jumped`);
-    lines.push(`particles: ${partsMade} made, ${partsCrushed} crushed to dust, peak ${Math.max(0, ...r.map(x => x.parts))} · steps skipped at rest: ${last.skipped || 0}`);
+    lines.push(`particles: ${partsMade} made, ${partsCrushed} crushed to dust, ${partsFar} and ${bodiesFar} pieces removed past ${farDist < Infinity ? farDist + ' m' : 'no limit'}, peak ${Math.max(0, ...r.map(x => x.parts))} · steps skipped at rest: ${last.skipped || 0}`);
     lines.push(`peak bodies ${Math.max(...r.map(x => x.bodies))} · peak contacts ${Math.max(...r.map(x => x.contacts))} · breaks ${last.breaks} · bricks to dust ${last.dust} · roof ${r.length ? r[0].roof.toFixed(1) : '?'} -> ${(last.roof || 0).toFixed(1)} m`);
     $('bench-title').textContent = 'Benchmark: done';
   }

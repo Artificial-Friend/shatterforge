@@ -131,6 +131,7 @@ Crumbs are particles: spheres of the brick's volume, drawn as the bricks they ar
    - a 2.9 t slab dropped on a heap at 6.8 m/s sinks to 0.16 m up, none crushed, back up at 0.06 m/s (one-way particles: through to the ground, 981 of 1,500 crushed);
    - a 120 t block on 25 scattered particles (1.5 MPa) crushes them all and reaches the ground;
    - a 21.6 t block set down on crumbs on a sleeping slab is held 0.30 m above it, none crushed.
+   **On a moving body.** A particle between two moving bodies holds the upper one up against the lower (a part resting on rubble on a slab still awake): the support contact is then between the two bodies (`sup_record` keeps one body under each shape, the static world first). Before, such a particle was crushed once both pressed it 0.3 r deep; `heapcreep` with the slab awake: the block went through to the slab, 228 crushed → held 0.16 m above it, none crushed. Lab `mixed`, 600 frames: particles crushed 48 → 26 m³, volume lost 3.1% → 1.7%.
    Tried first: the shape held outright and the particles crushed when overloaded, judged on the load smoothed over 5 steps. A landing's spike kept the overload on for 30 steps and crushed every particle pressed meanwhile (`heapcreep`: through to the slab, 239 crushed); capped at twice the weight instead, the mixed building's upper part (2,140 t) stopped 2.5 m down on the cut storey's crumbs (roof fall 2.54 m, limit 3).
 5. **Rest.** A particle sleeps after 0.5 s touching something and staying within 1 cm of where its timer restarted. A particle wedged among sleeping ones may jitter in place without going anywhere, and a speed test kept such particles awake indefinitely.
 
@@ -189,6 +190,8 @@ A first version that also held the lower body for approaching contacts was unsta
 All other GPU tests pass unchanged. `GpuWorld.shock = false` turns it off.
 
 ## Crushing on contact
+
+**After a crush.** A crushed piece stops where it is (the page turns it into rubble at rest there), and the next step's contacts of the bodies it was pressing start afresh (kernel `crush_release`; `emit`): their warm start carried the load the crushed piece had passed on, and without it threw them. GPU test `chain`: a 223 kg piece under a block crushed by a 259 t part went up at 20.6 m/s (13,800 N s warm-started, 62 m/s of its own); now 2.97 m/s at most.
 
 A light piece pressed by a body at least 20 times heavier is crushed on the GPU (kernel `crush`), when the impulse it took in a step is more than 1.5 times what its own approach momentum needs (it is being squeezed against something) and it approached at 1 m/s or more. From then on it collides only with the static world, so the heavy body goes through it. The page (`takeCrushed`) turns it into rubble particles, its bricks split into cubes of at most 0.4 m, placed from its current pose.
 

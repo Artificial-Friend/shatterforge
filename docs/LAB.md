@@ -352,3 +352,24 @@ Open:
 - `mixed`: 32 rebounds and 9 launches, mostly single bricks and slabs, several rising over a few frames inside the pile (frames 148–304).
 - Jumps: `mixed` 23 (one 55-box part at frame 186, 0.02–0.07 m over its limit, the frame after it was made; the rest particles).
 
+## Open points, and the clean-up distance (8 November)
+
+**Launches.** Traced in `mixed` (frames 172–210, `SF_TRACE_BODIES=409,747`): a 352 kg floor piece between a 1,264 kg piece pressed from above (107,800 N s in one step) and a 360 kg one below (52,000 N s) went out at 12 m/s. A GPU scene built on that (`chain`) showed the mechanism once a piece in such a stack is crushed: the contacts it pressed kept that load in their warm start. Fixed (docs/GPU.md, "After a crush").
+
+**Volume lost.** Particles between two moving bodies were crushed; they now carry the upper body on the lower (docs/GPU.md, Particles 4).
+
+**Clean-up distance** (setting, default 100 m): rubble particles and pieces carried farther than this from where they were first seen are removed. The lab counts what it removes apart (`lost_m3.far`), and two checks watch it: with the default distance, nothing in these scenarios may go (at most 0.5% of the building: spare bodies, parked 1 km under the ground until a break hands them a part, were first seen there, and 1,018 m³ of `mixed` went before that was fixed); in the new scenario `far` (a blast into the rubble, distance 8 m) something must go and nothing may stay more than 2 m past the distance.
+
+**Full length** (software GPU, 600 frames, this commit's physics), before (7 November evening) → now:
+
+| Scenario | Volume lost | Rebounds | Launches | Jumps | Crumbled share | Roof |
+| --- | --- | --- | --- | --- | --- | --- |
+| `collapse` | 0.4% → 0.2% | 1 → 3 | 0 → 1 | 8 → 7 | 0.07 → 0.07 | 18.64 → 15.55 m |
+| `mixed` | 3.1% → 1.7% | 32 → 25 | 9 → 4 | 23 → 4 | 0.14 → 0.14 | 22.39 → 8.70 m |
+
+Open:
+- Rebounds: most are near the threshold (2–2.7 m/s down, 1.2–2 m/s back up) among pieces in the pile; one spare at 12 m/s back up at 7 m/s (`collapse` frame 70). Launches in `mixed` are at 5.4–5.9 m/s (limit 5).
+- Settling: neither building settles in 10 s. At the end of a run the lab now lists what is awake (`physics.awake_at_end`: bodies, and the 2 m cells with awake particles).
+- `collapse`: drawn volume below what exists in 2 frames (1.5 m³ at frame 67, a body made that frame not yet drawn).
+- Particle jumps at frame 47 of `collapse` (0.3–0.39 m in a frame near the ground, limit 0.25–0.29): particles pushed out by a body landing on them.
+
