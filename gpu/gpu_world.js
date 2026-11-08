@@ -1853,6 +1853,10 @@ const P_SEP = 2.0;
     x += nn * push + pfric((x - xs) - vb * P.p_h, nn, push, mu); touch = 1.0;
     let fixed = !moving(b) || asleep(b);
     if (fixed && nn.y > 0.5) { grounded = true; }
+    // (a particle in contact with a moving body does not fall asleep, see p_finish: under a building resting on
+    // rubble, the particles of a slowly settling heap slept within their own radius, held it no longer, and it
+    // sank 3 m through the rubble of the cut storey in 2 s with no joint failing: lab mixed, frames 300-400)
+    if (!fixed && nn.y < -0.3) { bearing = true; }
     if (lastPush > 0.0 && pen > 0.0 && dot(nn, lastN) < -0.5) {
       // pressed between a moving body and something fixed (the ground, a static or sleeping shape): the particle
       // holds the body up (p_support makes it a contact of the body's at the next step). Crushed as dust
