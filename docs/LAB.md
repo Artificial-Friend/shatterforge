@@ -373,3 +373,27 @@ Open:
 - `collapse`: drawn volume below what exists in 2 frames (1.5 m³ at frame 67, a body made that frame not yet drawn).
 - Particle jumps at frame 47 of `collapse` (0.3–0.39 m in a frame near the ground, limit 0.25–0.29): particles pushed out by a body landing on them.
 
+## Settling and cost at rest (8 November, path 1)
+
+What kept a collapse awake, found with the lab's list of what is awake at the end of a run (`physics.awake_at_end`):
+1. Any awake body woke the particles around it every step: at 10 s, 36,879 of 36,882 particles in `mixed` were awake. Now only a body going somewhere wakes them (docs/GPU.md, Sleeping; GPU test `pilesleep`).
+2. Spare bodies parked 1 km under the ground were woken by a blast's wake-all and fell for the rest of the run (38 of 234 awake bodies in `collapse` at 200 frames). New check: "spare bodies awake while parked", limit 0.
+3. The last crumbs, lodged in the foot of the standing walls, flipped between two places every step and never met the particle rest test (GPU records read back at the end of a run).
+
+Cost: the once-a-step contact kernels are sized by a measured choice (`calibrateDispatch`), resting shapes far from anything awake skip the pair search, and the page reads back and redraws nothing while every step is skipped (docs/GPU.md, Dispatch and Broad phase; GPU test `quietcity`).
+
+**Runs** (software GPU, 780 frames, 13 s, commit 81294ec):
+
+| | `collapse` | `mixed` |
+| --- | --- | --- |
+| Awake at 13 s: bodies / particles | 0 / 1 (before: 0 / 9) | 691 / 35,863 (the building still coming down) |
+| Volume lost | 0.1% | 0.4% |
+| Roof fall | 2.95 m | 15.0 m (13 s; 3.9 m at 10 s in the run before the last sleep change) |
+| Rebounds / launches | 0 / 0 | 21 / 4 |
+| Energy gains | 19 | 0 |
+
+Open:
+- `mixed`: with the last particle rule the upper building does not stay on the rubble of the cut storey at 18 m as in the runs before; it comes down progressively from frame 300 to 7.7 m by 13 s, still moving. Rebounds and launches counted then are among the pieces of that second collapse.
+- `collapse`: 19 energy gains, all one 1,100-box part (1,426 t) resting 9.8 m up, rising and falling 1–1.5 mm a read-back (5–20 kJ, over 5% of the little kinetic energy there is), frames 290–308; it sleeps by frame 600.
+- `collapse`: one particle 55 m out still in flight at 38 m/s at 13 s.
+
