@@ -397,3 +397,15 @@ Open:
 - `collapse`: 19 energy gains, all one 1,100-box part (1,426 t) resting 9.8 m up, rising and falling 1–1.5 mm a read-back (5–20 kJ, over 5% of the little kinetic energy there is), frames 290–308; it sleeps by frame 600.
 - `collapse`: one particle 55 m out still in flight at 38 m/s at 13 s.
 
+### Settling, continued (8 November, evening)
+
+Fixes after the first real-GPU benchmark (bench/2026-11-08_linux-chrome152_nvidia-ampere_bench-mixed-low.txt: real time, 5.6–9.2 ms a step, one dispatch 1.85 µs, but 14,581 of 14,608 particles awake at 40 s):
+- Particles wake from the coarse map of awake boxes, not the grid cells round them (GPU test `farwake`).
+- Particles pushed down by a moving body stay awake; the within-radius rest rule applies only with nothing awake near (lab `mixed`: with it everywhere, the upper building sank 3.4 m through the rubble of the cut storey in 8 s with no joint failing).
+- Support contacts twist against the particles (GPU test `spin`).
+- Lab: SF_PRESET runs a quality preset; the report gives the GPU calls of the last second and the skip state.
+
+**Runs** (software GPU, 960 frames, 16 s): `collapse` settles at 15.3 s (nothing awake from frame 700), roof 18.64 → 15.67 m; open: 21 energy gains (the resting 1,426 t part's millimetre jitter), 3 rebounds. `mixed` does not settle: this run the upper building came down to 7.5 m (crumbled share 0.54, 22 rebounds, 9 launches), where the run before held it at 18.5 m and settled.
+
+**Open: `mixed` is two-way.** Whether the upper building (2,140 t) stays on the rubble of the cut storey or goes on down turns on small changes (the last two runs differ only by twist friction on support contacts): it held at 18.5 m in 4 of the last 7 full runs and came down to 7.5–8.3 m in 3. One run says little about it; the next step is several seeds (SF_SEED) per change, and a check on the spread.
+
