@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -319,6 +319,20 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       const last = ms[ms.length - 1] || {};
       check('quietcity', true, { stagesMs: last, pairs, note: 'timing only' });
+    }
+    if (scenes.includes('farwake')) {
+      // A heap of 400 crumbs, and 9 m away a big part (12 x 2 x 12 m) turning slowly in place, fast enough at its
+      // edge to wake what it touches: the heap must still sleep. (Benchmark, NVIDIA Ampere, mixed, 8 November:
+      // 14,581 of 14,608 particles awake at 40 s with 30 bodies awake; a big shape sits on a coarse grid level,
+      // and particles looked for awake shapes in the 3 x 3 x 3 cells around them there, tens of metres.)
+      let rnd = 11; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const w = await GpuWorld.create(dev, [{ shapes: [{ p: [16, 1.0, 0], q: [0, 0, 0, 1], h: [6, 1, 6], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0.3, 0] }], { substeps: 12, sleep: false, maxBodies: 8, maxShapes: 16, maxParticles: 4096 });
+      const list = []; for (let i = 0; i < 400; i++) list.push({ p: [(rand() - 0.5) * 2.4, 0.2 + rand() * 1.5, (rand() - 0.5) * 2.4], v: [0, 0, 0], r: 0.1 * (0.8 + 0.4 * rand()), mat: MAT.concrete });
+      w.addParticles(list);
+      const awake = [];
+      for (let f = 1; f <= 480; f++) { if (f % 30 === 0) w.setVelocity(1, [0, 0, 0], [0, 0.3, 0], [16, 1.0, 0], [0, 0, 0, 1]); w.step(1 / 60); if (f % 60 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); const pr = await w.readParticles(); let a = 0; for (let i = 0; i < pr.n; i++) if (pr.data[i * 12 + 10] === 1) a++; awake.push(a); } }
+      w.destroy();
+      check('farwake', awake[awake.length - 1] <= 20, { awakeEachSecond: awake });
     }
     if (scenes.includes('stuck')) {
       // Crumbs left inside the standing building, at the foot of a wall (made where a cut brick was, overlapping

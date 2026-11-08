@@ -262,18 +262,20 @@ const CNEAR = 8192u; const CNEAR_CELL = 4.0;
 fn H_LO_v(s: u32) -> vec3f { return Hs(s, H_LO).xyz; }
 fn H_HI_v(s: u32) -> vec3f { return Hs(s, H_HI).xyz; }
 fn near_hash(c: vec3i) -> u32 { return ((u32(c.x) * 73856093u) ^ (u32(c.y) * 19349663u) ^ (u32(c.z) * 83492791u)) % CNEAR; }
-fn near_mark(lo: vec3f, hi: vec3f) {
+// (bit 1: an awake shape; bit 2: one going somewhere, which wakes resting particles: see prep_shapes)
+fn near_mark(lo: vec3f, hi: vec3f, bits: u32) {
   let a = vec3i(floor(lo / CNEAR_CELL)); let b = vec3i(floor(hi / CNEAR_CELL)); let n = b - a + vec3i(1);
-  if (n.x * n.y * n.z > 64) { atomicOr(&ints[P.o_cnear + CNEAR], 1u); return; }
-  for (var z = a.z; z <= b.z; z++) { for (var y = a.y; y <= b.y; y++) { for (var x = a.x; x <= b.x; x++) { atomicOr(&ints[P.o_cnear + near_hash(vec3i(x, y, z))], 1u); } } }
+  if (n.x * n.y * n.z > 64) { atomicOr(&ints[P.o_cnear + CNEAR], bits); return; }
+  for (var z = a.z; z <= b.z; z++) { for (var y = a.y; y <= b.y; y++) { for (var x = a.x; x <= b.x; x++) { atomicOr(&ints[P.o_cnear + near_hash(vec3i(x, y, z))], bits); } } }
 }
-fn near_any(lo: vec3f, hi: vec3f) -> bool {
-  if (ld(P.o_cnear + CNEAR) != 0u) { return true; }
+fn near_bits(lo: vec3f, hi: vec3f, bits: u32) -> bool {
+  if ((ld(P.o_cnear + CNEAR) & bits) != 0u) { return true; }
   let a = vec3i(floor(lo / CNEAR_CELL)); let b = vec3i(floor(hi / CNEAR_CELL)); let n = b - a + vec3i(1);
   if (n.x * n.y * n.z > 64) { return true; }
-  for (var z = a.z; z <= b.z; z++) { for (var y = a.y; y <= b.y; y++) { for (var x = a.x; x <= b.x; x++) { if (ld(P.o_cnear + near_hash(vec3i(x, y, z))) != 0u) { return true; } } } }
+  for (var z = a.z; z <= b.z; z++) { for (var y = a.y; y <= b.y; y++) { for (var x = a.x; x <= b.x; x++) { if ((ld(P.o_cnear + near_hash(vec3i(x, y, z))) & bits) != 0u) { return true; } } } }
   return false;
 }
+fn near_any(lo: vec3f, hi: vec3f) -> bool { return near_bits(lo, hi, 1u); }
 @compute @workgroup_size(64) fn prep_shapes(@builtin(global_invocation_id) g: vec3u) {
   let s = g.x + 1u; if (s >= P.ns1 || dead(s)) { return; }
   let b = sbody(s);
@@ -295,13 +297,14 @@ fn near_any(lo: vec3f, hi: vec3f) -> bool {
   st(P.o_cell + s, hc);
   atomicAdd(&ints[P.o_gcount + hc], 1u);
   // cells holding a moving shape: resting and static shapes only look into these
-  if (dyn_awake(b)) { atomicOr(&ints[P.o_cawake + hc], 1u); near_mark(H_LO_v(s), H_HI_v(s)); }
+  if (dyn_awake(b)) { atomicOr(&ints[P.o_cawake + hc], 1u); }
   // (and 2: one that is going somewhere, fast enough to wake what it touches (see pair_wake_emit) or moved over
   // 1 cm in the last quarter second (its rest timer, see finish): only these wake resting particles. Any awake
   // body woke them, one only chattering in place too, and a settled pile never slept: lab mixed at 10 s, 36,879 of
   // 36,882 particles awake, most under 0.1 m/s. On speed alone, a block sinking slowly into a sleeping heap went
   // through it: GPU test heapcreep, slab awake)
-  if (dyn_awake(b) && (length(v) + length(w) * (length(lp) + length(h)) > P.wake_speed || B(b, F_IL).w < 0.5 * P.sleep_time)) { atomicOr(&ints[P.o_cawake + hc], 2u); }
+  let going = length(v) + length(w) * (length(lp) + length(h)) > P.wake_speed || B(b, F_IL).w < 0.5 * P.sleep_time;
+  if (dyn_awake(b)) { near_mark(H_LO_v(s), H_HI_v(s), select(1u, 3u, going)); }
 }
 
 var<workgroup> wsum: array<u32, 256>;
@@ -1761,16 +1764,11 @@ fn phc(c: vec3i) -> u32 { return ((u32(c.x) * 73856093u) ^ (u32(c.y) * 19349663u
 fn pld(i: u32) -> u32 { return atomicLoad(&pint[i]); }
 fn pst(i: u32, v: u32) { atomicStore(&pint[i], v); }
 // a moving rigid shape in a grid cell around x (any level)
-fn near_awake(x: vec3f) -> bool {
-  for (var L = 0u; L < P.levels; L++) {
-    if (ld(C_LEVEL + L) == 0u) { continue; }
-    let c = cellc(x, L);
-    for (var cz = c.z - 1; cz <= c.z + 1; cz++) { for (var cy = c.y - 1; cy <= c.y + 1; cy++) { for (var cx = c.x - 1; cx <= c.x + 1; cx++) {
-      if ((ld(P.o_cawake + chash(vec3i(cx, cy, cz), L)) & 2u) != 0u) { return true; }
-    } } }
-  }
-  return false;
-}
+// a rigid shape going somewhere near x: in the coarse map of awake boxes (see near_mark), the 4 m cells under x
+// (and 0.5 m round it). (It looked in the 3 x 3 x 3 grid cells round x at every level: on the coarse level a big
+// part sits on, that is tens of metres, and one turning slowly 9 m off kept a heap awake: GPU test farwake, 393
+// of 400 awake at 8 s; benchmark, mixed, 14,581 of 14,608 at 40 s)
+fn near_awake(x: vec3f) -> bool { return near_bits(x - vec3f(0.5), x + vec3f(0.5), 2u); }
 @compute @workgroup_size(64) fn p_prep(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i >= P.np1) { return; }
   let r1 = R(i, 1); var state = u32(r1.w); if (state == 0u || state >= 3u) { return; }
@@ -2496,7 +2494,9 @@ class GpuWorld {
       ...['man_args', 'pair_args', 'hull_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
       ...(modP ? ['p_gather', 'p_place', 'p_prep', 'p_scan', 'p_scatter', 'p_sort', 'p_integrate', 'p_contact', 'p_apply', 'p_finish', 'p_support', 'p_sup_load'] : []).map(async k => { this.pl[k] = await mk(k, partL, modP); })]);
     this.ts = d.features.has('timestamp-query');
-    this.stages = ['broad', 'narrow', 'chunks', 'colour', 'sub-steps', 'particles', 'sleep'];
+    // ('broad' is the pair search; 'shapes' and 'grid' the broad phase before it: shapes placed, then sorted into
+    // the grid; split to see which costs on a real GPU, where the three took 1.6-3.3 ms a step together)
+    this.stages = ['broad', 'narrow', 'chunks', 'colour', 'sub-steps', 'particles', 'sleep', 'shapes', 'grid'];
     if (this.ts) {
       this.qs = d.createQuerySet({ type: 'timestamp', count: 32 });
       this.qBuf = buf(256, U.QUERY_RESOLVE | U.COPY_SRC);
@@ -2618,7 +2618,9 @@ class GpuWorld {
       if (this.capP) { p.setBindGroup(2, this.bgP); run(p, 'p_place', Math.ceil(this.inheritCount / 64)); }
       run(p, 'retire', Math.ceil(this.inheritCount / 64)); p.end();
     }
-    p = pass('broad'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'sort_cells', nsh); run(p, 'pairs', nsh); p.end();
+    p = pass('shapes'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); p.end();
+    p = pass('grid'); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'sort_cells', nsh); p.end();
+    p = pass('broad'); run(p, 'pairs', nsh); p.end();
     p = pass(null, true); run(p, 'pair_args', 1); p.end();
     p = pass('narrow'); ind(p, 'narrow', 99 * 4); p.end();
     // the chunk pairs listed by narrow, always sized by their real count (one indirect dispatch)
@@ -2687,7 +2689,7 @@ class GpuWorld {
     p.end();
     if (this.sleep) { p = pass('sleep'); ind(p, 'uf_union', 96 * 4); run(p, 'uf_min', nb); run(p, 'uf_sleep', nb); p.end(); }
     if (stamp) {
-      const k = this.stages.length - (this.sleep ? 0 : 1);
+      const k = this.stages.length;   // (with sleep off its pair stays unwritten, and is left out when read)
       enc.resolveQuerySet(this.qs, 0, 2 * k, this.qBuf, 0);
       enc.copyBufferToBuffer(this.qBuf, 0, this.qRead, 0, 16 * k);
       this.qCopied = k;
@@ -2979,7 +2981,7 @@ class GpuWorld {
       const t = new BigUint64Array(this.qRead.getMappedRange().slice(0, 16 * k));
       this.qRead.unmap();
       const ms = {};
-      this.stages.slice(0, k).forEach((s, i) => { ms[s] = Number(t[2 * i + 1] - t[2 * i]) / 1e6; });
+      this.stages.slice(0, k).forEach((s, i) => { if (s === 'sleep' && !this.sleep) return; ms[s] = Number(t[2 * i + 1] - t[2 * i]) / 1e6; });
       if (!this.gpuMs) this.gpuMs = ms; else for (const s in ms) this.gpuMs[s] = 0.8 * (this.gpuMs[s] ?? ms[s]) + 0.2 * ms[s];
       this.qPending = false;
     }, () => { this.qPending = false; });
@@ -4300,7 +4302,7 @@ function benchShow(done) {
   lines.push('');
   lines.push('  sim s  wall s   fps  steps/s  GPU ms   broad  bodies*  rubble*  bodies  awake  contacts  particles  p.awake  sub  breaks   dust  roof m  bad poses  vanished  jumps');
   lines.push('  (GPU ms per step; broad = finding pairs, bodies* = the bodies\' sub-steps, rubble* = the particles)');
-  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${(x.gpuStages ? x.gpuStages.broad : 0).toFixed(2).padStart(7)} ${(x.gpuStages ? x.gpuStages['sub-steps'] : 0).toFixed(2).padStart(8)} ${(x.gpuStages ? x.gpuStages.particles : 0).toFixed(2).padStart(8)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.parts).padStart(10)} ${String(x.pAwake).padStart(8)} ${String(x.sub).padStart(4)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)} ${String(x.bad).padStart(10)} ${String(x.vanished).padStart(9)} ${String(x.jumps).padStart(6)}`);
+  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${(x.gpuStages ? (x.gpuStages.broad || 0) + (x.gpuStages.shapes || 0) + (x.gpuStages.grid || 0) : 0).toFixed(2).padStart(7)} ${(x.gpuStages ? x.gpuStages['sub-steps'] : 0).toFixed(2).padStart(8)} ${(x.gpuStages ? x.gpuStages.particles : 0).toFixed(2).padStart(8)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.parts).padStart(10)} ${String(x.pAwake).padStart(8)} ${String(x.sub).padStart(4)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)} ${String(x.bad).padStart(10)} ${String(x.vanished).padStart(9)} ${String(x.jumps).padStart(6)}`);
   if (done) {
     const simT = last.sim || 0, wallT = last.wall || 1;
     lines.push('');
