@@ -1260,6 +1260,8 @@ function benchTick(now, dt) {
     if (BENCH.phase === 'at rest') { BENCH.restMs.push(dt * 1000); BENCH.restGpu.push(g); }
     if ((BENCH.phase === 'at rest' && f - BENCH.restF >= BENCH.restFrames) || f >= BENCH.settleEnd) { BENCH.on = false; BENCH.phase = 'done'; Math.random = mathRandom; benchShow(true); }
     else if (f % 60 === 0) { $('bench-title').textContent = `Benchmark: ${BENCH.phase} (${(f / 60).toFixed(0)} s)`; }
+    // (a row every 2 s while it settles, so a report copied before the end shows the way there)
+    if (f - BENCH.lastRow >= 120) { BENCH.lastRow = f; BENCH.rows.push({ sim: f / 60, wall: (now - BENCH.wall0) / 1000, fps, steps: rate.steps, gpu: g, gpuStages: gpu.gpuMs ? { ...gpu.gpuMs } : null, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, breaks, dust: dustBricks, impacts: impactMs, structure: failedJoints, roof: BENCH.rows.length ? BENCH.rows[BENCH.rows.length - 1].roof : 0, bad: 0, vanished: flick.vanished, jumps: flick.jumps, parts: gpu.stats.pLive || 0, pAwake: gpu.stats.pActive || 0, skipped: gpu.skipped || 0, sub: gpu.substeps }); benchShow(); }
     return;
   }
   BENCH.frameMs.push(dt * 1000);
@@ -1293,8 +1295,9 @@ function benchShow(done) {
   lines.push(`settings: quality ${setting.preset || 'custom'} · crush depth ${setting.crush} m · crumbs ${setting.crumbs} (${setting.particles ? 'particles' : 'rigid'}) · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
   lines.push(`cut: 36 blasts in ${(BENCH.cutMs / 1000).toFixed(1)} s`);
   lines.push('');
-  lines.push('  sim s  wall s   fps  steps/s  GPU ms  bodies  awake  contacts  particles  p.awake  sub  breaks   dust  roof m  bad poses  vanished  jumps');
-  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.parts).padStart(10)} ${String(x.pAwake).padStart(8)} ${String(x.sub).padStart(4)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)} ${String(x.bad).padStart(10)} ${String(x.vanished).padStart(9)} ${String(x.jumps).padStart(6)}`);
+  lines.push('  sim s  wall s   fps  steps/s  GPU ms   broad  bodies*  rubble*  bodies  awake  contacts  particles  p.awake  sub  breaks   dust  roof m  bad poses  vanished  jumps');
+  lines.push('  (GPU ms per step; broad = finding pairs, bodies* = the bodies\' sub-steps, rubble* = the particles)');
+  for (const x of r) lines.push(`${x.sim.toFixed(1).padStart(7)} ${x.wall.toFixed(1).padStart(7)} ${x.fps.toFixed(0).padStart(5)} ${x.steps.toFixed(0).padStart(8)} ${x.gpu.toFixed(1).padStart(7)} ${(x.gpuStages ? x.gpuStages.broad : 0).toFixed(2).padStart(7)} ${(x.gpuStages ? x.gpuStages['sub-steps'] : 0).toFixed(2).padStart(8)} ${(x.gpuStages ? x.gpuStages.particles : 0).toFixed(2).padStart(8)} ${String(x.bodies).padStart(7)} ${String(x.awake).padStart(6)} ${String(x.contacts).padStart(9)} ${String(x.parts).padStart(10)} ${String(x.pAwake).padStart(8)} ${String(x.sub).padStart(4)} ${String(x.breaks).padStart(7)} ${String(x.dust).padStart(6)} ${x.roof.toFixed(1).padStart(7)} ${String(x.bad).padStart(10)} ${String(x.vanished).padStart(9)} ${String(x.jumps).padStart(6)}`);
   if (done) {
     const simT = last.sim || 0, wallT = last.wall || 1;
     lines.push('');
