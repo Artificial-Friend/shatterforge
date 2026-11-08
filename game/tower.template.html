@@ -460,15 +460,25 @@ function boxShape(f, o) {
 // a shape's volume (a cell: its share of its own box)
 const shapeVol = (s) => 8 * s.h[0] * s.h[1] * s.h[2] * (s.hull ? GpuWorld.hulls.hulls[s.hull].vol : 1);
 function applyStatic(updates) {
-  let woke = false;
+  let woke = false; const cells = new Map();
   for (const u of updates) {
     const [idx, alive] = [u[0], u[1]];
     const s = boxShape(u, 2);
     // (a brick split into convex cells: each cell is a brick of its own, a hull shape)
     if (alive) slots.set(idx, gpu.setStaticShape(slots.get(idx) ?? null, 1, s.p, s.h, s.mat, s.hull));
-    else if (slots.has(idx)) { gpu.killShape(slots.get(idx)); slots.delete(idx); woke = true; }
+    else if (slots.has(idx)) {
+      gpu.killShape(slots.get(idx)); slots.delete(idx);
+      // what rested on it must fall: woken round the brick (30 cm), not the whole world (which never came to rest
+      // while the building lost bricks: benchmark, NVIDIA Ampere, mixed, 153 bodies awake at 42 s)
+      // (bricks gathered by 4 m cell, one box each: a break removes hundreds at once, and over 64 boxes in a step
+      // wake everything)
+      const r = Math.hypot(s.h[0], s.h[1], s.h[2]) + 0.3, key = s.p.map(c => Math.floor(c / 4)).join(',');
+      const b = cells.get(key) || [Infinity, Infinity, Infinity, -Infinity, -Infinity, -Infinity];
+      for (let k = 0; k < 3; k++) { b[k] = Math.min(b[k], s.p[k] - r); b[k + 3] = Math.max(b[k + 3], s.p[k] + r); }
+      cells.set(key, b); woke = true;
+    }
   }
-  if (woke) gpu.wakeAll();   // what rested on removed bricks must fall
+  if (woke) { if (gpu.wakeNear) for (const b of cells.values()) gpu.wakeNear(b.slice(0, 3), b.slice(3)); else gpu.wakeAll(); }
 }
 // Add bodies whose boxes are in the tower frame. xf: tower frame -> world { R, T, C } (identity when absent);
 // vel(c): the velocity a body starts with at world point c, and its spin.

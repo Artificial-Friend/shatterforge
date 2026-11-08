@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -349,6 +349,29 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       for (let f = 1; f <= 240; f++) { w.step(1 / 60); if (f === 240) { await dev.queue.onSubmittedWorkDone(); await settle(); const r = await w.readPose(); wEnd = Math.hypot(r.ang ? r.ang[(bb - 1) * 3] : 0, r.ang ? r.ang[(bb - 1) * 3 + 1] : 0, r.ang ? r.ang[(bb - 1) * 3 + 2] : 0); asleep = r.sleeping[bb - 1]; } }
       w.destroy();
       check('spin', wEnd < 0.05 && asleep === 1, { spinAt4s: +wEnd.toFixed(3), asleep });
+    }
+    if (scenes.includes('wakenear')) {
+      // A brick is taken out of a standing wall: the box resting on it must fall, and a pile of boxes and a heap of
+      // crumbs 8 m off, asleep, must sleep on. (The page woke the whole world at every brick removed; in a
+      // collapse the structure loses bricks every few seconds, and the benchmark's world never came to rest:
+      // NVIDIA Ampere, mixed, 153 bodies and 11,569 particles awake at 42 s. Here, waking all: the far box and the
+      // heap woke. Now wakeNear, round the brick: they sleep on.)
+      const wall = [{ p: [0, 0.25, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.masonry }, { p: [8, 0.25, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.5], mat: MAT.masonry }];
+      const on = { shapes: [{ p: [0, 0.75, 0], q: [0, 0, 0, 1], h: [0.2, 0.25, 0.2], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] };
+      const far = { shapes: [{ p: [8, 0.75, 0], q: [0, 0, 0, 1], h: [0.2, 0.25, 0.2], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [{ fixed: true, shapes: wall }, on, far], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16, maxParticles: 512 });
+      const list = []; for (let k = 0; k < 64; k++) list.push({ p: [-8 + (k % 8) * 0.2, 0.1 + 0.2 * Math.floor(k / 8) * 0.01, (Math.floor(k / 8) - 4) * 0.2], v: [0, 0, 0], r: 0.1, mat: MAT.concrete });
+      w.addParticles(list);
+      for (let f = 0; f < 120; f++) w.step(1 / 60);
+      await dev.queue.onSubmittedWorkDone(); await settle();
+      const before = await w.readPose();
+      // the brick under the first box goes, as the page does it
+      w.killShape(1);
+      if (w.wakeNear) w.wakeNear([-0.55, -0.3, -0.55], [0.55, 0.8, 0.55]); else w.wakeAll();
+      let farWoke = 0, pWoke = 0, onFell = 0;
+      for (let f = 1; f <= 30; f++) { w.step(1 / 60); if (f % 5 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); const r = await w.readPose(); if (!r.sleeping[2]) farWoke++; const pr = await w.readParticles(); for (let i = 0; i < pr.n; i++) if (pr.data[i * 12 + 10] === 1) { pWoke++; break; } onFell = Math.max(onFell, 0.75 - r.body[1 * 7 + 1]); } }
+      w.destroy();
+      check('wakenear', before.sleeping[1] === 1 && before.sleeping[2] === 1 && onFell > 0.2 && farWoke === 0 && pWoke === 0, { asleepBefore: [before.sleeping[1], before.sleeping[2]], onFell_m: +onFell.toFixed(2), farWoke, particlesWoke: pWoke });
     }
     if (scenes.includes('stuck')) {
       // Crumbs left inside the standing building, at the foot of a wall (made where a cut brick was, overlapping

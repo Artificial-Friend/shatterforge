@@ -47,7 +47,7 @@ struct Params {
   n_inherit: u32, o_inherit: u32, wake_speed: f32, o_cbody: u32,
   mat: array<vec4f, 8>,   // friction, restitution, -, -
   np1: u32, pcell: f32, pg_mask: u32, p_wake: u32,
-  p_h: f32, n_blast: u32, p_cap: u32, pad9: u32,
+  p_h: f32, n_blast: u32, p_cap: u32, o_wbox: u32,
   blast: array<vec4f, 6>,   // particle blasts: (centre, reach), (speed, -, -, -)
   o_ptab: u32, ptab_mask: u32, o_big: u32, o_mslot: u32,   // contact reduction (see red_count)
   o_crushed: u32, o_crush: u32, crush_ratio: f32, crush_dv: f32,   // crushing (see crush)
@@ -731,6 +731,26 @@ fn inh(k: u32, o: u32) -> f32 { return bitcast<f32>(ld(P.o_inherit + k * 12u + o
 }
 
 // wake every sleeping body (the static structure under them changed)
+// Wake what is in given boxes (bricks just removed from the standing building: what rested on them must fall).
+// ints[o_wbox] = count, then 6 floats a box (lo, hi). (The page woke everything instead, at every brick removed:
+// in a collapse the structure loses bricks every few seconds, and the whole world never came to rest: benchmark,
+// NVIDIA Ampere, mixed, 153 bodies and 11,569 particles awake at 42 s; GPU test wakenear)
+const WBOX_MAX = 64u;
+fn wbox_hit(lo: vec3f, hi: vec3f) -> bool {
+  let n = min(ld(P.o_wbox), WBOX_MAX);
+  for (var k = 0u; k < n; k++) {
+    let o = P.o_wbox + 1u + 6u * k;
+    let a = vec3f(bitcast<f32>(ld(o)), bitcast<f32>(ld(o + 1u)), bitcast<f32>(ld(o + 2u)));
+    let b = vec3f(bitcast<f32>(ld(o + 3u)), bitcast<f32>(ld(o + 4u)), bitcast<f32>(ld(o + 5u)));
+    if (all(lo <= b) && all(a <= hi)) { return true; }
+  }
+  return false;
+}
+@compute @workgroup_size(64) fn wake_boxes(@builtin(global_invocation_id) g: vec3u) {
+  let s = g.x + 1u; if (s >= P.ns1 || dead(s)) { return; }
+  let b = sbody(s); if (b == 0u || B(b, F_P).w == 0.0 || !asleep(b)) { return; }
+  if (wbox_hit(Hs(s, H_LO).xyz, Hs(s, H_HI).xyz)) { wake(b); }
+}
 @compute @workgroup_size(64) fn wake_all(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.n1) { return; }
   if (B(i, F_P).w == 0.0) { return; }
@@ -1683,7 +1703,7 @@ fn near_awake(x: vec3f) -> bool { return near_bits(x - vec3f(0.5), x + vec3f(0.5
     let c = P.blast[2u * b]; let d = x - c.xyz; let l = length(d);
     if (l < c.w) { hit = true; v += (d / max(l, 1e-3) + vec3f(0.0, 0.3, 0.0)) * P.blast[2u * b + 1u].x * (1.0 - l / c.w); }
   }
-  if (state == 2u && (hit || P.p_wake != 0u || near_awake(x))) { state = 1u; let r3 = R(i, 3); setR(i, 3, vec4f(r3.xyz, 0.0)); }
+  if (state == 2u && (hit || P.p_wake != 0u || near_awake(x) || (ld(P.o_wbox) != 0u && wbox_hit(x - vec3f(R(i, 0).w), x + vec3f(R(i, 0).w))))) { state = 1u; let r3 = R(i, 3); setR(i, 3, vec4f(r3.xyz, 0.0)); }
   if (state == 1u) { atomicAdd(&ints[12], 1u); setR(i, 1, vec4f(v, 1.0)); }
   atomicAdd(&ints[13], 1u);
   let hc = phc(pcellc(x));
@@ -2316,7 +2336,7 @@ class GpuWorld {
     let o = 16;
     const L = {};
     const take = (k, len) => { L[k] = o; o += len; };
-    take('gcount', G); take('gstart', G); take('gfill', G); take('cawake', G); take('cnear', CNEAR + 1); take('cbody', 2 * G);
+    take('gcount', G); take('gstart', G); take('gfill', G); take('cawake', G); take('cnear', CNEAR + 1); take('cbody', 2 * G); take('wbox', 1 + 6 * 64);
     take('sorted', cs1); take('cell', cs1); take('mask', cb1);
     take('ccount', 33); take('cstart', 33); take('cfill', 33);
     take('order', this.maxMan); take('mcolor', this.maxMan);
@@ -2401,7 +2421,7 @@ class GpuWorld {
     const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color_init', 'color_round', 'color_claim_s', 'color_claim', 'color_tie', 'color_resolve', 'color_count', 'color_check', 'ev_count', 'ev_cut', 'blist_sort', 'ovf_sort', 'sort_cells', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'inherit', 'retire', 'red_count', 'red_big', 'red_score', 'red_pick', 'red_apply', 'crush', 'crush_release', 'pinch_acc', 'pinch', 'level_pass', 'snap_acc', 'sup_acc', 'snap_split', 'snap_shapes'];
+                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'wake_boxes', 'inherit', 'retire', 'red_count', 'red_big', 'red_score', 'red_pick', 'red_apply', 'crush', 'crush_release', 'pinch_acc', 'pinch', 'level_pass', 'snap_acc', 'sup_acc', 'snap_split', 'snap_shapes'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'hull_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
@@ -2451,7 +2471,7 @@ class GpuWorld {
     if (this.capP) {
       let pgE = 256; while (pgE < 2 * this.np && pgE < this.PG) pgE *= 2; this.PGeff = pgE;
       u[96] = this.np; f[97] = this.pcell; u[98] = pgE - 1; u[99] = this.wakeReq ? 1 : 0;
-      f[100] = dt / this.psub; u[102] = this.capP;
+      f[100] = dt / this.psub; u[102] = this.capP; u[103] = L.wbox;
       const bl = (this.pBlasts || []).splice(0, 3); u[101] = bl.length;
       bl.forEach((b, k) => { f.set([...b.c, b.reach], 104 + k * 8); f[108 + k * 8] = b.speed; });
     }
@@ -2525,7 +2545,12 @@ class GpuWorld {
       ? (p, k, off) => { p.setPipeline(this.pl[k]); p.dispatchWorkgroupsIndirect(this.argBuf, off); }
       : (p, k, off) => { p.setPipeline(this.pl[k]); if (this.manIndirect && (off === 384 || off === 396)) p.dispatchWorkgroupsIndirect(this.argBuf, off); else p.dispatchWorkgroups(k === 'restitute_ovf' ? 1 : dirWg[off] ?? perMan); };
     let p;
+    // (the boxes to wake this step, see wakeNear; the count goes back to 0 the step after)
+    const wb = this.wakeReq ? [] : (this.wakeBoxes || []).splice(0, 64); this.wakeBoxes = [];
+    if (wb.length || this.wbN) { const a = new Float32Array(1 + 6 * wb.length); new Uint32Array(a.buffer)[0] = wb.length; wb.forEach((b, k) => a.set(b, 1 + 6 * k)); d.queue.writeBuffer(this.intBuf, L.wbox * 4, a); }
+    this.wbN = wb.length;
     if (this.wakeReq) { this.wakeReq = false; p = pass(null); run(p, 'wake_all', nb); p.end(); }
+    else if (this.wbN) { p = pass(null); run(p, 'wake_boxes', nsh); p.end(); }
     if (this.inheritCount) {
       p = pass(null); run(p, 'inherit', Math.ceil(this.inheritCount / 64));
       if (this.capP) { p.setBindGroup(2, this.bgP); run(p, 'p_place', Math.ceil(this.inheritCount / 64)); }
@@ -2836,6 +2861,9 @@ class GpuWorld {
   }
   // Wake all sleeping bodies at the next step (call when static shapes under them were removed).
   wakeAll() { this.wakeReq = true; this.inputs++; }
+  // Wake the bodies and particles in a box (lo, hi) at the next step: what rested on a brick just removed. More
+  // than 64 boxes in one step wake everything.
+  wakeNear(lo, hi) { this.inputs++; (this.wakeBoxes = this.wakeBoxes || []).push([...lo, ...hi]); if (this.wakeBoxes.length > 64) this.wakeReq = true; }
   // ---- particles: crumbs as granular debris. list: { p, v, q, r (collision radius), mat, wait }; returns slots (-1
   // when full). wait: made from a moving body's older pose, placed by breakBody (pass the slots there). They are
   // drawn from readParticles().
