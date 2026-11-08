@@ -1990,7 +1990,7 @@ const RUBBLE_BEAR = 1.0e6;
     // touches nothing.)
     let dr = distance(r0.xyz, r6.xyz);
     if (touch < 1.5 && dr < 0.01) { t = r3.w + P.dt; }
-    else if (touch < 1.5 && dr < r0.w) { t = r3.w + 0.25 * P.dt; }
+    else if (touch < 1.5 && dr < r0.w && (P.dbg & 128u) != 0u) { t = r3.w + 0.25 * P.dt; }   // EXPERIMENT
     else { setR(i, 6, vec4f(r0.xyz, r6.w)); }
     if (t > 0.5 || r0.y < -50.0) { s = 2.0; v = vec3f(0.0); w = vec3f(0.0); }
     if (r6.w > 0.0) { s = 3.0; v = vec3f(0.0); }
