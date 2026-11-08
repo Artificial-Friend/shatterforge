@@ -1990,7 +1990,11 @@ const RUBBLE_BEAR = 1.0e6;
     // touches nothing.)
     let dr = distance(r0.xyz, r6.xyz);
     if (touch < 1.5 && dr < 0.01) { t = r3.w + P.dt; }
-    else if (touch < 1.5 && dr < r0.w && (P.dbg & 128u) != 0u) { t = r3.w + 0.25 * P.dt; }   // EXPERIMENT
+    // (within its own radius only with nothing awake near it, in the coarse map of awake boxes: under a building
+    // still settling onto the rubble, particles of a slowly compacting heap slept that way, held it no longer, and
+    // it sank 3.4 m through the rubble of the cut storey in 8 s with no joint failing; lab mixed, 780 frames: roof
+    // 17.5 -> 14.1 m with the rule everywhere, held at 18.5 m without it)
+    else if (touch < 1.5 && dr < r0.w && !near_bits(r0.xyz - vec3f(r0.w), r0.xyz + vec3f(r0.w), 1u)) { t = r3.w + 0.25 * P.dt; }
     else { setR(i, 6, vec4f(r0.xyz, r6.w)); }
     if (t > 0.5 || r0.y < -50.0) { s = 2.0; v = vec3f(0.0); w = vec3f(0.0); }
     if (r6.w > 0.0) { s = 3.0; v = vec3f(0.0); }
