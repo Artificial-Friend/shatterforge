@@ -1980,11 +1980,16 @@ const RUBBLE_BEAR = 1.0e6;
     if (touch > 0.0) { w = cross(vec3f(0.0, 1.0, 0.0), v) / max(r0.w, 0.01); }
     // (nor while it holds up a moving body: asleep it would no longer bear it, and the body would sink through the
     // heap; it sleeps once the body does. GPU test heapcreep, slab awake: through to the slab, 220 crushed)
-    // (on the pose alone, as for bodies: nothing in flight stays within a centimetre for half a second. With a
-    // speed limit of 2 m/s, and touching something, 8 crumbs lodged in the foot of the standing walls (inside a
-    // brick, which they no longer see, 1 mm off the ground) never slept, at 2-6 m/s and never moving, and kept
-    // every step of a settled scene running: lab collapse and mixed at 15 s, the same 8 with either rule alone)
-    if (touch < 1.5 && distance(r0.xyz, r6.xyz) < 0.01) { t = r3.w + P.dt; } else { setR(i, 6, vec4f(r0.xyz, r6.w)); }
+    // (on the pose alone, as for bodies: nothing in flight stays within a centimetre for half a second. And a
+    // particle that keeps within its own radius of the anchor rests in 2 s: some, lodged against the foot of the
+    // standing walls or the ground, flip between two places 6-7 cm apart every step, at 2-6 m/s, and with the
+    // centimetre alone 8 of them never slept and kept every step of a settled scene running (lab collapse and
+    // mixed at 13 s; their records showed the flip). Touching was required too: one lodged 1 mm off the ground
+    // touches nothing.)
+    let dr = distance(r0.xyz, r6.xyz);
+    if (touch < 1.5 && dr < 0.01) { t = r3.w + P.dt; }
+    else if (touch < 1.5 && dr < r0.w) { t = r3.w + 0.25 * P.dt; }
+    else { setR(i, 6, vec4f(r0.xyz, r6.w)); }
     if (t > 0.5 || r0.y < -50.0) { s = 2.0; v = vec3f(0.0); w = vec3f(0.0); }
     if (r6.w > 0.0) { s = 3.0; v = vec3f(0.0); }
     q = normalize(q + 0.5 * P.dt * qmul(vec4f(w, 0.0), q));
