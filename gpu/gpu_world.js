@@ -1994,7 +1994,8 @@ const RUBBLE_BEAR = 1.0e6;
     // still settling onto the rubble, particles of a slowly compacting heap slept that way, held it no longer, and
     // it sank 3.4 m through the rubble of the cut storey in 8 s with no joint failing; lab mixed, 780 frames: roof
     // 17.5 -> 14.1 m with the rule everywhere, held at 18.5 m without it)
-    else if (touch < 1.5 && dr < r0.w && !near_bits(r0.xyz - vec3f(r0.w), r0.xyz + vec3f(r0.w), 1u)) { t = r3.w + 0.25 * P.dt; }
+    // (twice its radius: one flipped 10 cm a step with a radius of 10 cm, and stayed awake: lab collapse at 15 s)
+    else if (touch < 1.5 && dr < 2.0 * r0.w && !near_bits(r0.xyz - vec3f(r0.w), r0.xyz + vec3f(r0.w), 1u)) { t = r3.w + 0.25 * P.dt; }
     else { setR(i, 6, vec4f(r0.xyz, r6.w)); }
     if (t > 0.5 || r0.y < -50.0) { s = 2.0; v = vec3f(0.0); w = vec3f(0.0); }
     if (r6.w > 0.0) { s = 3.0; v = vec3f(0.0); }
