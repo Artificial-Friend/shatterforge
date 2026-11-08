@@ -55,6 +55,7 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
         let tb = b.tbox(i);
         let col = colour(b, i);
         if let Some(cl) = b.cell(i) { cell_faces(b, i, cl, col, &mut m); continue; }
+        if let Some(p) = b.piece(i) { piece_faces(p, col, &mut m); continue; }
         // cracked joints of this brick (axis, plane, overlap box): drawn as dark seams where they meet its faces
         let mut cracks: Vec<(usize, i32, TBox)> = Vec::new();
         let mut j = b.jhead[i as usize];
@@ -142,6 +143,17 @@ fn cell_faces(b: &Bricks, i: u32, cl: &crate::hull::Cell, col: [f32; 3], m: &mut
         let (_, _, n) = crate::hull::polygon(&poly);
         let base = (m.v.len() / 9) as u32;
         for p in &poly { m.v.extend_from_slice(&[p[0] as f32, p[1] as f32, p[2] as f32, n[0] as f32, n[1] as f32, n[2] as f32, col[0], col[1], col[2]]); }
+        for t in 1..poly.len() as u32 - 1 { m.i.extend_from_slice(&[base, base + t, base + t + 1]); }
+        m.quads += 1;
+    }
+}
+/// The faces of a free piece, all of them but one lying on the ground (facing down at y = 0). (Faces against its
+/// neighbours: with its joints, docs/PHASE2.md step 5.)
+fn piece_faces(p: &crate::brick::Piece, col: [f32; 3], m: &mut Mesh) {
+    for (n, poly) in p.world_faces() {
+        if n[1] < -0.999 && poly.iter().all(|q| q[1].abs() < 1e-4) { continue; }
+        let base = (m.v.len() / 9) as u32;
+        for q in &poly { m.v.extend_from_slice(&[q[0] as f32, q[1] as f32, q[2] as f32, n[0] as f32, n[1] as f32, n[2] as f32, col[0], col[1], col[2]]); }
         for t in 1..poly.len() as u32 - 1 { m.i.extend_from_slice(&[base, base + t, base + t + 1]); }
         m.quads += 1;
     }

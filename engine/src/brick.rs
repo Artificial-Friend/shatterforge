@@ -64,6 +64,37 @@ pub fn face_contact(p: &TBox, q: &TBox) -> Option<(u8, u32, bool)> {
     None
 }
 
+/// `hull` of a brick that is a free convex piece (its shape is in `pieces`, not the hull library)
+pub const HULL_FREE: u8 = 255;
+/// Grid of a free piece's centre (m): 1 mm.
+pub const PIECE_GRID: f64 = 0.001;
+
+/// A free convex piece, at any angle: its centre on the 1 mm grid (`c`, in mm), its rotation (`q`, x y z w), and its
+/// shape in its own frame about the centre (m): corners and faces (corner loops, counter-clockwise seen from
+/// outside). Its brick's box is the tick box that holds it. Volume and centroid (own frame) are kept.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Piece { pub c: [i32; 3], pub q: [f32; 4], pub v: Vec<[f32; 3]>, pub faces: Vec<Vec<u8>>, pub vol: f64, pub cen: [f64; 3] }
+fn qrot(q: [f32; 4], v: [f64; 3]) -> [f64; 3] {
+    let (x, y, z, w) = (q[0] as f64, q[1] as f64, q[2] as f64, q[3] as f64);
+    // v + 2 w (q x v) + 2 q x (q x v)
+    let t = [2.0 * (y * v[2] - z * v[1]), 2.0 * (z * v[0] - x * v[2]), 2.0 * (x * v[1] - y * v[0])];
+    [v[0] + w * t[0] + (y * t[2] - z * t[1]), v[1] + w * t[1] + (z * t[0] - x * t[2]), v[2] + w * t[2] + (x * t[1] - y * t[0])]
+}
+impl Piece {
+    /// centre (m)
+    pub fn centre(&self) -> [f64; 3] { [self.c[0] as f64 * PIECE_GRID, self.c[1] as f64 * PIECE_GRID, self.c[2] as f64 * PIECE_GRID] }
+    /// corners in the world (m)
+    pub fn world(&self) -> Vec<[f64; 3]> {
+        let c = self.centre();
+        self.v.iter().map(|p| { let r = qrot(self.q, [p[0] as f64, p[1] as f64, p[2] as f64]); [c[0] + r[0], c[1] + r[1], c[2] + r[2]] }).collect()
+    }
+    /// the faces in the world: (outward normal, polygon in m, counter-clockwise seen from outside)
+    pub fn world_faces(&self) -> Vec<([f64; 3], Vec<[f64; 3]>)> {
+        let w = self.world();
+        self.faces.iter().map(|f| { let poly: Vec<[f64; 3]> = f.iter().map(|&k| w[k as usize]).collect(); (crate::hull::polygon(&poly).2, poly) }).collect()
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Bricks {
     // bricks, SoA (25 B each)
@@ -74,6 +105,10 @@ pub struct Bricks {
     /// the brick's convex cell: 0 = its whole box; else a cell of the hull library (`hull::lib`), mapped into the box
     /// (the box is the brick it was split from: the cells of one fractured brick share it)
     pub hull: Vec<u8>,
+    /// free convex pieces (any angle; `hull == HULL_FREE`), in a side table so box bricks keep their 25 B: the
+    /// piece of each such brick, and the pieces
+    pub piece_of: HashMap<u32, u32>,
+    pub pieces: Vec<Piece>,
     // joints, SoA (20 B each); `ja == NONE` marks a free slot
     pub ja: Vec<u32>, pub jb: Vec<u32>, pub jna: Vec<u32>, pub jnb: Vec<u32>,
     pub jarea: Vec<u16>, pub jaxis: Vec<u8>, pub jdmg: Vec<u8>,
@@ -96,7 +131,7 @@ pub struct Bricks {
 /// Raw save and load of a brick store (to hand it between a worker and the page): every array as its length
 /// and bytes, little endian.
 trait Pod: Copy + Default {}
-impl Pod for u8 {} impl Pod for i16 {} impl Pod for u16 {} impl Pod for u32 {} impl Pod for u64 {}
+impl Pod for u8 {} impl Pod for i16 {} impl Pod for i32 {} impl Pod for f32 {} impl Pod for f64 {} impl Pod for u16 {} impl Pod for u32 {} impl Pod for u64 {}
 fn put<T: Pod>(out: &mut Vec<u8>, v: &[T]) {
     out.extend_from_slice(&(v.len() as u32).to_le_bytes());
     let bytes = unsafe { core::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * core::mem::size_of::<T>()) };
@@ -125,6 +160,16 @@ impl Bricks {
         let keys: Vec<u64> = self.cells.keys().copied().collect();
         let vals: Vec<u32> = keys.iter().map(|k| self.cells[k]).collect();
         put(out, &keys); put(out, &vals); put(out, &self.cnext);
+        // free pieces: their bricks, centres, rotations, corner and face counts, corners, face loops
+        let ids: Vec<u32> = { let mut v: Vec<(u32, u32)> = self.piece_of.iter().map(|(&b, &p)| (p, b)).collect(); v.sort(); v.into_iter().map(|x| x.1).collect() };
+        let (mut c, mut q, mut nv, mut nf, mut v, mut f, mut m) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for p in &self.pieces {
+            c.extend_from_slice(&p.c); q.extend_from_slice(&p.q); nv.push(p.v.len() as u32); nf.push(p.faces.len() as u32);
+            for x in &p.v { v.extend_from_slice(x); }
+            for fl in &p.faces { f.push(fl.len() as u8); f.extend_from_slice(fl); }
+            m.push(p.vol); m.extend_from_slice(&p.cen);
+        }
+        put(out, &ids); put(out, &c); put(out, &q); put(out, &nv); put(out, &nf); put(out, &v); put(out, &f); put(out, &m);
     }
     pub fn load(src: &[u8]) -> Bricks {
         let at = &mut 0usize;
@@ -139,6 +184,19 @@ impl Bricks {
         let keys: Vec<u64> = get(src, at); let vals: Vec<u32> = get(src, at);
         b.cells = keys.into_iter().zip(vals).collect();
         b.cnext = get(src, at);
+        if *at < src.len() {
+            let ids: Vec<u32> = get(src, at); let c: Vec<i32> = get(src, at); let q: Vec<f32> = get(src, at);
+            let nv: Vec<u32> = get(src, at); let nf: Vec<u32> = get(src, at); let v: Vec<f32> = get(src, at); let f: Vec<u8> = get(src, at); let m: Vec<f64> = get(src, at);
+            let (mut av, mut af) = (0usize, 0usize);
+            for k in 0..ids.len() {
+                let vs = (0..nv[k] as usize).map(|t| [v[3 * (av + t)], v[3 * (av + t) + 1], v[3 * (av + t) + 2]]).collect();
+                av += nv[k] as usize;
+                let mut faces = Vec::new();
+                for _ in 0..nf[k] { let n = f[af] as usize; faces.push(f[af + 1..af + 1 + n].to_vec()); af += 1 + n; }
+                b.pieces.push(Piece { c: [c[3 * k], c[3 * k + 1], c[3 * k + 2]], q: [q[4 * k], q[4 * k + 1], q[4 * k + 2], q[4 * k + 3]], v: vs, faces, vol: m[4 * k], cen: [m[4 * k + 1], m[4 * k + 2], m[4 * k + 3]] });
+                b.piece_of.insert(ids[k], k as u32);
+            }
+        }
         b
     }
 }
@@ -166,6 +224,36 @@ impl Bricks {
         self.log.push(i);
         i
     }
+
+    /// Add a free convex piece: the hull of `pts` (m, in the piece's own frame about `centre`), turned by `q` (x y z
+    /// w) and placed at `centre` (m, snapped to the 1 mm grid). None if the points have no volume, the hull is beyond
+    /// the GPU's limits on a hull, or it is too big for a brick's box (32 m a side).
+    pub fn add_piece(&mut self, centre: [f64; 3], q: [f32; 4], pts: &[[f64; 3]], material: u8, paint: u8, structure: u16) -> Option<u32> {
+        let sh = crate::hull::convex(pts)?;
+        let ql = { let l = crate::math::sqrt64(q.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>()) as f32; if l > 0.0 { [q[0] / l, q[1] / l, q[2] / l, q[3] / l] } else { [0.0, 0.0, 0.0, 1.0] } };
+        let snap = |x: f64| crate::math::floor64(x / PIECE_GRID + 0.5) as i32;
+        let c = [snap(centre[0]), snap(centre[1]), snap(centre[2])];
+        let faces: Vec<Vec<u8>> = sh.faces.iter().map(|f| f.2.iter().map(|&k| k as u8).collect()).collect();
+        let v: Vec<[f32; 3]> = sh.v.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
+        // mass properties from the stored (f32) corners, so they are those of the shape kept
+        let vd: Vec<[f64; 3]> = v.iter().map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+        let fi: Vec<Vec<usize>> = faces.iter().map(|f| f.iter().map(|&k| k as usize).collect()).collect();
+        let (vol, cen, _) = crate::hull::moments(&vd, &fi);
+        let piece = Piece { c, q: ql, v, faces, vol, cen };
+        // its box: the ticks that hold its corners
+        let w = piece.world();
+        let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+        for p in &w { for k in 0..3 { let t = p[k] / TICK as f64; lo[k] = lo[k].min(crate::math::floor64(t + 1e-9) as i32); hi[k] = hi[k].max(crate::math::ceil64(t - 1e-9) as i32); } }
+        let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        if size.iter().any(|&s| s < 1 || s > 255) || lo.iter().chain(hi.iter()).any(|&t| t < i16::MIN as i32 || t > i16::MAX as i32) { return None; }
+        let i = self.add(lo, size, material, paint, structure);
+        self.hull[i as usize] = HULL_FREE;
+        self.piece_of.insert(i, self.pieces.len() as u32);
+        self.pieces.push(piece);
+        Some(i)
+    }
+    /// the brick's free piece, if it is one
+    #[inline] pub fn piece(&self, i: u32) -> Option<&Piece> { if self.hull[i as usize] != HULL_FREE { return None; } self.piece_of.get(&i).map(|&k| &self.pieces[k as usize]) }
 
     fn index(&mut self, i: u32) {
         let b = self.tbox(i);
@@ -343,7 +431,7 @@ impl Bricks {
 
     // ---- convex cells ----
     /// the brick's convex cell, if it is one
-    #[inline] pub fn cell(&self, i: u32) -> Option<&'static crate::hull::Cell> { let h = self.hull[i as usize]; if h == 0 { None } else { Some(&crate::hull::lib().cells[h as usize]) } }
+    #[inline] pub fn cell(&self, i: u32) -> Option<&'static crate::hull::Cell> { let h = self.hull[i as usize]; if h == 0 || h == HULL_FREE { None } else { Some(&crate::hull::lib().cells[h as usize]) } }
     /// centre and half size of the brick's box (m)
     pub fn box_m(&self, i: u32) -> ([f64; 3], [f64; 3]) {
         let t = self.tbox(i); let k = TICK as f64;
@@ -351,15 +439,32 @@ impl Bricks {
          [0.5 * (t.max[0] - t.min[0]) as f64 * k, 0.5 * (t.max[1] - t.min[1]) as f64 * k, 0.5 * (t.max[2] - t.min[2]) as f64 * k])
     }
     /// the brick's share of its box's volume (1 for a whole box)
-    #[inline] pub fn vol_share(&self, i: u32) -> f64 { self.cell(i).map_or(1.0, |c| c.vol) }
+    #[inline] pub fn vol_share(&self, i: u32) -> f64 {
+        if let Some(p) = self.piece(i) { let s = self.size(i); let k = TICK as f64; return p.vol / (s[0] as f64 * s[1] as f64 * s[2] as f64 * k * k * k); }
+        self.cell(i).map_or(1.0, |c| c.vol)
+    }
+    /// the brick's volume (m^3)
+    pub fn volume(&self, i: u32) -> f64 { if let Some(p) = self.piece(i) { return p.vol; } let s = self.size(i); let k = TICK as f64; s[0] as f64 * s[1] as f64 * s[2] as f64 * k * k * k * self.vol_share(i) }
+    /// The brick's corners and faces in the world (m): a box's 8 corners, a cell mapped into its box, a free piece
+    /// turned and placed.
+    pub fn shape(&self, i: u32) -> (Vec<[f64; 3]>, Vec<Vec<usize>>) {
+        if let Some(p) = self.piece(i) { return (p.world(), p.faces.iter().map(|f| f.iter().map(|&k| k as usize).collect()).collect()); }
+        let (c, h) = self.box_m(i);
+        let cl = self.cell(i).unwrap_or(&crate::hull::lib().cells[0]);
+        (cl.v.iter().map(|p| [c[0] + h[0] * p[0], c[1] + h[1] * p[1], c[2] + h[2] * p[2]]).collect(), cl.faces.iter().map(|f| f.v.iter().map(|&k| k as usize).collect()).collect())
+    }
+    /// The brick's inertia tensor about its centroid in the world, per unit density (m^5): times the density, kg m^2.
+    pub fn inertia(&self, i: u32) -> [[f64; 3]; 3] { let (v, f) = self.shape(i); crate::hull::moments(&v, &f).2 }
     /// the brick's centroid (m)
     pub fn centroid(&self, i: u32) -> [f64; 3] {
+        if let Some(p) = self.piece(i) { let c = p.centre(); let r = qrot(p.q, p.cen); return [c[0] + r[0], c[1] + r[1], c[2] + r[2]]; }
         let (c, h) = self.box_m(i);
         match self.cell(i) { None => c, Some(cl) => [c[0] + h[0] * cl.cen[0], c[1] + h[1] * cl.cen[1], c[2] + h[2] * cl.cen[2]] }
     }
     /// The brick's polygon on side `side` of its box (0..6: +x, -x, +y, -y, +z, -z), in m, counter-clockwise seen
     /// from outside; none if it is a cell that does not reach that side.
     pub fn side_poly(&self, i: u32, side: u8) -> Option<Vec<[f64; 3]>> {
+        if self.hull[i as usize] == HULL_FREE { return None; }
         let (c, h) = self.box_m(i);
         if let Some(cl) = self.cell(i) { return cl.side(side).map(|f| cl.face_in(f, c, h)); }
         let ax = (side / 2) as usize; let sg = if side % 2 == 0 { 1.0 } else { -1.0 };
@@ -373,6 +478,8 @@ impl Bricks {
     /// fractured brick touch on their shared face (axis 3, p the lower cell of the pattern); otherwise the boxes
     /// touch on a face and the contact is where the bricks' polygons on it overlap.
     pub fn contact(&self, p: u32, q: u32) -> Option<(u8, u32, bool)> {
+        // a free piece is not its box: it joins nothing by the box's faces (joints of free pieces: docs/PHASE2.md, step 2)
+        if self.hull[p as usize] == HULL_FREE || self.hull[q as usize] == HULL_FREE { return None; }
         let (cp, cq) = (self.cell(p), self.cell(q));
         if let (Some(a), Some(b)) = (cp, cq) {
             if a.pattern == b.pattern && self.tbox(p) == self.tbox(q) {
@@ -727,5 +834,141 @@ mod snap_tests {
         g.b.query([-40, 0, -40], [40, 40, 40], true, &mut q1); c.query([-40, 0, -40], [40, 40, 40], true, &mut q2);
         q1.sort(); q2.sort(); assert_eq!(q1, q2);
         extern crate std; std::println!("store of {} bricks: {} KB", c.len(), buf.len() / 1024);
+    }
+}
+/// free pieces (docs/PHASE2.md, step 1)
+#[cfg(test)]
+mod piece_tests {
+    use super::*;
+    extern crate std;
+    fn rmat(q: [f32; 4]) -> [[f64; 3]; 3] {
+        let c = |e: [f64; 3]| qrot(q, e);
+        let (x, y, z) = (c([1.0, 0.0, 0.0]), c([0.0, 1.0, 0.0]), c([0.0, 0.0, 1.0]));
+        [[x[0], y[0], z[0]], [x[1], y[1], z[1]], [x[2], y[2], z[2]]]
+    }
+    /// R diag(d) R^T
+    fn turned(r: &[[f64; 3]; 3], d: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+        let mut o = [[0.0; 3]; 3];
+        for i in 0..3 { for j in 0..3 { for k in 0..3 { for l in 0..3 { o[i][j] += r[i][k] * d[k][l] * r[j][l]; } } } }
+        o
+    }
+    fn close(a: [[f64; 3]; 3], b: [[f64; 3]; 3], tol: f64) -> bool { (0..3).all(|i| (0..3).all(|j| (a[i][j] - b[i][j]).abs() <= tol)) }
+    fn quat(axis: [f64; 3], ang: f64) -> [f32; 4] {
+        let l = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt(); let (s, c) = ((ang / 2.0).sin(), (ang / 2.0).cos());
+        [(axis[0] / l * s) as f32, (axis[1] / l * s) as f32, (axis[2] / l * s) as f32, c as f32]
+    }
+    fn box_pts(h: [f64; 3]) -> std::vec::Vec<[f64; 3]> {
+        let mut v = std::vec::Vec::new();
+        for &a in &[-1.0, 1.0] { for &b in &[-1.0, 1.0] { for &c in &[-1.0, 1.0] { v.push([a * h[0], b * h[1], c * h[2]]); } } }
+        v
+    }
+    #[test] fn a_rotated_box_piece_has_the_mass_properties_of_its_box() {
+        // a 2 x 1 x 0.5 m box turned 0.7 rad about (1, 2, 3): volume 1 m^3, centroid at its centre (snapped to 1 mm),
+        // inertia R diag((b^2+c^2)/12, (a^2+c^2)/12, (a^2+b^2)/12) R^T per unit density
+        let mut b = Bricks::new();
+        let q = quat([1.0, 2.0, 3.0], 0.7);
+        let i = b.add_piece([3.2, 4.0011, -1.5], q, &box_pts([1.0, 0.5, 0.25]), mat::CONCRETE, 0, 0).unwrap();
+        let p = b.piece(i).unwrap();
+        assert_eq!(p.c, [3200, 4001, -1500], "centre on the 1 mm grid");
+        assert_eq!((p.v.len(), p.faces.len()), (8, 6));
+        assert!((b.volume(i) - 1.0).abs() < 1e-6, "volume {}", b.volume(i));
+        let c = b.centroid(i);
+        assert!((c[0] - 3.2).abs() < 1e-6 && (c[1] - 4.001).abs() < 1e-6 && (c[2] + 1.5).abs() < 1e-6, "centroid {c:?}");
+        let want = turned(&rmat(q), [[1.25 / 12.0, 0.0, 0.0], [0.0, 4.25 / 12.0, 0.0], [0.0, 0.0, 5.0 / 12.0]]);
+        let got = b.inertia(i);
+        assert!(close(got, want, 1e-6), "inertia {got:?} want {want:?}");
+        // its tick box holds every corner and is the tight box rounded out to ticks
+        let t = b.tbox(i);
+        for w in b.piece(i).unwrap().world() { for k in 0..3 {
+            assert!(w[k] >= t.min[k] as f64 * TICK as f64 - 1e-9 && w[k] <= t.max[k] as f64 * TICK as f64 + 1e-9);
+        } }
+        for k in 0..3 {
+            let ws = b.piece(i).unwrap().world();
+            let (lo, hi) = ws.iter().fold((f64::MAX, f64::MIN), |a, w| (a.0.min(w[k]), a.1.max(w[k])));
+            assert!(lo - t.min[k] as f64 * 0.125 < 0.125 && t.max[k] as f64 * 0.125 - hi < 0.125);
+        }
+        // a box brick's own inertia by the same path: a 1 x 0.5 x 2 m box
+        let j = b.add([0, 0, 0], [8, 4, 16], mat::CONCRETE, 0, 0);
+        assert!(close(b.inertia(j), [[(0.25 + 4.0) / 12.0, 0.0, 0.0], [0.0, 5.0 / 12.0, 0.0], [0.0, 0.0, 1.25 / 12.0]], 1e-9));
+    }
+    #[test] fn a_wedge_piece_matches_the_closed_form() {
+        // a right triangular prism: legs a = 1.2 m along x and b = 0.6 m along y, length L = 2 m along z.
+        // V = abL/2; centroid (a/3, b/3, L/2); about it, with A = ab/2: Ixx = L ab^3/36 + A L^3/12,
+        // Iyy = L ba^3/36 + A L^3/12, Izz = L (ab^3 + ba^3)/36, Ixy = -L * (integral of xy dA = -a^2 b^2/72)
+        let (a, bb, l) = (1.2f64, 0.6f64, 2.0f64);
+        let pts = [[0.0, 0.0, 0.0], [a, 0.0, 0.0], [0.0, bb, 0.0], [0.0, 0.0, l], [a, 0.0, l], [0.0, bb, l]];
+        let mut b = Bricks::new();
+        let i = b.add_piece([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], &pts, mat::MASONRY, 0, 0).unwrap();
+        assert_eq!((b.piece(i).unwrap().v.len(), b.piece(i).unwrap().faces.len()), (6, 5));
+        let ar = a * bb / 2.0;
+        assert!((b.volume(i) - ar * l).abs() < 1e-6);
+        let c = b.centroid(i);
+        assert!((c[0] - a / 3.0).abs() < 1e-6 && (c[1] - bb / 3.0).abs() < 1e-6 && (c[2] - l / 2.0).abs() < 1e-6, "centroid {c:?}");
+        let want = [[l * a * bb.powi(3) / 36.0 + ar * l.powi(3) / 12.0, l * a * a * bb * bb / 72.0, 0.0],
+                    [l * a * a * bb * bb / 72.0, l * bb * a.powi(3) / 36.0 + ar * l.powi(3) / 12.0, 0.0],
+                    [0.0, 0.0, l * (a * bb.powi(3) + bb * a.powi(3)) / 36.0]];
+        assert!(close(b.inertia(i), want, 1e-6), "inertia {:?} want {want:?}", b.inertia(i));
+        // the same wedge turned 90 degrees about x (its length now along -y): the tensor turns with it
+        let q = quat([1.0, 0.0, 0.0], core::f64::consts::FRAC_PI_2);
+        let k = b.add_piece([5.0, 2.0, 0.0], q, &pts, mat::MASONRY, 0, 0).unwrap();
+        assert!(close(b.inertia(k), turned(&rmat(q), want), 1e-6));
+        assert!((b.volume(k) - ar * l).abs() < 1e-6);
+    }
+    #[test] fn a_hexagonal_prism_piece_matches_the_closed_form() {
+        // a regular hexagon of side s = 0.4 m, height H = 1.5 m along y: V = 3 sqrt(3)/2 s^2 H, Iyy = V 5 s^2 / 12,
+        // Ixx = Izz = V (5 s^2 / 24 + H^2 / 12)
+        let (sd, h) = (0.4f64, 1.5f64);
+        let mut pts = std::vec::Vec::new();
+        for k in 0..6 { let t = k as f64 * core::f64::consts::PI / 3.0; for &y in &[-h / 2.0, h / 2.0] { pts.push([sd * t.cos(), y, sd * t.sin()]); } }
+        let mut b = Bricks::new();
+        let i = b.add_piece([0.0, 0.75, 0.0], [0.0, 0.0, 0.0, 1.0], &pts, mat::CONCRETE, 0, 0).unwrap();
+        let p = b.piece(i).unwrap();
+        assert_eq!((p.v.len(), p.faces.len()), (12, 8));
+        let v = 1.5 * 3f64.sqrt() * sd * sd * h;
+        assert!((b.volume(i) - v).abs() < 1e-6);
+        let side = v * (5.0 * sd * sd / 24.0 + h * h / 12.0);
+        assert!(close(b.inertia(i), [[side, 0.0, 0.0], [0.0, v * 5.0 * sd * sd / 12.0, 0.0], [0.0, 0.0, side]], 1e-6), "{:?}", b.inertia(i));
+        // its mass is its volume times the density, not its box's
+        assert!((crate::structure::mass(&b, i) as f64 - v * 2400.0).abs() < 1e-2 * v * 2400.0 * 1e-2, "mass {}", crate::structure::mass(&b, i));
+    }
+    #[test] fn pieces_beyond_the_hull_limits_or_flat_are_refused() {
+        let mut b = Bricks::new();
+        // a 20-sided prism: 40 corners (the GPU's hull holds 16)
+        let mut pts = std::vec::Vec::new();
+        for k in 0..20 { let t = k as f64 * core::f64::consts::PI / 10.0; for &y in &[0.0, 1.0] { pts.push([t.cos(), y, t.sin()]); } }
+        assert!(b.add_piece([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], &pts, mat::CONCRETE, 0, 0).is_none());
+        // flat: four points in one plane
+        assert!(b.add_piece([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 1.0]], mat::CONCRETE, 0, 0).is_none());
+        // too long for a brick's box (40 m)
+        assert!(b.add_piece([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], &box_pts([20.0, 0.5, 0.5]), mat::CONCRETE, 0, 0).is_none());
+        assert_eq!(b.len(), 0);
+    }
+    #[test] fn a_free_piece_is_not_its_box() {
+        // a 1 m cube on the ground and, on it, a 1 m cube turned 45 degrees about y: their tick boxes share a face
+        // (y = 1 m), but the turned cube is a free piece and joins nothing by its box (joints of free pieces come in
+        // step 2). It is drawn as its own six faces, its mesh encloses its volume, and it survives a save and load.
+        let mut b = Bricks::new();
+        let base = b.add([0, 0, 0], [8, 8, 8], mat::CONCRETE, 0, 0);
+        let q = quat([0.0, 1.0, 0.0], core::f64::consts::FRAC_PI_4);
+        let top = b.add_piece([0.5, 1.5, 0.5], q, &box_pts([0.5, 0.5, 0.5]), mat::CONCRETE, 3, 0).unwrap();
+        assert_eq!(b.tbox(top).min[1], 8);
+        b.build_joints();
+        assert_eq!(b.live_joints, 0);
+        assert_eq!(b.jhead[base as usize], NONE);
+        let m = crate::mesh::build(&b);
+        // the base: 5 faces (its bottom is on the ground); the piece: 6
+        assert_eq!(m.quads, 11);
+        // the piece's triangles (the last 12) enclose its volume: sum of p0 . (p1 x p2) / 6
+        let tri = &m.i[m.i.len() - 36..];
+        let pt = |k: u32| { let o = k as usize * 9; [m.v[o] as f64, m.v[o + 1] as f64, m.v[o + 2] as f64] };
+        let mut vol = 0.0;
+        for t in tri.chunks(3) { let (a, c, d) = (pt(t[0]), pt(t[1]), pt(t[2])); vol += (a[0] * (c[1] * d[2] - c[2] * d[1]) - a[1] * (c[0] * d[2] - c[2] * d[0]) + a[2] * (c[0] * d[1] - c[1] * d[0])) / 6.0; }
+        assert!((vol - 1.0).abs() < 1e-5, "mesh volume {vol}: faces wound outward");
+        let mut buf = std::vec::Vec::new(); b.save(&mut buf);
+        let c = Bricks::load(&buf);
+        assert_eq!(c.pieces, b.pieces);
+        assert_eq!(c.piece_of.get(&top), Some(&0));
+        assert_eq!(c.centroid(top), b.centroid(top));
+        assert_eq!(c.hull[top as usize], HULL_FREE);
     }
 }

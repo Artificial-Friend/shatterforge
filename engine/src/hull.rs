@@ -80,6 +80,66 @@ pub fn mass_props(v: &[[f64; 3]], faces: &[Vec<usize>]) -> (f64, [f64; 3]) {
     (vol, [m1[0] / vol, m1[1] / vol, m1[2] / vol])
 }
 
+/// Volume, centroid and inertia tensor about the centroid (per unit density) of a convex polytope: tetrahedra from
+/// the vertices' mean to each face triangle, with the second moments of a tetrahedron with a corner at the origin,
+/// integral of x_i x_j = V / 20 (sum over its corners of x_i x_j + (sum x_i)(sum x_j)).
+pub fn moments(v: &[[f64; 3]], faces: &[Vec<usize>]) -> (f64, [f64; 3], [[f64; 3]; 3]) {
+    let mut o = [0.0; 3];
+    for p in v { for q in 0..3 { o[q] += p[q]; } }
+    for q in 0..3 { o[q] /= v.len() as f64; }
+    let (mut vol, mut m1, mut m2) = (0.0, [0.0; 3], [[0.0; 3]; 3]);
+    for f in faces { for t in 1..f.len().saturating_sub(1) {
+        let (a, b, c) = (sub(v[f[0]], o), sub(v[f[t]], o), sub(v[f[t + 1]], o));
+        let tv = dot(a, cross(b, c)).abs() / 6.0;
+        vol += tv;
+        let s = [a[0] + b[0] + c[0], a[1] + b[1] + c[1], a[2] + b[2] + c[2]];
+        for i in 0..3 {
+            m1[i] += tv * s[i] / 4.0;
+            for j in 0..3 { m2[i][j] += tv / 20.0 * (a[i] * a[j] + b[i] * b[j] + c[i] * c[j] + s[i] * s[j]); }
+        }
+    } }
+    let d = [m1[0] / vol, m1[1] / vol, m1[2] / vol];
+    // second moments about the centroid, then I = tr(M) 1 - M
+    let mut m = [[0.0; 3]; 3];
+    for i in 0..3 { for j in 0..3 { m[i][j] = m2[i][j] - vol * d[i] * d[j]; } }
+    let tr = m[0][0] + m[1][1] + m[2][2];
+    let mut ii = [[0.0; 3]; 3];
+    for i in 0..3 { for j in 0..3 { ii[i][j] = if i == j { tr - m[i][j] } else { -m[i][j] }; } }
+    (vol, [o[0] + d[0], o[1] + d[1], o[2] + d[2]], ii)
+}
+
+/// A convex shape: vertices, and faces as (outward unit normal, offset n.x = d, vertex loop counter-clockwise seen
+/// from outside).
+#[derive(Clone, Debug)]
+pub struct Shape { pub v: Vec<[f64; 3]>, pub faces: Vec<([f64; 3], f64, Vec<usize>)> }
+/// The convex hull of points (m), within the GPU's limits on a hull (16 corners, 12 faces of up to 8 corners, 24
+/// edges in up to 12 directions); none if the points are flat (no volume) or the hull is beyond the limits.
+pub fn convex(pts: &[[f64; 3]]) -> Option<Shape> {
+    if pts.len() < 4 { return None; }
+    let mut lo = [f64::MAX; 3]; let mut hi = [f64::MIN; 3];
+    for p in pts { for q in 0..3 { lo[q] = lo[q].min(p[q]); hi[q] = hi[q].max(p[q]); } }
+    let size = (0..3).map(|q| hi[q] - lo[q]).fold(0.0, f64::max);
+    if size <= 0.0 { return None; }
+    let eps = 1e-9 * size.max(1.0);
+    // the hull's planes: every plane through three points with all points on one side
+    let mut planes: Vec<([f64; 3], f64)> = Vec::new();
+    let n = pts.len();
+    for i in 0..n { for j in i + 1..n { for k in j + 1..n {
+        let c = cross(sub(pts[j], pts[i]), sub(pts[k], pts[i]));
+        if len(c) < 1e-12 * size * size { continue; }
+        let nn = nrm(c); let d = dot(nn, pts[i]);
+        let (mut above, mut below) = (false, false);
+        for p in pts { let e = dot(nn, *p) - d; if e > eps { above = true; } if e < -eps { below = true; } }
+        let pl = match (above, below) { (false, true) => (nn, d), (true, false) => ([-nn[0], -nn[1], -nn[2]], -d), _ => continue };
+        if !planes.iter().any(|q| dot(q.0, pl.0) > 1.0 - 1e-9 && (q.1 - pl.1).abs() < eps * 10.0) { planes.push(pl); }
+    } } }
+    if planes.len() < 4 { return None; }
+    let p = polytope(&planes);
+    if p.v.len() < 4 || p.v.len() > MAXV || p.faces.len() > MAXF || p.nseg > MAXS || p.ndir > MAXD || p.faces.iter().any(|f| f.1.len() > MAXFV) { return None; }
+    let faces = p.faces.iter().map(|(pi, f)| (planes[*pi].0, planes[*pi].1, f.clone())).collect();
+    Some(Shape { v: p.v, faces })
+}
+
 fn build(n_patterns: usize, seed: u32) -> Lib {
     let mut a = seed;
     let mut rnd = || -> f64 {
