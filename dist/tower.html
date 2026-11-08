@@ -4567,6 +4567,9 @@ function labOnRead(r, pr) {
     const cells = new Map();
     if (pr) for (const i of pr.list) { if (pr.data[i * 12 + 10] !== 1) continue; const k = [0, 1, 2].map(c => Math.round(pr.data[i * 12 + c] / 2) * 2).join(','); const e = cells.get(k) || { n: 0, v: 0 }; e.n++; e.v = Math.max(e.v, Math.hypot(pr.data[i * 12 + 3], pr.data[i * 12 + 4], pr.data[i * 12 + 5])); cells.set(k, e); }
     const plist = []; if (pr) for (const i of pr.list) { if (pr.data[i * 12 + 10] !== 1 || plist.length >= 12) continue; const o = i * 12, inf = pInfo[i]; plist.push({ i, p: [pr.data[o], pr.data[o + 1], pr.data[o + 2]].map(x => +x.toFixed(3)), v: [pr.data[o + 3], pr.data[o + 4], pr.data[o + 5]].map(x => +x.toFixed(3)), r: +pr.data[o + 11].toFixed(3), from: inf && inf.src, made: inf && inf.f }); }
+    // (and their whole records, from the GPU: position r, velocity state, rotation, sub-step start + rest timer,
+    // spin + material, corrected position + touching, timer anchor + crushing)
+    for (const e of plist.slice(0, 6)) gpu.read(gpu.prtBuf, 112, e.i * 112).then(a => { e.rec = Array.from(new Float32Array(a.buffer || a)).map(x => +x.toFixed(4)); }).catch(() => {});
     L.awakeEnd = { particles: plist, odd: (L.awakeOdd || []).slice(0, 20), odd_n: (L.awakeOdd || []).length, bodies: list.slice(0, 20), particle_cells: [...cells.entries()].sort((a, b) => b[1].n - a[1].n).slice(0, 12).map(([k, e]) => ({ at: k, n: e.n, vmax: +e.v.toFixed(2) })) };
   }
   // the clean-up distance: how far past it anything still in the world is from where it was first seen
