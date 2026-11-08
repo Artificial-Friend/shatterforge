@@ -4784,6 +4784,9 @@ async function labRun() {
   for (const [k, d] of Object.entries(SETTINGS)) { setting[k] = d.def; d.apply(d.def); }
   setting.preset = 'high (lab defaults)';
   // fixed sub-steps: adapting them to this machine's speed would make the runs differ between machines
+  // (SF_PRESET: a quality preset over the defaults, as a player would pick it: a benchmark on 'low' kept bodies
+  // awake far longer than the lab's 'high')
+  if (window.__preset && PRESETS[window.__preset]) { const pr = PRESETS[window.__preset]; for (const k of ['crumbs', 'rubble', 'substeps', 'colors']) { setting[k] = pr[k]; SETTINGS[k].apply(pr[k]); } setting.preset = window.__preset; }
   setting.adaptive = 0; gpu.substeps = setting.substeps;
   Math.random = seededRandom(window.__seed || 20261104);   // (SF_SEED: another run of the same scenario, to tell a trend from one run's luck)
   if (window.__pinch && gpu) gpu.pinching = true;

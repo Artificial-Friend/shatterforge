@@ -35,6 +35,7 @@ const names = args.length ? args.flatMap(a => SUITES[a] || [a]) : SUITES.quick;
     await p.addInitScript((d) => { if (d) window.__colR = d; }, process.env.SF_COLR || '');
     await p.addInitScript((d) => { if (d) window.__colCheck = true; }, !!process.env.SF_COLCHECK);
     await p.addInitScript((d) => { if (d) window.__seed = d; }, +(process.env.SF_SEED || 0));
+    await p.addInitScript((d) => { if (d) window.__preset = d; }, process.env.SF_PRESET || '');
     await p.addInitScript((d) => { if (d) window.__shots = d.split(',').map(Number); }, process.env.SF_SHOTS || '');
     await p.addInitScript((d) => { if (d) window.__shotView = d.split(',').map(Number); }, process.env.SF_SHOT_VIEW || '');
     await p.addInitScript((d) => { if (d) window.__pinch = true; }, !!process.env.SF_PINCH);
