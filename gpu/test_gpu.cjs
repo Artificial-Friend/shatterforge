@@ -365,6 +365,20 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       check('stuck', awake[awake.length - 1] === 0, { awakeEachSecond: awake });
     }
+    if (scenes.includes('bigpart')) {
+      // What one big part costs the pair search: 4,000 boxes in one body (as the upper storeys of a building that
+      // came down a storey), awake, resting on the ground. Each of its boxes looked through the grid cells round
+      // it, full of the part's own boxes, to skip them one by one. (Benchmark, NVIDIA Ampere: pair search 3.3 ms a
+      // step at 1 s, with 2 bodies awake.) Timing only, software GPU: pair search 210 ms a step; skipping cells
+      // that hold only the shape's own body, 27 ms, the same 400 candidate pairs.
+      const shapes = []; for (let x = 0; x < 20; x++) for (let z = 0; z < 20; z++) for (let y = 0; y < 10; y++) shapes.push({ p: [x * 0.25 - 2.5, 0.125 + y * 0.25, z * 0.25 - 2.5], q: [0, 0, 0, 1], h: [0.125, 0.125, 0.125], mat: MAT.masonry });
+      const w = await GpuWorld.create(dev, [{ shapes, v: [0, 0, 0], w: [0, 0, 0] }], { substeps: 12, sleep: false, maxBodies: 8, maxShapes: 4100 });
+      for (let f = 1; f <= 30; f++) { w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle(); }
+      const st = Object.fromEntries(Object.entries(w.gpuMs || {}).map(([k, v]) => [k, +v.toFixed(2)]));
+      const r = await w.readPose(); const y = r.body[1];
+      w.destroy();
+      check('bigpart', Math.abs(y - 1.25) < 0.05, { stagesMs: st, y: +y.toFixed(3), candidates: w.stats.candidates, note: 'timing; the part must rest where it was' });
+    }
     if (scenes.includes('chain')) {
       // A thin piece (223 kg) lying on another (288 kg) on the ground, hit at 10 m/s by a 1 t block with a 259 t
       // part landing on it. The block is crushed at once; the part comes down on the thin piece, which the solver

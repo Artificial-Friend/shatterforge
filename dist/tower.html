@@ -149,7 +149,7 @@ struct Params {
   levels: u32, ground_mat: u32, sleep_dist: f32, sleep_rot: f32,
   o_ocount: u32, o_acc: u32, o_events: u32, max_events: u32,
   ev_speed: f32, ev_energy: f32, o_cawake: u32, o_cnear: u32,
-  n_inherit: u32, o_inherit: u32, wake_speed: f32, pad7: u32,
+  n_inherit: u32, o_inherit: u32, wake_speed: f32, o_cbody: u32,
   mat: array<vec4f, 8>,   // friction, restitution, -, -
   np1: u32, pcell: f32, pg_mask: u32, p_wake: u32,
   p_h: f32, n_blast: u32, p_cap: u32, pad9: u32,
@@ -296,6 +296,8 @@ fn near_any(lo: vec3f, hi: vec3f) -> bool { return near_bits(lo, hi, 1u); }
   let hc = chash(cellc(wp, L), L);
   st(P.o_cell + s, hc);
   atomicAdd(&ints[P.o_gcount + hc], 1u);
+  // (the bodies in the cell, lowest and highest: a cell holding only a shape's own body has nothing for it)
+  atomicMax(&ints[P.o_cbody + 2u * hc], b + 1u); atomicMax(&ints[P.o_cbody + 2u * hc + 1u], 0xffffffffu - b);
   // cells holding a moving shape: resting and static shapes only look into these
   if (dyn_awake(b)) { atomicOr(&ints[P.o_cawake + hc], 1u); }
   // (and 2: one that is going somewhere, fast enough to wake what it touches (see pair_wake_emit) or moved over
@@ -379,6 +381,9 @@ fn push_pair(a: u32, b: u32) {
       let cell = vec3i(cx, cy, cz);
       let hc = chash(cell, L);
       if (!ai && ld(P.o_cawake + hc) == 0u) { continue; }
+      // (only this shape's own body there: skip the cell. Inside a big part each box looked through cells full of
+      // the part's own boxes to skip them one by one: GPU test bigpart, 4,000 boxes in one awake body)
+      if (ld(P.o_cbody + 2u * hc) == bi + 1u && 0xffffffffu - ld(P.o_cbody + 2u * hc + 1u) == bi) { continue; }
       let s0 = ld(P.o_gstart + hc); let s1 = s0 + ld(P.o_gcount + hc);
       for (var s = s0; s < s1; s++) {
         let j = ld(P.o_sorted + s);
@@ -2416,7 +2421,7 @@ class GpuWorld {
     let o = 16;
     const L = {};
     const take = (k, len) => { L[k] = o; o += len; };
-    take('gcount', G); take('gstart', G); take('gfill', G); take('cawake', G); take('cnear', CNEAR + 1);
+    take('gcount', G); take('gstart', G); take('gfill', G); take('cawake', G); take('cnear', CNEAR + 1); take('cbody', 2 * G);
     take('sorted', cs1); take('cell', cs1); take('mask', cb1);
     take('ccount', 33); take('cstart', 33); take('cfill', 33);
     take('order', this.maxMan); take('mcolor', this.maxMan);
@@ -2540,7 +2545,7 @@ class GpuWorld {
     u[48] = this.levels; u[49] = GROUND_MAT; f[50] = 0.01; f[51] = 0.02;
     u[52] = L.ocount; u[53] = L.acc; u[54] = L.events; u[55] = this.maxEvents; u[58] = L.cawake; u[59] = L.cnear;
     f[56] = this.evSpeed; f[57] = this.evEnergy;
-    u[60] = this.inheritCount || 0; u[61] = this.L.inherit; f[62] = this.wakeSpeed;
+    u[60] = this.inheritCount || 0; u[61] = this.L.inherit; f[62] = this.wakeSpeed; u[63] = this.L.cbody;
     // the pair table sized by the contacts there were (as the grid), up to its capacity
     let tp = 1024; while (tp < 2 * ((this.stats.manifolds || 0) * 1.5 + 2048) && tp < this.TP) tp *= 2; this.TPeff = tp;
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
@@ -2591,7 +2596,7 @@ class GpuWorld {
     // counters; impact events keep accumulating until a step copies them out (a pending read-back skips the copy)
     if (this.statCopied === false) { clr(0, 7); clr(8, 7); } else { clr(0, 16); clr(L.snap, 1); }   // (events, crushes and breaks gather until copied)
     clr(L.evhist, 128); clr(L.pinch, 8 * this.n1); clr(L.level, this.n1); clr(L.level2, this.n1);
-    clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.cnear, CNEAR + 1); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
+    clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.cnear, CNEAR + 1); clr(L.cbody, 2 * this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.hl, 1); clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (this.reduce !== false) { clr(L.ptab, 3 * this.TPeff); clr(L.big, 64 * 4096); }
     if (this.capP && this.np) { enc.clearBuffer(this.pintBuf, 0, this.PGeff * 4); enc.clearBuffer(this.pintBuf, 2 * this.PGeff * 4, this.PGeff * 4); }
