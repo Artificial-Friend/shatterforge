@@ -603,6 +603,10 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   cen /= f32(c.cnt);
   var rad = 0.0; for (var k = 0u; k < c.cnt; k++) { rad += length(c.pts[k].xyz - cen); }
   rad /= f32(c.cnt);
+  // (a body held up by particles twists against them over at least one particle's contact, 5 cm: on one point the
+  // radius was 0, nothing resisted a spin about the normal, and a 10 kg stick on a heap turned at 0.37 rad/s to the
+  // end, keeping the heap round it awake: lab mixed at 15 s, the last body awake)
+  if (sb == SUP_KEY) { rad = max(rad, 0.05); }
   var old = find_old(sa, sb);
   // (nor a contact of a body that something crushed in the last step was pressing: its impulse was that load,
   // now gone, and warm-started it threw the body. GPU test chain: a 223 kg piece pressed into the one under it

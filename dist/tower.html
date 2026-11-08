@@ -708,6 +708,10 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   cen /= f32(c.cnt);
   var rad = 0.0; for (var k = 0u; k < c.cnt; k++) { rad += length(c.pts[k].xyz - cen); }
   rad /= f32(c.cnt);
+  // (a body held up by particles twists against them over at least one particle's contact, 5 cm: on one point the
+  // radius was 0, nothing resisted a spin about the normal, and a 10 kg stick on a heap turned at 0.37 rad/s to the
+  // end, keeping the heap round it awake: lab mixed at 15 s, the last body awake)
+  if (sb == SUP_KEY) { rad = max(rad, 0.05); }
   var old = find_old(sa, sb);
   // (nor a contact of a body that something crushed in the last step was pressing: its impulse was that load,
   // now gone, and warm-started it threw the body. GPU test chain: a 223 kg piece pressed into the one under it
@@ -4580,6 +4584,9 @@ const LAB_RHO = [2400, 1800, 2500, 2500, 500, 7800, 2400, 2400];
 function labOnRead(r, pr) {
   // spares parked under the ground must sleep there (woken, they fell for the rest of the run: 8 November)
   if (r.sleeping && r.body) { let n = 0; const nb = Math.min(r.sleeping.length, r.body.length / 7); for (let b = 1; b <= nb; b++) if (!r.sleeping[b - 1] && r.body[(b - 1) * 7 + 1] < -500) n++; LAB.parkedAwake = Math.max(LAB.parkedAwake || 0, n); }
+  // (the GPU world's input count over the last second: any change there makes every step count as changed)
+  if (LAB.spec && LAB.f === LAB.spec.frames - 60) LAB.lateInputs = { from: gpu.inputs };
+  if (LAB.spec && LAB.lateInputs && LAB.f >= LAB.spec.frames - 3) { LAB.lateInputs.to = gpu.inputs; LAB.lateInputs.skipped = gpu.skipped || 0; LAB.lateInputs.wakeReq = !!gpu.wakeReq; LAB.lateInputs.inherit = (gpu.pendingInherit || []).length; LAB.lateInputs.stats = { awake: gpu.stats.awake, pActive: gpu.stats.pActive }; LAB.lateInputs.statsInputs = gpu.statsInputs; }
   // (what is still awake near the end, for a run that does not settle: bodies, and where the awake particles are)
   if (LAB.f >= LAB.spec.frames - 3 && r.sleeping && !LAB.awakeEnd) {
     const L = LAB, list = [], nb = Math.min(gpu.bodies.length, r.body.length / 7);
@@ -4743,7 +4750,7 @@ function labReport(wallS) {
     scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: ['concrete frame', 'masonry', 'mass timber', 'mixed'][S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
     pass: checks.every(c => c.pass), checks, colConflicts: L.colConflicts || 0, colConflictAt: L.colConflictAt || null, digest: L.digest, dumpRaw: L.dumpRaw ? { ...L.dumpRaw, colRows: L.colRows, allRows: L.allRows } : (L.colRows ? { colRows: L.colRows, allRows: L.allRows } : null),
-    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_by: { ...partsBy }, big_breaks: L.bigBreaks, made: L.made, gains: L.gains, spill_why: { crumbs: E.spill_why(0), fragments: E.spill_why(1), crushed_storey: E.spill_why(2), static: E.spill_why(3), fragment_bricks_by_mat: [0, 1, 2, 3, 4, 5, 6, 7].map(k => E.spill_mat(k)), single_brick_fragments: E.spill_mat(8) }, over_breaks: L.overBreaks, dbg_breaks: L.dbgBreaks, lost_m3: Object.fromEntries(Object.entries({ ...L.lostBy, particles_crushed: L.lostParticles || 0, building: L.V0 }).map(([k, v]) => [k, +v.toFixed(1)])), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, removed_far: { bodies: L.farBodies || 0, particles: L.farParts || 0, m3: +((L.lostBy.far || 0)).toFixed(2) }, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps, gradual: L.gradual || undefined, awake_at_end: L.awakeEnd || undefined },
+    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_by: { ...partsBy }, big_breaks: L.bigBreaks, made: L.made, gains: L.gains, spill_why: { crumbs: E.spill_why(0), fragments: E.spill_why(1), crushed_storey: E.spill_why(2), static: E.spill_why(3), fragment_bricks_by_mat: [0, 1, 2, 3, 4, 5, 6, 7].map(k => E.spill_mat(k)), single_brick_fragments: E.spill_mat(8) }, over_breaks: L.overBreaks, dbg_breaks: L.dbgBreaks, lost_m3: Object.fromEntries(Object.entries({ ...L.lostBy, particles_crushed: L.lostParticles || 0, building: L.V0 }).map(([k, v]) => [k, +v.toFixed(1)])), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, removed_far: { bodies: L.farBodies || 0, particles: L.farParts || 0, m3: +((L.lostBy.far || 0)).toFixed(2) }, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps, gradual: L.gradual || undefined, awake_at_end: L.awakeEnd || undefined, late_calls: L.lateCalls || {}, late_inputs: L.lateInputs || null },
     perf: {
       wall_s: +wallS.toFixed(1), steps: stepsDone, steps_skipped: gpu.skipped || 0,
       gpu_ms: { median: +med(gpuMs).toFixed(2), p95: +p95(gpuMs).toFixed(2), max: +Math.max(0, ...gpuMs).toFixed(2) },

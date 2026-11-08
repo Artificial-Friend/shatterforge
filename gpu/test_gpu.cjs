@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..');
 const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -333,6 +333,22 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       for (let f = 1; f <= 480; f++) { if (f % 30 === 0) w.setVelocity(1, [0, 0, 0], [0, 0.3, 0], [16, 1.0, 0], [0, 0, 0, 1]); w.step(1 / 60); if (f % 60 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); const pr = await w.readParticles(); let a = 0; for (let i = 0; i < pr.n; i++) if (pr.data[i * 12 + 10] === 1) a++; awake.push(a); } }
       w.destroy();
       check('farwake', awake[awake.length - 1] <= 20, { awakeEachSecond: awake });
+    }
+    if (scenes.includes('spin')) {
+      // A small stick (6 x 25 x 6 cm) set spinning at 2 rad/s about the vertical on a layer of crumbs: friction must
+      // stop it, and it must go to sleep. (Lab mixed at 15 s: the last body awake was such a stick turning at
+      // 0.37 rad/s on rubble, keeping the heap round it awake. Here it still spun at 2 rad/s after 4 s: the support
+      // contact of a single particle had no twist friction. Now stopped and asleep.)
+      let rnd = 13; const rand = () => { rnd = (rnd * 1103515245 + 12345) & 0x7fffffff; return rnd / 0x7fffffff; };
+      const list = []; for (let x = 0; x < 6; x++) for (let z = 0; z < 6; z++) list.push({ p: [(x - 2.5) * 0.2, 0.1, (z - 2.5) * 0.2], v: [0, 0, 0], r: 0.1, mat: MAT.concrete });
+      const w = await GpuWorld.create(dev, [], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16, maxParticles: 256 });
+      w.addParticles(list);
+      for (let f = 0; f < 60; f++) w.step(1 / 60);
+      const [bb] = w.addBodies([{ shapes: [{ p: [0.1, 0.2 + 0.125 + 0.002, 0.1], q: [0, 0, 0, 1], h: [0.03, 0.125, 0.03], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 2, 0] }]);
+      let wEnd = 0, asleep = 0;
+      for (let f = 1; f <= 240; f++) { w.step(1 / 60); if (f === 240) { await dev.queue.onSubmittedWorkDone(); await settle(); const r = await w.readPose(); wEnd = Math.hypot(r.ang ? r.ang[(bb - 1) * 3] : 0, r.ang ? r.ang[(bb - 1) * 3 + 1] : 0, r.ang ? r.ang[(bb - 1) * 3 + 2] : 0); asleep = r.sleeping[bb - 1]; } }
+      w.destroy();
+      check('spin', wEnd < 0.05 && asleep === 1, { spinAt4s: +wEnd.toFixed(3), asleep });
     }
     if (scenes.includes('stuck')) {
       // Crumbs left inside the standing building, at the foot of a wall (made where a cut brick was, overlapping
