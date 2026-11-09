@@ -12,7 +12,7 @@ const frames = opt('--frames', null), trace = opt('--trace', null);
 const twice = args.includes('--twice'); if (twice) args.splice(args.indexOf('--twice'), 1);
 const root = path.join(__dirname, '..');
 const page0 = fs.readFileSync(path.join(root, 'dist/tower.html'), 'utf8');
-const SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble'], complex: ['complex', 'complexcol', 'complexroom', 'keystone'] };
+const SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complexstand', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'] };
 const names = args.length ? args.flatMap(a => SUITES[a] || [a]) : SUITES.quick;
 (async () => {
   fs.mkdirSync(outDir, { recursive: true });

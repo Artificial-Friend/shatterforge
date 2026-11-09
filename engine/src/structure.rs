@@ -59,26 +59,32 @@ pub fn connection(b: &Bricks, j: u32) -> [f32; 3] {
     [1.0, 0.7, 0.7]
 }
 
-/// Stones on a mortar bed: masonry where a free piece (a cut stone: an arch's voussoir, a stone beam) meets another
-/// member (a different `structure`, the member id; the segments of one member share it, and their seams are the stone
-/// itself), on a face within 70 degrees of level (a bed joint: an arch's radial joints, its springing, a stone on a
-/// keystone; upright joints keep the material's rule). Checked as masonry arches are (Heyman): no tension, the
-/// thrust inside the face (`bed_ratio`). As the stone itself (0.3 MPa in tension, 0.5 in bending) a half arch stood
-/// as a cantilever off its pier with its keystone gone, at 0.78 of strength.
-pub fn mortar_bed(b: &Bricks, j: u32, normal: [f64; 3]) -> bool {
+/// Stones on a mortar bed: masonry where a free piece (a cut stone: an arch's voussoir, a stone beam, a wall panel)
+/// meets another member (a different `structure`, the member id; the segments of one member share it, and their
+/// seams are the stone itself), however the joint is turned. Checked as masonry arches are (Heyman): the thrust inside
+/// the face, no tension (`bed_ratio`). (As the stone itself, 0.3 MPa in tension, 0.5 in bending, a half arch stood as a
+/// cantilever off its pier with its keystone gone, at 0.78 of strength. Limited to joints within 70 degrees of level,
+/// the joints by a keystone, near upright, were left as stone and failed in tension once the arcade carried a floor.)
+pub fn mortar_bed(b: &Bricks, j: u32, _normal: [f64; 3]) -> bool {
     let (a, c) = (b.ja[j as usize] as usize, b.jb[j as usize] as usize);
     let free = |i: usize| b.hull[i] == crate::brick::HULL_FREE;
-    b.mat[a] == mat::MASONRY && b.mat[c] == mat::MASONRY && (free(a) || free(c)) && b.structure[a] != b.structure[c] && fabs64s(normal[1]) > 0.3
+    b.mat[a] == mat::MASONRY && b.mat[c] == mat::MASONRY && (free(a) || free(c)) && b.structure[a] != b.structure[c]
 }
 #[inline] fn fabs64s(x: f64) -> f64 { if x < 0.0 { -x } else { x } }
 /// A bed joint's ratio, with no tension (Heyman): force `f` and moment `m` on the max side in the face's frame
-/// (normal, u, w). The thrust N must press (pulled apart, the bed opens: 10), and pass inside the face: its
+/// (normal, u, w). The thrust N presses (with none, see below), and must pass inside the face: its
 /// eccentricities over the extreme fibres' distances, e_w / z_u + e_u / z_w, is 1 where it reaches the edge (a hinge
 /// opens through: the joint gives way). Its compression is checked on what still bears, A (1 - that), and its
 /// shear against cohesion on that area plus friction (0.4) on N. The worst of the three.
 fn bed_ratio(s: &Sect, f: [f64; 3], m: [f64; 3], cap: [f32; 3]) -> f32 {
     let n = -f[0];
-    if n <= 1e-9 { return 10.0; }
+    // a bed that carries no thrust (a wall's upright corner, a stone beam's butt joint) holds by what mortar does
+    // without it: a little bond in tension (a tenth of the stone's) and cohesion in shear
+    if n <= 1e-9 {
+        let bond = 0.1 * strength(mat::MASONRY)[1] as f64;
+        let v = sqrt64(f[1] * f[1] + f[2] * f[2]);
+        return ((-n) / s.area / bond).max(v / (cap[2] as f64 * s.area)) as f32;
+    }
     let ecc = fabs64s(m[1]) / n / s.zu.max(1e-6) + fabs64s(m[2]) / n / s.zw.max(1e-6);
     let bearing = (1.0 - ecc).max(1e-3) * s.area;
     let comp = n / bearing / cap[0] as f64;
@@ -399,7 +405,7 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
     while let Some(k) = st.pop() { let mut e = head[k as usize]; while e != NONE { let o = other(e); if !live[o as usize] { live[o as usize] = true; st.push(o); } e = next[e as usize]; } }
     // ---- the spring network: each cell a rigid body (3 displacements, 3 rotations), each link a spring at the
     // centre of its face, solved for the displacements under the loads with the ground cells fixed
-    let springs: Vec<Spring> = links.iter().map(|l| spring(b, &nodes, l)).collect();
+    let mut springs: Vec<Spring> = links.iter().map(|l| spring(b, &nodes, l)).collect();
     let fixed: Vec<bool> = (0..n).map(|k| nodes[k].sink || !live[k]).collect();
     let mut f = vec![[0.0f64; 6]; n];
     for k in 0..n { let w = nodes[k].load as f64; f[k][0] = w * dir.x as f64; f[k][1] = w * dir.y as f64; f[k][2] = w * dir.z as f64; }
@@ -409,7 +415,76 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
     let pos: Vec<[f64; 3]> = nodes.iter().map(|nd| nd.c).collect();
     let key = |k: usize| (nodes[k].brick, nodes[k].lo[0], nodes[k].lo[2]);
     let x0: Option<Vec<[f64; 6]>> = warm.as_ref().map(|w| (0..n).map(|k| if fixed[k] { [0.0; 6] } else { w.0.get(&key(k)).copied().unwrap_or([0.0; 6]) }).collect());
-    let (x, it) = solve_network(&springs, &ends, &fixed, &pos, &f, x0);
+    let (mut x, mut it) = solve_network(&springs, &ends, &fixed, &pos, &f, x0);
+    // Stones' beds carry no tension, and where the thrust leaves a bed's face a hinge opens through it (Heyman): a bed
+    // the solution pulls apart opens (its springs all but go), one whose thrust passes outside its face hinges (it
+    // carries force, no moment), and the network is solved again, until nothing more opens or hinges (8 rounds at
+    // most). A hinge is not a failure: a mechanism is, and then the solution runs away (`mech`, below). Checked on the
+    // elastic solution alone, the keystones of an arcade carrying a stiff floor hung from it, their beds at 10 times
+    // what mortar holds, and a stone beam's butt joint over a keystone failed in hogging (complex::tests).
+    let bed_of: Vec<bool> = links.iter().map(|l| l.joint != NONE && l.geo.is_some() && mortar_bed(b, l.joint, [0.0; 3])).collect();
+    let mut bed_state = vec![0u8; links.len()];    // 1 open, 2 hinged
+    // the beds' joints, each with its links, face centre and frame: a joint hinges as a whole, when the thrust summed
+    // over its links leaves its face. (Tested link by link, a stone's bed under a stone beam had each link's thrust
+    // inside its own part of the face and the joint's outside it, 1.04: checked as one section it failed, where a
+    // hinge opens.)
+    let mut bed_joints: Vec<(Vec<usize>, Geo)> = Vec::new();
+    {
+        let mut slot = crate::Map::default();
+        for (l, k) in links.iter().enumerate() {
+            if !bed_of[l] { continue; }
+            let s = match slot.get(&k.joint) {
+                Some(&s) => s,
+                None => {
+                    let Some(g) = geo_of(&b.joint_poly(k.joint), b.jaxis[k.joint as usize] as usize) else { continue };
+                    bed_joints.push((Vec::new(), g)); slot.insert(k.joint, bed_joints.len() - 1); bed_joints.len() - 1
+                }
+            };
+            bed_joints[s].0.push(l);
+        }
+    }
+    // a joint's force and moment about its face's centre, in its face's frame
+    let joint_load = |springs: &[Spring], x: &[[f64; 6]], ls: &[usize], g: &Geo| -> ([f64; 3], [f64; 3]) {
+        let (mut ft, mut mt) = ([0.0f64; 3], [0.0f64; 3]);
+        for &l in ls {
+            let (d, r) = springs[l].strain(&x[links[l].a as usize], &x[links[l].b as usize]);
+            let (fo, mo) = springs[l].force(d, r);
+            let p = springs[l].c;
+            let rr = [p[0] - g.c[0], p[1] - g.c[1], p[2] - g.c[2]];
+            for i in 0..3 { ft[i] += fo[i]; mt[i] += mo[i]; }
+            let rx = [rr[1] * fo[2] - rr[2] * fo[1], rr[2] * fo[0] - rr[0] * fo[2], rr[0] * fo[1] - rr[1] * fo[0]];
+            for i in 0..3 { mt[i] += rx[i]; }
+        }
+        (rot(&g.fr, ft), rot(&g.fr, mt))
+    };
+    if !bed_joints.is_empty() {
+        for _ in 0..8 {
+            let mut changed = false;
+            for (l, lk) in links.iter().enumerate() {
+                if !bed_of[l] || bed_state[l] == 1 { continue; }
+                let g = lk.geo.as_ref().unwrap();
+                let (d, r) = springs[l].strain(&x[lk.a as usize], &x[lk.b as usize]);
+                let (fo, _) = springs[l].force(d, r);
+                if rot(&g.fr, fo)[0] > 1.0 { bed_state[l] = 1; let sp = &mut springs[l]; for k in 0..3 { sp.k[k] *= 1e-6; sp.kr[k] *= 1e-6; } changed = true; }
+            }
+            for (ls, g) in bed_joints.iter() {
+                if ls.iter().any(|&l| bed_state[l] != 0) { continue; }
+                let (fl, ml) = joint_load(&springs, &x, ls, g);
+                let nn = -fl[0];
+                if nn > 0.0 && (fabs64s(ml[1]) / nn / g.s.zu.max(1e-6) + fabs64s(ml[2]) / nn / g.s.zw.max(1e-6)) > 1.0 {
+                    for &l in ls { bed_state[l] = 2; let sp = &mut springs[l]; for k in 0..3 { sp.kr[k] *= 1e-6; } }
+                    changed = true;
+                }
+            }
+            if !changed { break; }
+            let (x2, it2) = solve_network(&springs, &ends, &fixed, &pos, &f, Some(x.clone()));
+            x = x2; it += it2;
+        }
+    }
+    // a mechanism: the network with its open and hinged beds no longer holds, and moves without bound (stone moves
+    // fractions of a millimetre): a node by an open or hinged bed displaced over 5 cm
+    let disp = |k: usize| sqrt64(x[k][0] * x[k][0] + x[k][1] * x[k][1] + x[k][2] * x[k][2]);
+    let mech_link: Vec<bool> = links.iter().enumerate().map(|(l, lk)| bed_state[l] != 0 && (disp(lk.a as usize) > 0.05 || disp(lk.b as usize) > 0.05)).collect();
     if let Some(w) = warm { w.0.clear(); for k in 0..n { if !fixed[k] { w.0.insert(key(k), x[k]); } } }
     let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new() };
     // forces on each face (on the max side's cell, from the min side's): force and moment about the face centre
@@ -468,7 +543,14 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
         let normal = match &jgeo { Some(g) => g.fr[0], None => { let mut e = [0.0; 3]; e[ax.min(2)] = 1.0; e } };
         let bed = mortar_bed(b, j, normal);
         if bed { out.beds.push(j); }
-        let ratio = if bed { bed_ratio(&sect, fl, ml, [sa[0].min(sb[0]), 0.0, 0.2 * sa[2].min(sb[2])]) } else { section_ratio(&sect, fl, ml, cap, flex) };
+        // (a bed: open, it carries nothing; hinged, only sliding is checked; part of a mechanism, it gives way)
+        let (mut opened, mut hinged_bed, mut mech) = (true, false, false);
+        for &l in ls.iter() { if bed_state[l] != 1 { opened = false; } if bed_state[l] == 2 { hinged_bed = true; } if mech_link[l] { mech = true; } }
+        let ratio = if !bed { section_ratio(&sect, fl, ml, cap, flex) }
+            else if mech { 2.0 }
+            else if opened && !ls.is_empty() { 0.0 }
+            else if hinged_bed { let n = (-fl[0]).max(0.0); let v = sqrt64(fl[1] * fl[1] + fl[2] * fl[2]); (v / (0.2 * sa[2].min(sb[2]) as f64 * sect.area + 0.4 * n)) as f32 }
+            else { bed_ratio(&sect, fl, ml, [sa[0].min(sb[0]), 0.0, 0.2 * sa[2].min(sb[2])]) };
         out.ratios.push((j, ratio));
         if ratio > out.max_ratio { out.max_ratio = ratio; }
         if ratio > 1.0 { out.failed.push((j, ratio)); }

@@ -137,17 +137,19 @@ const LAB_SCENARIOS = {
   // the complex building (kind 4, docs/PHASE2.md): steel frame with free-piece braces, a roof of rafters and boards
   // at 26 degrees, an arcade of stone arches; the ground storey and the arcade's piers cut
   complex: { kind: 4, storeys: 3, frames: 600, title: 'complex (braced steel frame, pitched timber roof, stone arcade): the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
+  // the complex building left alone for 10 s: its loose contents settle on the floors, nothing fails (it came down
+  // by itself in the playground: 8 joints failed at about 5 s)
+  complexstand: { kind: 4, storeys: 3, frames: 600, title: 'complex: left alone', script: [], expect: { stand: true, settle: true } },
   // the frame's north-east corner column shot out at 1.5 m (four shots of the 0.7 m tool from the east)
   complexcol: { kind: 4, storeys: 3, frames: 600, title: 'complex: the north-east corner column shot out', script: [20, 24, 28, 32].map(f => [f, 'blast', [16, 1.5, 6, -1, 0, 0, 0.7]]), expect: { settle: true } },
   // a 1.5 m blast in a first-floor room (from the south, over the arcade, into the west bay: its cabinet)
   complexroom: { kind: 4, storeys: 3, frames: 600, title: 'complex: a blast in a first-floor room', script: [[20, 'blast', [-6, 5.5, -16, 0, 0, 1, 1.5]]], expect: { settle: true } },
-  // the keystone of the arcade's third arch knocked out (a 0.5 m shot from the south: a 0.3 m one took 7 crumbs off it,
-  // and the arch stood): the arch falls, the beam over it
-  // hangs on its neighbours
-  keystone: { kind: 4, storeys: 3, frames: 480, title: 'complex: an arch of the arcade loses its keystone', script: [[20, 'blast', [-1.5, 4.3, -16, 0, 0, 1, 0.5]]], expect: { settle: true } },
+  // the keystone of the arcade's third arch knocked out (a 0.5 m shot from the south at its middle): the loggia bears
+  // on the stones' level tops and holds the two halves on their piers (engine: complex::tests, nothing fails)
+  keystone: { kind: 4, storeys: 3, frames: 480, title: 'complex: an arch of the arcade loses its keystone', script: [[20, 'blast', [-1.5, 3.4, -16, 0, 0, 1, 0.5]]], expect: { settle: true } },
   rubble: { kind: 0, storeys: 3, frames: 720, title: 'concrete frame, 3 storeys: cut, then a blast into the rubble', script: [[0, 'cut'], [480, 'blast', [-14, 6, -14, 1, -0.45, 1, 2.5]]], expect: { settle: true } },
 };
-const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble', 'far'], complex: ['complex', 'complexcol', 'complexroom', 'keystone'] };
+const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble', 'far'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'] };
 let LABSTATE = null; try { LABSTATE = JSON.parse(localStorage.getItem('sf-lab') || 'null'); } catch (e) {}
 if (LABSTATE && !(LABSTATE.queue && LABSTATE.queue.length && LAB_SCENARIOS[LABSTATE.queue[0]])) LABSTATE = null;
 const LAB = { on: false, t: 0, f: 0 };
@@ -280,7 +282,11 @@ function pullDebris() {
   if (gpu.placing()) return;
   // at rest (every step since the last read-back skipped, nothing changed): the last one still holds, and the
   // GPU and the page do nothing for it; settled rubble is scenery
-  if (!LAB.on && gpu.realFrame === lastReadReal && snapCur) return;
+  // (and the steps since count as read: the page steps at most 3 past the newest read-back, and with none issued at
+  // rest it stopped stepping, so whatever came next, a ball, a blast's pieces, never stepped, never read, never
+  // showed: "clicking does nothing" on the complex building, whose furniture falls asleep while the page still steps;
+  // and the benchmark stood still at 39.6 s once its rubble had settled. Reproduced headless, play/rest.cjs.)
+  if (!LAB.on && gpu.realFrame === lastReadReal && snapCur) { stepsAtRead = stepsDone; return; }
   lastReadReal = gpu.realFrame;
   reading++;
   const seq = ++readSeq, issuedAt = stepsDone;
@@ -837,6 +843,23 @@ function readStatic(f) {
 }
 
 // The ray against the debris as drawn (oriented boxes): the nearest hit, as { t, slot }
+// The debris near the player, from the latest read-back, to the engine's walker as oriented boxes: it stands on a
+// broken floor, a falling slab, a heap of rubble, and walks into them (it saw only the standing bricks, and fell
+// through every floor that broke loose). Particles are left out (crumbs: it walks over them).
+function playerDebris() {
+  if (!E.player_debris_clear) return;
+  E.player_debris_clear();
+  const r = snapCur; if (!r || !gpu) return;
+  const px = E.player_get(0), py = E.player_get(1) + 0.9, pz = E.player_get(2);
+  const n = r.pose.length / 10;
+  for (let k = 0; k < n; k++) {
+    const b = k * 10, x = r.pose[b], y = r.pose[b + 1], z = r.pose[b + 2], h0 = r.pose[b + 7], h1 = r.pose[b + 8], h2 = r.pose[b + 9];
+    const reach = 1.5 + Math.hypot(h0, h1, h2);
+    if (!(Math.abs(x - px) < reach && Math.abs(y - py) < reach + 1 && Math.abs(z - pz) < reach)) continue;
+    if (!Number.isFinite(x + y + z + r.pose[b + 6])) continue;
+    E.player_debris_box(x, y, z, r.pose[b + 3], r.pose[b + 4], r.pose[b + 5], r.pose[b + 6], h0, h1, h2);
+  }
+}
 function rayDebris(o, d, maxT) {
   const r = snapCur; if (!r) return null;
   let best = null;
@@ -1380,6 +1403,7 @@ function frameBody(now, dt) {
     if (keys.has('KeyW')) w.add(f); if (keys.has('KeyS')) w.sub(f); if (keys.has('KeyD')) w.add(r); if (keys.has('KeyA')) w.sub(r);
     if (w.lengthSq() > 0) w.normalize().multiplyScalar(sp);
     if (fly) { if (keys.has('KeyE')) w.y += sp; if (keys.has('KeyQ')) w.y -= sp; }
+    playerDebris();
     E.player_step(dt, w.x, w.y, w.z, keys.has('Space') ? 1 : 0, fly ? 1 : 0);
     cam.position.set(E.player_get(0), E.player_get(1) + 1.65, E.player_get(2));
     cam.rotation.set(pitch, yaw, 0);

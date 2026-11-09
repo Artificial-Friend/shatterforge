@@ -319,6 +319,8 @@ function labReport(wallS) {
     checks.push({ name: 'farthest past the clean-up distance, still in the world (m)', value: +(L.farOver || 0).toFixed(2), limit: 1, pass: (L.farOver || 0) <= 1, what: 'nothing stays far out' });
   }
   if (S.expect && S.expect.roofDrop) checks.push({ name: 'roof fall (m)', value: +(roof0 - (last.roof || 0)).toFixed(2), limit: `>= ${S.expect.roofDrop}`, pass: roof0 - (last.roof || 0) >= S.expect.roofDrop, what: 'the cut storey brings the building down' });
+  // (a building left alone stands: nothing of it fails, its roof stays where it is)
+  if (S.expect && S.expect.stand) checks.push({ name: 'joints failed with nothing done to it', value: failedJoints, limit: 0, pass: failedJoints === 0, what: 'a building left alone stands' });
   if (S.expect && S.expect.settle) checks.push({ name: 'settled (s)', value: L.settledAt == null ? 'no' : +(L.settledAt / 60).toFixed(1), limit: `by ${(S.frames / 60).toFixed(0)}`, pass: L.settledAt != null, what: 'everything asleep before the end' });
   const gpuMs = se.map(x => x.gpu), jsMs = L.jsMs;
   return {

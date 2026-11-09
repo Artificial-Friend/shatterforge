@@ -6,15 +6,18 @@
 //!   one column to the head of the next, under the beam;
 //! - a pitched timber roof: a steel ridge beam on four posts along the middle (z = 0), rafters from the eaves to
 //!   the ridge every 1.5 m, and roof boards on the rafters (all free pieces, long ones in segments of at most 2 m);
-//! - in front (z -9.5..-9 m), an arcade: seven masonry piers 3 m tall with six semicircular arches of nine wedge
-//!   stones, and a stone beam from keystone to keystone.
-//! - room contents on the first floor: desks, cabinets and a chair turned in each bay, loose (joined to nothing:
-//!   bodies resting on the floor from the first structure step);
+//! - the south front's ground storey an arcade (z -9.25..-8.75 m): seven masonry piers 2 m tall with six
+//!   semicircular arches of nine wedge stones, a stone beam from keystone to keystone (ends on stone blocks over the
+//!   end piers), and on it the first floor carried out as a loggia over the arcade, with a parapet;
+//! - furniture in every room of both floors (offices of four workstations with monitors and chairs, bookcases,
+//!   cabinets, plants, boxes; a meeting room; a lobby in the hall with sofas, a table, a reception desk): each object
+//!   loose (its parts joined to each other, to nothing else), a body standing where it was put;
 //! - an irregular plan: a one-storey wing to the north, turned 30 degrees, of 0.25 m masonry walls (a door in
 //!   its front under a stone lintel) and a 0.2 m concrete roof slab, all free pieces.
 use crate::brick::{mat, Bricks, F_LOOSE, F_REINF, NONE};
 use crate::math::floor64;
 use alloc::vec::Vec;
+use alloc::vec;
 
 const T: f64 = 0.125;
 fn tk(m: f64) -> i32 { floor64(m / T + 0.5) as i32 }
@@ -26,12 +29,13 @@ pub const H: f64 = 4.0;
 const SLAB: f64 = 0.25;
 const BEAM: f64 = 0.5;
 const COL: f64 = 0.25;
-/// the arcade: piers' centres, their half width, height; the arches' ring and depth (z range)
+/// the arcade: piers' centres, their half width, height; the arches' depth (z range) and stones
 const PIER_X: [f64; 7] = [-9.0, -6.0, -3.0, 0.0, 3.0, 6.0, 9.0];
 const PIER: f64 = 0.375;
-const PIER_H: f64 = 3.0;
-const RING: f64 = 0.375;
-const ARC_Z: (f64, f64) = (-9.5, -9.0);
+const PIER_H: f64 = 2.0;
+/// how far an end pier (a buttress) reaches outward from its centre (m)
+const BUTTRESS: f64 = 1.5;
+const ARC_Z: (f64, f64) = (-9.5, -8.75);
 const STONES: usize = 9;
 
 /// paints (colours; the material drives the physics)
@@ -85,14 +89,134 @@ fn member(b: &mut Bricks, f: [f64; 3], h: [f64; 3], n: [f64; 3], out: [f64; 3], 
     b.segment(k, 2.0)
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Room { Office, Meeting, Lobby }
+/// one loose box of an object (m), on the tick grid
+fn part(b: &mut Bricks, out: &mut Vec<u32>, lo: [f64; 3], hi: [f64; 3], m: u8, paint: u8, sid: u16) {
+    let i = bx(b, lo, hi, m, paint);
+    b.structure[i as usize] = sid; b.flags[i as usize] |= F_LOOSE;
+    out.push(i);
+}
+/// one loose box of an object turned by `a` about y round `c` (m): a free piece
+fn part_turned(b: &mut Bricks, out: &mut Vec<u32>, c: [f64; 3], a: f64, lo: [f64; 3], hi: [f64; 3], m: u8, paint: u8, sid: u16) {
+    let mid = [0.5 * (lo[0] + hi[0]) - c[0], 0.5 * (lo[1] + hi[1]), 0.5 * (lo[2] + hi[2]) - c[2]];
+    let r = qrot_y(a, mid);
+    let h = [0.5 * (hi[0] - lo[0]), 0.5 * (hi[1] - lo[1]), 0.5 * (hi[2] - lo[2])];
+    let i = b.add_piece([c[0] + r[0], mid[1], c[2] + r[2]], quat_y(a), &box_corners(h), m, paint, sid).expect("a furniture part");
+    b.flags[i as usize] |= F_LOOSE;
+    out.push(i);
+}
+fn rnd(s: &mut u32) -> f64 { *s ^= *s << 13; *s ^= *s >> 17; *s ^= *s << 5; (*s as f64) / 4294967296.0 }
+/// A desk (top and two side panels), with a monitor on it and a chair before it, turned a little.
+fn workstation(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, seed: &mut u32, x: f64, z: f64, y: f64) {
+    *sid += 1; let s = *sid;
+    part(b, out, [x, y + 0.625, z], [x + 1.5, y + 0.75, z + 0.75], mat::TIMBER, P_TIMBER, s);
+    part(b, out, [x, y, z], [x + 0.125, y + 0.625, z + 0.75], mat::TIMBER, P_TIMBER, s);
+    part(b, out, [x + 1.375, y, z], [x + 1.5, y + 0.625, z + 0.75], mat::TIMBER, P_TIMBER, s);
+    *sid += 1;
+    part(b, out, [x + 0.5, y + 0.75, z + 0.5], [x + 1.0, y + 1.125, z + 0.625], mat::GLASS, 0, *sid);
+    // the chair: post, seat, back; turned up to 30 degrees either way
+    *sid += 1; let s = *sid;
+    let c = [x + 0.75, 0.0, z - 0.5];
+    let a = (rnd(seed) - 0.5) * 1.05;
+    part_turned(b, out, c, a, [c[0] - 0.0625, y, c[2] - 0.0625], [c[0] + 0.0625, y + 0.375, c[2] + 0.0625], mat::STEEL, P_STEEL, s);
+    part_turned(b, out, c, a, [c[0] - 0.25, y + 0.375, c[2] - 0.25], [c[0] + 0.25, y + 0.5, c[2] + 0.25], mat::TIMBER, P_TIMBER, s);
+    part_turned(b, out, c, a, [c[0] - 0.25, y + 0.5, c[2] - 0.25], [c[0] + 0.25, y + 1.0, c[2] - 0.125], mat::TIMBER, P_TIMBER, s);
+}
+/// A bookcase: two sides and four shelves, 1 m wide, 1.875 m tall, 0.375 m deep (along x).
+fn bookcase(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, x: f64, z: f64, y: f64) {
+    *sid += 1; let s = *sid;
+    part(b, out, [x, y, z], [x + 0.125, y + 1.875, z + 0.375], mat::TIMBER, P_TIMBER, s);
+    part(b, out, [x + 0.875, y, z], [x + 1.0, y + 1.875, z + 0.375], mat::TIMBER, P_TIMBER, s);
+    for &h in &[0.0, 0.625, 1.25, 1.75] { part(b, out, [x + 0.125, y + h, z], [x + 0.875, y + h + 0.125, z + 0.375], mat::TIMBER, P_TIMBER, s); }
+}
+/// A table on four legs, its top `w` x `d` at 0.75 m.
+fn table(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, x: f64, z: f64, y: f64, w: f64, d: f64, h: f64) {
+    *sid += 1; let s = *sid;
+    part(b, out, [x, y + h - 0.125, z], [x + w, y + h, z + d], mat::TIMBER, P_TIMBER, s);
+    for &(lx, lz) in &[(x, z), (x + w - 0.125, z), (x, z + d - 0.125), (x + w - 0.125, z + d - 0.125)] { part(b, out, [lx, y, lz], [lx + 0.125, y + h - 0.125, lz + 0.125], mat::TIMBER, P_TIMBER, s); }
+}
+/// A plain chair (seat on four legs, a back), facing +z or -z.
+fn chair(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, x: f64, z: f64, y: f64, back_at_low_z: bool) {
+    *sid += 1; let s = *sid;
+    part(b, out, [x, y + 0.375, z], [x + 0.5, y + 0.5, z + 0.5], mat::TIMBER, P_TIMBER, s);
+    for &(lx, lz) in &[(x, z), (x + 0.375, z), (x, z + 0.375), (x + 0.375, z + 0.375)] { part(b, out, [lx, y, lz], [lx + 0.125, y + 0.375, lz + 0.125], mat::TIMBER, P_TIMBER, s); }
+    let bz = if back_at_low_z { z } else { z + 0.375 };
+    part(b, out, [x, y + 0.5, bz], [x + 0.5, y + 1.0, bz + 0.125], mat::TIMBER, P_TIMBER, s);
+}
+/// A sofa: base, back, two arms, 2 m long along x, its back at high z if `back_far`.
+fn sofa(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, x: f64, z: f64, y: f64, back_far: bool) {
+    *sid += 1; let s = *sid;
+    part(b, out, [x, y, z], [x + 2.0, y + 0.375, z + 0.875], mat::TIMBER, 2, s);
+    let bz = if back_far { z + 0.625 } else { z };
+    part(b, out, [x + 0.25, y + 0.375, bz], [x + 1.75, y + 0.875, bz + 0.25], mat::TIMBER, 2, s);
+    part(b, out, [x, y + 0.375, z], [x + 0.25, y + 0.625, z + 0.875], mat::TIMBER, 2, s);
+    part(b, out, [x + 1.75, y + 0.375, z], [x + 2.0, y + 0.625, z + 0.875], mat::TIMBER, 2, s);
+}
+/// A plant: a stone pot and its foliage.
+fn plant(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, x: f64, z: f64, y: f64) {
+    *sid += 1; let s = *sid;
+    part(b, out, [x, y, z], [x + 0.375, y + 0.375, z + 0.375], mat::MASONRY, P_STONE, s);
+    part(b, out, [x + 0.0625, y + 0.375, z + 0.0625], [x + 0.3125, y + 1.125, z + 0.3125], mat::TIMBER, 1, s);
+}
+/// Boxes stacked (each its own object), a cabinet.
+fn boxes(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, x: f64, z: f64, y: f64, n: usize) {
+    for k in 0..n { *sid += 1; part(b, out, [x, y + 0.375 * k as f64, z], [x + 0.5, y + 0.375 * (k + 1) as f64, z + 0.375], mat::TIMBER, 3, *sid); }
+}
+fn cabinet(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, x: f64, z: f64, y: f64) {
+    *sid += 1; part(b, out, [x, y, z], [x + 0.5, y + 1.25, z + 0.5], mat::STEEL, P_STEEL, *sid);
+}
+/// Furnish a room (its inner area x0..x1, z0..z1, at least 4.5 m square, floor at y).
+fn furnish(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, seed: &mut u32, x0: f64, x1: f64, z0: f64, z1: f64, y: f64, kind: Room) {
+    match kind {
+        Room::Office => {
+            for &(dx, dz) in &[(0.25, 0.75), (2.5, 0.75), (0.25, 3.0), (2.5, 3.0)] { workstation(b, out, sid, seed, x0 + dx, z0 + dz, y); }
+            bookcase(b, out, sid, x1 - 1.0, z0 + 2.0, y);
+            cabinet(b, out, sid, x0, z1 - 0.5, y);
+            plant(b, out, sid, x1 - 0.375, z1 - 0.375, y);
+            boxes(b, out, sid, x1 - 0.5, z0, y, 2);
+        }
+        Room::Meeting => {
+            table(b, out, sid, x0 + 1.0, z0 + 1.75, y, 2.5, 1.0, 0.75);
+            for k in 0..3 { let cx = x0 + 1.125 + 0.875 * k as f64; chair(b, out, sid, cx, z0 + 1.0, y, true); chair(b, out, sid, cx, z0 + 3.0, y, false); }
+            cabinet(b, out, sid, x1 - 0.5, z1 - 0.5, y);
+            plant(b, out, sid, x0, z1 - 0.375, y);
+            bookcase(b, out, sid, x1 - 1.0, z0, y);
+        }
+        Room::Lobby => {
+            sofa(b, out, sid, x0 + 0.5, z0 + 0.25, y, false);
+            sofa(b, out, sid, x0 + 0.5, z0 + 2.5, y, true);
+            table(b, out, sid, x0 + 1.0, z0 + 1.5, y, 1.0, 0.5, 0.5);
+            // the reception desk: a counter and its top
+            *sid += 1; let s = *sid;
+            part(b, out, [x1 - 2.75, y, z1 - 1.0], [x1 - 0.25, y + 1.0, z1 - 0.75], mat::TIMBER, P_TIMBER, s);
+            part(b, out, [x1 - 2.75, y + 1.0, z1 - 1.125], [x1 - 0.25, y + 1.125, z1 - 0.625], mat::TIMBER, P_TIMBER, s);
+            for &(px, pz) in &[(x0, z1 - 0.375), (x1 - 0.375, z0), (x1 - 0.375, z0 + 0.5)] { plant(b, out, sid, px, pz, y); }
+            chair(b, out, sid, x1 - 1.75, z1 - 0.5, y, false);
+        }
+    }
+}
+
 /// What the complex building is made of, for its scenarios and tests.
 #[derive(Default, Clone, Debug)]
-pub struct Parts { pub contents: Vec<u32>, pub wing: Vec<u32>, pub columns: Vec<u32>, pub braces: Vec<Vec<u32>>, pub rafters: Vec<Vec<u32>>, pub boards: Vec<Vec<u32>>, pub ridge: u32, pub piers: Vec<u32>, pub arches: Vec<Vec<u32>>, pub keystones: Vec<u32>, pub beam: Vec<u32> }
+pub struct Parts { pub loggia: u32, pub contents: Vec<u32>, pub wing: Vec<u32>, pub columns: Vec<u32>, pub braces: Vec<Vec<u32>>, pub rafters: Vec<Vec<u32>>, pub boards: Vec<Vec<u32>>, pub ridge: u32, pub piers: Vec<u32>, pub arches: Vec<Vec<u32>>, pub keystones: Vec<u32>, pub beam: Vec<u32>, pub parapet: u32 }
 
 pub fn build() -> Bricks { build_parts().0 }
+/// The part of a convex polygon where n.p <= d (Sutherland-Hodgman against one line).
+fn clip(poly: &[[f64; 2]], n: [f64; 2], d: f64) -> Vec<[f64; 2]> {
+    let mut out = Vec::new();
+    let side = |p: &[f64; 2]| n[0] * p[0] + n[1] * p[1] - d;
+    for k in 0..poly.len() {
+        let (p, q) = (poly[k], poly[(k + 1) % poly.len()]);
+        let (sp, sq) = (side(&p), side(&q));
+        if sp <= 0.0 { out.push(p); }
+        if (sp < 0.0 && sq > 0.0) || (sp > 0.0 && sq < 0.0) { let t = sp / (sp - sq); out.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]); }
+    }
+    out
+}
 pub fn build_parts() -> (Bricks, Parts) {
     let mut b = Bricks::new();
-    let mut parts = Parts { ridge: NONE, ..Default::default() };
+    let mut parts = Parts { ridge: NONE, loggia: NONE, parapet: NONE, ..Default::default() };
     // member ids of the free pieces (boxes are member 1)
     let mut sid: u16 = 100;
     let up = [0.0, 1.0, 0.0];
@@ -158,50 +282,94 @@ pub fn build_parts() -> (Bricks, Parts) {
         }
     }
     // ---- the arcade
-    for &x in &PIER_X { parts.piers.push(bx(&mut b, [x - PIER, 0.0, ARC_Z.0], [x + PIER, PIER_H, ARC_Z.1], mat::MASONRY, P_STONE)); }
+    // (the end piers are buttresses: 1.5 m wide outward, to take the end arches' thrust; with only half a pier and a
+    // block beyond them, the end arch ran away as a mechanism once its beds took no tension)
+    let last = PIER_X.len() - 1;
+    for (k, &x) in PIER_X.iter().enumerate() {
+        let (xa, xb) = if k == 0 { (x - BUTTRESS, x + PIER) } else if k == last { (x - PIER, x + BUTTRESS) } else { (x - PIER, x + PIER) };
+        parts.piers.push(bx(&mut b, [xa, 0.0, ARC_Z.0], [xb, PIER_H, ARC_Z.1], mat::MASONRY, P_STONE));
+    }
     let mut key_top = 0.0;
-    for w in PIER_X.windows(2) {
+    let mut springers: Vec<u16> = vec![0; PIER_X.len()];   // the member id of each pier's tas-de-charge
+    for (ai, w) in PIER_X.windows(2).enumerate() {
         let (cx, r0) = (0.5 * (w[0] + w[1]), 0.5 * (w[1] - w[0]) - PIER);
-        let r1 = r0 + RING;
         let mut arch = Vec::new();
+        // the keystone's top, where its outer corners are (both at the same height), at the first floor's underside:
+        // the ring as deep as that makes it (0.43 m at the crown), the floor bearing on the stones' level tops
+        let tk = core::f64::consts::PI * (1.0 - (STONES / 2) as f64 / STONES as f64);
+        let r1 = (H - SLAB - PIER_H) / crate::math::sin(tk as f32) as f64;
+        let top = PIER_H + r1 * crate::math::sin(tk as f32) as f64;
         for k in 0..STONES {
             let (t0, t1) = (core::f64::consts::PI * (1.0 - k as f64 / STONES as f64), core::f64::consts::PI * (1.0 - (k + 1) as f64 / STONES as f64));
+            // a stone between its radial joints carried out to a level top at the keystone's top and to the piers'
+            // centre lines: the spandrel is the stones' own, and what bears on the arcade bears on a level course.
+            // (Fillers on the stones' sloping outer faces slid off at the haunches: 7 joints over strength under the
+            // floor. Outer corners carried straight up left a re-entrant corner on one side of each joint, and the
+            // stones' hulls overlapped their neighbours.) Each stone is the wedge between its joints clipped by the
+            // level top and the piers' centre lines, so convex, and neighbours share their whole joint plane.
+            let half = r0 + PIER;
+            let far = 4.0 * (r1 + half);
+            let mut poly: Vec<[f64; 2]> = vec![
+                [cx + r0 * crate::math::cos(t0 as f32) as f64, PIER_H + r0 * crate::math::sin(t0 as f32) as f64],
+                [cx + far * crate::math::cos(t0 as f32) as f64, PIER_H + far * crate::math::sin(t0 as f32) as f64],
+                [cx + far * crate::math::cos(t1 as f32) as f64, PIER_H + far * crate::math::sin(t1 as f32) as f64],
+                [cx + r0 * crate::math::cos(t1 as f32) as f64, PIER_H + r0 * crate::math::sin(t1 as f32) as f64]];
+            poly = clip(&poly, [0.0, 1.0], top);
+            poly = clip(&poly, [1.0, 0.0], cx + half);
+            poly = clip(&poly, [-1.0, 0.0], -(cx - half));
             let mut pts = Vec::new();
-            for &t in &[t0, t1] { for &r in &[r0, r1] { for &z in &[ARC_Z.0, ARC_Z.1] {
-                pts.push([cx + r * crate::math::cos(t as f32) as f64, PIER_H + r * crate::math::sin(t as f32) as f64, z]);
-            } } }
+            for q in &poly { for &z in &[ARC_Z.0, ARC_Z.1] { pts.push([q[0], q[1], z]); } }
             // (the springing stones lie flat on the piers: their bed at exactly the piers' top)
             for p in pts.iter_mut() { if (p[1] - PIER_H).abs() < 1e-3 { p[1] = PIER_H; } }
-            sid += 1;
-            let s = piece(&mut b, &pts, mat::MASONRY, P_STONE, sid);
+            // (the stones that reach a pier's centre line, from the arches on both sides of it and the buttress at
+            // an end, are one stone: the tas-de-charge, below)
+            let tas = [(ai, cx - half), (ai + 1, cx + half)].iter().find(|&&(_, xe)| poly.iter().any(|q| (q[0] - xe).abs() < 1e-6)).map(|&(p, _)| p);
+            let id = match tas {
+                Some(p) if springers[p] != 0 => springers[p],
+                _ => { sid += 1; if let Some(p) = tas { springers[p] = sid; } sid }
+            };
+            let s = piece(&mut b, &pts, mat::MASONRY, P_STONE, id);
             if k == STONES / 2 { parts.keystones.push(s); key_top = pts.iter().fold(0.0f64, |m, p| m.max(p[1])); }
             arch.push(s);
         }
         parts.arches.push(arch);
     }
-    // the stone beam on the keystones: a 0.5 m deep member from each keystone's centre to the next (two segments),
-    // resting on half of each (from pier centre to pier centre, resting on one keystone under its middle, the end ones
-    // overhung 1.5 m and loaded that keystone's bed at 0.90 of where its thrust may go)
-    let keys: Vec<f64> = PIER_X.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect();
-    for w in keys.windows(2) {
+    // the stone beam on the keystones, its top at the first floor's underside: a member from each keystone's centre to
+    // the next, and at each end from the keystone to a stone block on the end pier's outer half (resting on half of
+    // each). (From pier centre to pier centre, resting on one keystone under its middle, the end members overhung
+    // 1.5 m and loaded those keystones' beds at 0.90 of where their thrust may go.)
+    // the buttresses' upper stones, from the springing to the keystones' top beside the end arches' outer stones. Over
+    // each pier the arch stones that reach its centre line, from both sides, and at the ends this block, are one
+    // stone: the tas-de-charge (the lowest courses of arches bonded into their pier; what joins them is the stone,
+    // not a bed). (As stones of their own, the east end's second stone hung from its block by an upright bed with
+    // little thrust across it, 1.38 of what it holds in shear, and over the inner piers the two arches' springers met
+    // at 0.998; with the end stones run out over the buttress instead, they slid on their sloping joints, a
+    // mechanism.)
+    for (k, &sg) in [-1.0f64, 1.0].iter().enumerate() {
+        let (pc, xo) = if sg < 0.0 { (PIER_X[0], PIER_X[0] - BUTTRESS) } else { (PIER_X[PIER_X.len() - 1], PIER_X[PIER_X.len() - 1] + BUTTRESS) };
         let mut pts = Vec::new();
-        for &x in &[w[0], w[1]] { for &y in &[key_top, key_top + 0.5] { for &z in &[ARC_Z.0, ARC_Z.1] { pts.push([x, y, z]); } } }
-        sid += 1;
-        let k = piece(&mut b, &pts, mat::MASONRY, P_STONE, sid);
-        parts.beam.extend(b.segment(k, 2.0));
+        for &x in &[pc, xo] { for &y in &[PIER_H, key_top] { for &z in &[ARC_Z.0, ARC_Z.1] { pts.push([x, y, z]); } } }
+        parts.beam.push(piece(&mut b, &pts, mat::MASONRY, P_STONE, springers[if k == 0 { 0 } else { PIER_X.len() - 1 }]));
     }
-    // ---- room contents on the first floor, in every bay with a floor: two desks, a cabinet, a chair turned 25 degrees
-    let yf = H;
-    for &cx in &[-6.0f64, 0.0, 6.0] { for &cz in &[-3.0f64, 3.0] {
-        if cx == 0.0 && cz < 0.0 { continue; }    // the hall: no floor
-        for &dx in &[-1.25f64, 1.25] { parts.contents.push(bx(&mut b, [cx + dx - 0.75, yf, cz - 0.375], [cx + dx + 0.75, yf + 0.75, cz + 0.375], mat::TIMBER, P_TIMBER)); }
-        parts.contents.push(bx(&mut b, [cx - 0.25, yf, cz + 1.75], [cx + 0.25, yf + 1.75, cz + 2.25], mat::STEEL, P_STEEL));
-        let q = quat_y(25f64.to_radians());
-        sid += 1;
-        let chair = b.add_piece([cx, yf + 0.45, cz - 1.5], q, &box_corners([0.25, 0.45, 0.25]), mat::TIMBER, P_TIMBER, sid).expect("a chair");
-        parts.contents.push(chair);
-    } }
-    for &i in &parts.contents { b.flags[i as usize] |= F_LOOSE; }
+    let ytop = H - SLAB;
+    // the loggia: the first floor carried out over the arcade, from the stones' level tops to the building's own floor
+    // and south columns, with a 1 m parapet along its edge
+    parts.loggia = bx(&mut b, [x0, ytop, ARC_Z.0], [x1, H, z0], mat::CONCRETE, P_SLAB);
+    parts.parapet = bx(&mut b, [x0, H, ARC_Z.0], [x1, H + 1.0, ARC_Z.0 + 0.25], mat::MASONRY, P_STONE);
+    // ---- furniture, in every room on both floors: each object its parts joined to each other and to nothing else
+    // (loose), a body standing where it was put from the first structure step
+    let mut rooms: Vec<(f64, f64, f64, f64, f64, Room)> = Vec::new();
+    let xe = [XS[0], XS[1], XS[2], XS[3]]; let ze = [ZS[0], ZS[1], ZS[2]];
+    for k in 0..2 { for i in 0..3 { for j in 0..2 {
+        let hall = i == 1 && j == 0;
+        if k == 1 && hall { continue; }      // over the hall: no floor
+        let kind = if k == 0 && hall { Room::Lobby } else if k == 1 && i == 2 && j == 1 { Room::Meeting } else { Room::Office };
+        rooms.push((xe[i] + 0.75, xe[i + 1] - 0.75, ze[j] + 0.75, ze[j + 1] - 0.75, k as f64 * H, kind));
+    } } }
+    let mut seed = 0x51ed_270bu32;
+    for (rx0, rx1, rz0, rz1, y, kind) in rooms {
+        furnish(&mut b, &mut parts.contents, &mut sid, &mut seed, rx0, rx1, rz0, rz1, y, kind);
+    }
     // ---- the wing: 6 x 4 m outside, 3 m tall, turned 30 degrees about its centre, north of the frame
     let (wc, q) = ([4.0f64, 0.0, 11.5], quat_y(30f64.to_radians()));
     let place = |b: &mut Bricks, c: [f64; 3], h: [f64; 3], m: u8, paint: u8, sid: &mut u16| -> Vec<u32> {
@@ -230,7 +398,7 @@ mod tests {
     extern crate std;
     #[test] fn the_complex_building_is_what_it_should_be_and_stands() {
         // 24 columns, 8 braces (4 segments each: their longest edge is over 6 m), 24 rafters and 22 boards (4 segments each), 6 arches of 9 stones
-        // on 7 piers, a stone beam of 10 segments (5 members, keystone to keystone); every piece within the GPU's hull limits; nothing detached; and
+        // on 7 piers, a stone beam of 14 pieces (two end blocks, 7 members keystone to keystone and to the blocks); every piece within the GPU's hull limits; nothing detached; and
         // under its own weight nothing over strength
         let t = std::time::Instant::now();
         let (b, p) = build_parts();
@@ -242,25 +410,30 @@ mod tests {
         assert_eq!(p.rafters.len(), 24); assert!(p.rafters.iter().all(|s| s.len() == 4), "{:?}", p.rafters.iter().map(|s| s.len()).collect::<std::vec::Vec<_>>());
         assert_eq!(p.boards.len(), 22); assert!(p.boards.iter().all(|s| s.len() == 4));
         assert_eq!(p.arches.len(), 6); assert!(p.arches.iter().all(|a| a.len() == 9));
-        assert_eq!(p.beam.len(), 10);
-        // the contents, and only they, stand loose: each a piece of its own
+        assert_eq!(p.beam.len(), 2);   // (the buttresses' upper stones)
+        // the furniture, and only it, stands loose: each object a piece of its own, all its parts in it
         let det = b.detached();
         let mut loose: std::vec::Vec<u32> = det.iter().flat_map(|d| d.iter().cloned()).collect(); loose.sort();
         let mut want = p.contents.clone(); want.sort();
-        assert_eq!(det.len(), 20, "detached pieces: the 20 loose contents, each on its own");
-        assert_eq!(loose, want, "nothing else is detached (first other: {:?})", loose.iter().find(|i| !want.contains(i)).map(|&i| (i, b.tbox(i).min, b.piece(i).is_some())));
+        let mut objects: std::vec::Vec<u16> = p.contents.iter().map(|&i| b.structure[i as usize]).collect(); objects.sort(); objects.dedup();
+        std::println!("furniture: {} objects of {} parts", objects.len(), p.contents.len());
+        assert_eq!(loose, want, "nothing but the furniture is detached (first other: {:?})", loose.iter().find(|i| !want.contains(i)).map(|&i| (i, b.tbox(i).min, b.piece(i).is_some())));
+        assert_eq!(det.len(), objects.len(), "each object one piece");
+        for d in &det { let s0 = b.structure[d[0] as usize]; assert!(d.iter().all(|&i| b.structure[i as usize] == s0), "a piece is one object"); }
+        assert!(objects.len() >= 150, "a furnished building: {} objects", objects.len());
         // the wing: 3 segments for each long wall's pieces as needed, all joined to the ground or each other
         assert!(p.wing.len() >= 9, "{}", p.wing.len());
         // what each free piece is joined to: braces at both ends, rafters on the slab and the ridge, boards on two
         // rafters, arch stones to their neighbours, keystones to the beam
         let joined = |i: u32, o: u32| { let mut j = b.jhead[i as usize]; while j != NONE { if b.joint_other(j, i) == o { return true; } j = b.joint_next(j, i); } false };
-        for a in &p.arches { for w in a.windows(2) { assert!(joined(w[0], w[1]), "arch stones joined"); } }
-        for (k, &s) in p.keystones.iter().enumerate() { assert!(p.beam.iter().any(|&m| joined(s, m)), "keystone {k} carries the beam"); }
+        for (ai, a) in p.arches.iter().enumerate() { for (k, w) in a.windows(2).enumerate() { assert!(joined(w[0], w[1]), "arch {ai}: stones {k} and {} joined ({:?} {:?})", k + 1, b.centroid(w[0]), b.centroid(w[1])); } }
+        for (k, &s) in p.keystones.iter().enumerate() { assert!(joined(s, p.loggia), "keystone {k} carries the loggia"); }
         for r in &p.rafters { assert!(joined(*r.last().unwrap(), p.ridge) || joined(r[0], p.ridge), "rafter on the ridge"); }
         let mut g = crate::game::Game::new_kind(3, 4);
         let n = g.structure_step(64);
-        std::println!("first structure step: {} pieces made (the contents)", g.pieces.iter().filter(|p| !p.is_empty()).count());
-        assert_eq!(g.pieces.iter().filter(|p| !p.is_empty()).count(), 20);
+        let made = g.pieces.iter().filter(|p| !p.is_empty()).count();
+        std::println!("first structure step: {made} pieces made (the furniture)");
+        assert_eq!(made, objects.len());
         std::println!("complex building under its own weight: worst ratio {:.3}, {} failed", g.max_ratio, n);
         assert_eq!(n, 0, "nothing fails under its own weight");
         assert!(g.max_ratio < 1.0);
@@ -286,7 +459,10 @@ mod tests {
             b0.alive_count(), 1e3 * a0 / n0 as f64, b0.total_bytes_per_brick());
         // Gates (phase 2: "at about the same cost"). Analysis a node: free pieces' links are general-frame springs
         // and their joints polygons, against the boxes' axis-aligned rectangles: measured 1.27 times; within 2 (a
-        // ratio of two timings in the same run, so the machine's load cancels). Memory: three quarters of this
+        // ratio of two timings in the same run, so the machine's load cancels). With the stones' beds solved again
+        // where they open or hinge (structure::analyse_warm: 2 re-solves here), and an arcade that takes more
+        // iterations (52 against the frame's 36): 1.45 to 1.95 times over five runs on 9 Nov, close to the gate
+        // (docs/PHASE2.md, still to do). Memory: three quarters of this
         // building are free pieces, each 42 B plus its share of the shapes kept once: measured 186 B a brick (370
         // with a shape a piece); under 200.
         assert!((ac / nc as f64) < 2.0 * (a0 / n0 as f64), "analysis a node {:.1} us against {:.1}", 1e3 * ac / nc as f64, 1e3 * a0 / n0 as f64);
@@ -312,12 +488,13 @@ mod tests {
         assert!(gone > 0.4 * one && gone < 0.62 * one, "about half the brace goes: {:.2}", gone / one);
         assert!(s.len() > n0, "what is left of it is cut into more pieces");
     }
-    #[test] fn an_arch_without_its_keystone_falls() {
-        // The arcade's third arch with its keystone taken out: the two halves of the ring lean in on nothing, and their
-        // beds open (no tension: structure::mortar_bed): the stones come down, structure step by step, and the arches
-        // to the west, whose thrust it balanced, follow. Measured: 7 of its 8 other stones fall, and 4 and 5 of the
-        // first and second arches'; the three to the east stand. With the stones' joints as the stone itself (0.3 MPa
-        // tension), nothing failed: each half stood as a cantilever off its pier, at 0.78 of strength.
+    #[test] fn an_arch_under_the_loggia_stands_without_its_keystone() {
+        // The arcade's third arch with its keystone taken out. The loggia bears on the stones' level tops, and the
+        // halves of the ring are held between it and the piers: their beds take no tension (structure::mortar_bed),
+        // but the floor over them spans the keystone's 0.5 m and presses them onto their beds. Measured: nothing fails,
+        // worst ratio 0.50 after (0.92 before: what the keystone carried goes to its neighbours' beds, which have
+        // room). (The arches as they were, the floor on a stone beam over the crowns: the stones fell, 7 of 8, and two
+        // arches to the west with them.) The arch with nothing over it is in docs/PHASE2.md (still to do).
         let (_, p) = build_parts();
         let mut g = crate::game::Game::new_kind(3, 4);
         g.structure_step(64);
@@ -326,10 +503,9 @@ mod tests {
         let (mut steps, mut failed) = (0, 0);
         loop { let n = g.structure_step(64); failed += n; steps += 1; if n == 0 || steps > 60 { break; } }
         let fallen = arch.iter().filter(|&&s| s != key && g.b.flags[s as usize] & crate::brick::F_DYNAMIC != 0).count();
-        let beam_up = p.beam.iter().filter(|&&b| g.b.alive(b) && g.b.flags[b as usize] & crate::brick::F_DYNAMIC == 0).count();
-        let others: std::vec::Vec<usize> = p.arches.iter().map(|a| a.iter().filter(|&&s| g.b.flags[s as usize] & crate::brick::F_DYNAMIC != 0).count()).collect();
-        std::println!("arch without its keystone: {failed} joints failed in {steps} steps; {fallen} of its 8 other stones fell; {beam_up} of the beam's 10 segments standing; stones fallen per arch {others:?}; worst ratio now {:.2}", g.max_ratio);
-        assert!(fallen >= 6, "the arch comes down");
-        assert!(others[3..].iter().all(|&n| n == 0), "the arches east of it stand");
+        std::println!("arch without its keystone, under the loggia: {failed} joints failed in {steps} steps; {fallen} of its 8 other stones fell; worst ratio now {:.2}", g.max_ratio);
+        assert_eq!(failed, 0);
+        assert_eq!(fallen, 0);
+        assert!(g.max_ratio < 1.0);
     }
 }

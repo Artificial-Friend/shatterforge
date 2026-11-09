@@ -124,6 +124,9 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn player_step(dt: f32, wx: f32, wy: f32, wz: f32, jump: u32, fly: u32) {
     let g = game(); g.player.step(&g.b, dt, v3(wx, wy, wz), jump != 0, fly != 0);
 }
+/// the debris near the player (from the page's read-back), as oriented boxes the player stands on and walks into
+#[no_mangle] pub extern "C" fn player_debris_clear() { game().player.extra.clear(); }
+#[no_mangle] pub extern "C" fn player_debris_box(cx: f32, cy: f32, cz: f32, qx: f32, qy: f32, qz: f32, qw: f32, hx: f32, hy: f32, hz: f32) { game().player.extra.push(crate::player::Obstacle::obb([cx, cy, cz], [qx, qy, qz, qw], [hx, hy, hz])); }
 #[no_mangle] pub extern "C" fn player_get(axis: u32) -> f32 { game().player.p.get(axis as usize) }
 #[no_mangle] pub extern "C" fn player_on_ground() -> u32 { game().player.on_ground as u32 }
 #[no_mangle] pub extern "C" fn structure_step(max_fail: u32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.structure_step(max_fail as usize) as u32; g.finish_plans(); n }

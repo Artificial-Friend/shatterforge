@@ -27,8 +27,9 @@ pub const F_REINF: u8 = 16;
 /// on a fracture surface: a joint of it broke, or a neighbour was crushed away. It waits in `frac_pending` to be
 /// split into the convex cells of a fracture pattern (`shatter`), so a break is jagged, not a step of boxes.
 pub const F_FRAC: u8 = 32;
-/// loose: room contents and the like, built in place but joined to nothing. Off the ground, a loose brick is a
-/// detached piece at the first structure step, and falls (onto the floor it stands on) as a body.
+/// loose: room contents and the like, built in place, joined only to the other parts of the same object (the same
+/// `structure`) and founded on nothing: each object is a detached piece at the first structure step, a body resting
+/// on the floor it stands on.
 pub const F_LOOSE: u8 = 64;
 /// The cell pattern of fractured brick `i` (0..16, see the hull library) and the mask of its cells that spall off
 /// (fall away as crumbs): one or two of them, never all. Fixed by the brick's index.
@@ -460,7 +461,8 @@ impl Bricks {
         let mut stack: Vec<u32> = Vec::new();
         for i in 0..n as u32 {
             if !self.alive(i) || self.flags[i as usize] & F_DYNAMIC != 0 { mark[i as usize] = 1; continue; }
-            if self.y[i as usize] <= 0 { mark[i as usize] = 1; stack.push(i); }
+            // (loose things on the ground are not founded on it: they come off as bodies too)
+            if self.y[i as usize] <= 0 && self.flags[i as usize] & F_LOOSE == 0 { mark[i as usize] = 1; stack.push(i); }
         }
         while let Some(i) = stack.pop() {
             let mut j = self.jhead[i as usize];
@@ -647,7 +649,9 @@ impl Bricks {
     /// fractured brick touch on their shared face (axis 3, p the lower cell of the pattern); otherwise the boxes
     /// touch on a face and the contact is where the bricks' polygons on it overlap.
     pub fn contact(&self, p: u32, q: u32) -> Option<(u8, u32, bool)> {
-        if (self.flags[p as usize] | self.flags[q as usize]) & F_LOOSE != 0 { return None; }
+        // loose things (furniture) join only the parts of the same object (the same `structure`), and nothing else
+        let (fp, fq) = (self.flags[p as usize] & F_LOOSE, self.flags[q as usize] & F_LOOSE);
+        if fp | fq != 0 && !(fp != 0 && fq != 0 && self.structure[p as usize] == self.structure[q as usize]) { return None; }
         // a free piece is not its box: it joins where its faces meet the other's flat (p is then the joint's first
         // brick, the face's normal from p to q)
         if self.hull[p as usize] == HULL_FREE || self.hull[q as usize] == HULL_FREE {
