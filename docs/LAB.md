@@ -421,3 +421,10 @@ Scenarios `complex`, `complexcol`, `complexroom`, `keystone` (suite `complex`; d
 
 The box buildings on the same build (quick suite, full length): `collapse` as at the end of phase 0 (2 frames drawn below, 7 jumps, 3 rebounds, 21 energy gains, not settled by 10 s; it settles at 15 s), `ball` passes, determinism OK. With particles taking every hull (the library's cells too) by its faces, `ball` had a crumb jump 0.31 m (limit 0.26): cells keep their boxes for particles (docs/GPU.md, Convex chunks).
 
+After the arcade's redesign and the furniture (9 November, later; software GPU, 300 frames each; `node game/lab.cjs complex --frames 300`, `keystone` run on its own because its title line holds " of " and the suite's output filter dropped it):
+- `complexstand` passes: 171 loose objects settle on the floors, nothing fails.
+- `complex` (ground storey and piers cut): the building comes down, roof 10.89 -> 3.74 m by 5 s, dust 3.5%. Open: 8 frames drawn below and 6 above what exists (holes and duplicates while parts are cut free; 6 and 2 before), 14 rebounds and one crumb thrown up at 5.7 m/s, all at frame 39 (furniture parts hit by the falling floor: the first, a 3-box object at 2.5 m), not settled by 5 s. The furniture is new bodies falling with the building; the rebounds are written down here and in docs/PHASE2.md.
+- `complexcol`, `complexroom` pass.
+- `keystone` (0.5 m shot at the third keystone's middle) passes and settles at 4.8 s; the shot takes 58 crumbs and no stone ("tool": 0 m^3), so it does not yet test the arch losing its keystone in the page: the engine test (`complex::tests::an_arch_under_the_loggia_stands_without_its_keystone`) does. Still to do: a shot that takes the keystone out.
+Box buildings on the same build: `collapse` as the phase-0 baseline (2 below, 7 jumps, 3 rebounds, 21 energy gains), `ball` passes, deterministic over 150 frames; page checks `rest` and `debris` pass.
+
