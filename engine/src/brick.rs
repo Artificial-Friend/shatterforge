@@ -66,6 +66,14 @@ pub fn face_contact(p: &TBox, q: &TBox) -> Option<(u8, u32, bool)> {
 
 /// `hull` of a brick that is a free convex piece (its shape is in `pieces`, not the hull library)
 pub const HULL_FREE: u8 = 255;
+/// `jaxis` of a joint with a free piece: its face is where two faces meet flat (`Bricks::free_face`), any angle
+pub const JFREE: u8 = 4;
+/// Two faces meet flat (a joint) when they face each other within 1 degree (cos 1 deg) and their planes are within
+/// 5 mm: what a built joint is, mortar bed or a plate bolted on, and far tighter than anything that only rests.
+pub const JOIN_COS: f64 = 0.999_847_695_156_391_2;
+pub const JOIN_GAP: f64 = 0.005;
+/// the smallest joint face (m^2): 1 cm^2 (a sliver where two faces only graze is no joint)
+pub const JOIN_MIN_AREA: f64 = 1e-4;
 /// Grid of a free piece's centre (m): 1 mm.
 pub const PIECE_GRID: f64 = 0.001;
 
@@ -229,32 +237,146 @@ impl Bricks {
     /// w) and placed at `centre` (m, snapped to the 1 mm grid). None if the points have no volume, the hull is beyond
     /// the GPU's limits on a hull, or it is too big for a brick's box (32 m a side).
     pub fn add_piece(&mut self, centre: [f64; 3], q: [f32; 4], pts: &[[f64; 3]], material: u8, paint: u8, structure: u16) -> Option<u32> {
-        let sh = crate::hull::convex(pts)?;
         let ql = { let l = crate::math::sqrt64(q.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>()) as f32; if l > 0.0 { [q[0] / l, q[1] / l, q[2] / l, q[3] / l] } else { [0.0, 0.0, 0.0, 1.0] } };
         let snap = |x: f64| crate::math::floor64(x / PIECE_GRID + 0.5) as i32;
         let c = [snap(centre[0]), snap(centre[1]), snap(centre[2])];
-        let faces: Vec<Vec<u8>> = sh.faces.iter().map(|f| f.2.iter().map(|&k| k as u8).collect()).collect();
-        let v: Vec<[f32; 3]> = sh.v.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
-        // mass properties from the stored (f32) corners, so they are those of the shape kept
-        let vd: Vec<[f64; 3]> = v.iter().map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
-        let fi: Vec<Vec<usize>> = faces.iter().map(|f| f.iter().map(|&k| k as usize).collect()).collect();
-        let (vol, cen, _) = crate::hull::moments(&vd, &fi);
-        let piece = Piece { c, q: ql, v, faces, vol, cen };
-        // its box: the ticks that hold its corners
-        let w = piece.world();
-        let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
-        for p in &w { for k in 0..3 { let t = p[k] / TICK as f64; lo[k] = lo[k].min(crate::math::floor64(t + 1e-9) as i32); hi[k] = hi[k].max(crate::math::ceil64(t - 1e-9) as i32); } }
-        let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
-        if size.iter().any(|&s| s < 1 || s > 255) || lo.iter().chain(hi.iter()).any(|&t| t < i16::MIN as i32 || t > i16::MAX as i32) { return None; }
+        let (piece, t) = Self::piece_of_points(c, ql, pts)?;
+        let (lo, size) = (t.min, [t.max[0] - t.min[0], t.max[1] - t.min[1], t.max[2] - t.min[2]]);
         let i = self.add(lo, size, material, paint, structure);
         self.hull[i as usize] = HULL_FREE;
         self.piece_of.insert(i, self.pieces.len() as u32);
         self.pieces.push(piece);
         Some(i)
     }
+    /// Cut free piece `i` by the plane n.x = d (m; n a unit vector) into two convex pieces: `i` keeps the side
+    /// n.x <= d, the new piece (returned) the other. Each keeps the material, its joints go to the part(s) that still
+    /// meet the neighbour, and the two parts are joined on the cut. None (and nothing changed) if the plane misses the
+    /// piece or leaves a part too thin (under 1 cm) or beyond the hull limits.
+    pub fn cut_piece(&mut self, i: u32, n: [f64; 3], d: f64) -> Option<u32> {
+        let p = self.piece(i)?.clone();
+        let w = p.world();
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let (lo, hi) = w.iter().fold((f64::MAX, f64::MIN), |a, v| (a.0.min(dot(n, *v) - d), a.1.max(dot(n, *v) - d)));
+        if lo > -0.01 || hi < 0.01 { return None; }
+        // each side's points: its corners, and where the edges cross the plane
+        let (mut below, mut above): (Vec<[f64; 3]>, Vec<[f64; 3]>) = (Vec::new(), Vec::new());
+        for v in &w { let e = dot(n, *v) - d; if e <= 0.0 { below.push(*v); } if e >= 0.0 { above.push(*v); } }
+        for f in &p.faces { for k in 0..f.len() {
+            let (a, b) = (w[f[k] as usize], w[f[(k + 1) % f.len()] as usize]);
+            let (ea, eb) = (dot(n, a) - d, dot(n, b) - d);
+            if (ea < 0.0 && eb > 0.0) || (ea > 0.0 && eb < 0.0) {
+                let t = ea / (ea - eb);
+                let x = [a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2])];
+                below.push(x); above.push(x);
+            }
+        } }
+        let make = |pts: &[[f64; 3]]| -> Option<(Piece, TBox)> {
+            let m = pts.len() as f64;
+            let c = pts.iter().fold([0.0; 3], |a, x| [a[0] + x[0] / m, a[1] + x[1] / m, a[2] + x[2] / m]);
+            let snap = |x: f64| crate::math::floor64(x / PIECE_GRID + 0.5) as i32;
+            let ci = [snap(c[0]), snap(c[1]), snap(c[2])];
+            let cm = [ci[0] as f64 * PIECE_GRID, ci[1] as f64 * PIECE_GRID, ci[2] as f64 * PIECE_GRID];
+            // in the piece's own frame: the world points turned back by its rotation
+            let qi = [-p.q[0], -p.q[1], -p.q[2], p.q[3]];
+            let local: Vec<[f64; 3]> = pts.iter().map(|x| qrot(qi, [x[0] - cm[0], x[1] - cm[1], x[2] - cm[2]])).collect();
+            Self::piece_of_points(ci, p.q, &local)
+        };
+        let (pa, ta) = make(&below)?; let (pb, tb) = make(&above)?;
+        // the joints of i, with neighbour and damage
+        let mut nb: Vec<(u32, u8)> = Vec::new();
+        while self.jhead[i as usize] != NONE { let j = self.jhead[i as usize]; nb.push((self.joint_other(j, i), self.jdmg[j as usize])); self.remove_joint(j); }
+        let iu = i as usize;
+        let k = *self.piece_of.get(&i).unwrap() as usize;
+        self.pieces[k] = pa;
+        self.set_box(i, ta);
+        let s = [tb.max[0] - tb.min[0], tb.max[1] - tb.min[1], tb.max[2] - tb.min[2]];
+        let o = self.add(tb.min, s, self.mat[iu], self.paint[iu], self.structure[iu]);
+        let ou = o as usize;
+        self.flags[ou] = self.flags[iu]; self.body[ou] = self.body[iu]; self.damage[ou] = self.damage[iu];
+        self.hull[ou] = HULL_FREE;
+        self.piece_of.insert(o, self.pieces.len() as u32);
+        self.pieces.push(pb);
+        for &(q, dm) in &nb { self.join_if_touching(i, q, dm); self.join_if_touching(o, q, dm); }
+        self.join_if_touching(i, o, 0);
+        Some(o)
+    }
+    /// A piece from points in its own frame (centre in mm, rotation), and its tick box; none as in `add_piece`.
+    fn piece_of_points(c: [i32; 3], q: [f32; 4], pts: &[[f64; 3]]) -> Option<(Piece, TBox)> {
+        let sh = crate::hull::convex(pts)?;
+        let faces: Vec<Vec<u8>> = sh.faces.iter().map(|f| f.2.iter().map(|&k| k as u8).collect()).collect();
+        let v: Vec<[f32; 3]> = sh.v.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
+        // mass properties from the stored (f32) corners, so they are those of the shape kept
+        let vd: Vec<[f64; 3]> = v.iter().map(|p| [p[0] as f64, p[1] as f64, p[2] as f64]).collect();
+        let fi: Vec<Vec<usize>> = faces.iter().map(|f| f.iter().map(|&k| k as usize).collect()).collect();
+        let (vol, cen, _) = crate::hull::moments(&vd, &fi);
+        let piece = Piece { c, q, v, faces, vol, cen };
+        // its box: the ticks that hold its corners
+        let (mut lo, mut hi) = ([i32::MAX; 3], [i32::MIN; 3]);
+        for p in &piece.world() { for k in 0..3 { let t = p[k] / TICK as f64; lo[k] = lo[k].min(crate::math::floor64(t + 1e-9) as i32); hi[k] = hi[k].max(crate::math::ceil64(t - 1e-9) as i32); } }
+        let size = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
+        if size.iter().any(|&s| s < 1 || s > 255) || lo.iter().chain(hi.iter()).any(|&t| t < i16::MIN as i32 || t > i16::MAX as i32) { return None; }
+        Some((piece, TBox { min: lo, max: hi }))
+    }
+    /// Move brick `i` to tick box `t`, and in the spatial index to the cell of its new box. (Re-indexing without
+    /// taking it out of its old cell's list first linked the lists into a loop: a query never ended.)
+    fn set_box(&mut self, i: u32, t: TBox) {
+        let iu = i as usize;
+        self.unindex(i);
+        self.x[iu] = t.min[0] as i16; self.y[iu] = t.min[1] as i16; self.z[iu] = t.min[2] as i16;
+        self.sx[iu] = (t.max[0] - t.min[0]) as u8; self.sy[iu] = (t.max[1] - t.min[1]) as u8; self.sz[iu] = (t.max[2] - t.min[2]) as u8;
+        self.index(i);
+        self.log.push(i);
+    }
+    /// Cut a long free piece across its length into segments of at most `max` m (a brace bends as boxes' cells do:
+    /// the structure solver has one node per piece). Its length is its longest extent along one of its edges'
+    /// directions. Returns the segments, `i` first, in order along the length.
+    pub fn segment(&mut self, i: u32, max: f64) -> Vec<u32> {
+        let mut out = alloc::vec![i];
+        let Some(p) = self.piece(i) else { return out };
+        let w = p.world();
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let (mut best, mut dir, mut lo) = (0.0, [1.0, 0.0, 0.0], 0.0);
+        for f in &p.faces { for k in 0..f.len() {
+            let (a, b) = (w[f[k] as usize], w[f[(k + 1) % f.len()] as usize]);
+            let e = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]; let l = crate::math::sqrt64(dot(e, e));
+            if l < 1e-9 { continue; }
+            let e = [e[0] / l, e[1] / l, e[2] / l];
+            let (mn, mx) = w.iter().fold((f64::MAX, f64::MIN), |a, v| (a.0.min(dot(e, *v)), a.1.max(dot(e, *v))));
+            if mx - mn > best + 1e-9 { best = mx - mn; dir = e; lo = mn; }
+        } }
+        let n = crate::math::ceil64(best / max - 1e-9) as usize;
+        if n < 2 { return out; }
+        // from the far end back: the piece left below each plane keeps `i`
+        let mut segs: Vec<u32> = Vec::new();
+        for k in (1..n).rev() {
+            match self.cut_piece(i, dir, lo + best * k as f64 / n as f64) { Some(o) => segs.push(o), None => {} }
+        }
+        segs.reverse();
+        out.extend(segs);
+        out
+    }
     /// the brick's free piece, if it is one
     #[inline] pub fn piece(&self, i: u32) -> Option<&Piece> { if self.hull[i as usize] != HULL_FREE { return None; } self.piece_of.get(&i).map(|&k| &self.pieces[k as usize]) }
 
+    fn key_of(&self, i: u32) -> u64 {
+        let b = self.tbox(i);
+        let m = (0..3).map(|k| b.max[k] - b.min[k]).max().unwrap();
+        let l = (0..LEVELS).find(|&l| lcell(l) >= m).unwrap_or(LEVELS - 1);
+        let c = lcell(l);
+        ckey(l, [b.min[0].div_euclid(c), b.min[1].div_euclid(c), b.min[2].div_euclid(c)])
+    }
+    /// take brick `i` out of its cell's list in the spatial index
+    fn unindex(&mut self, i: u32) {
+        let key = self.key_of(i);
+        let Some(&head) = self.cells.get(&key) else { return };
+        if head == i { self.cells.insert(key, self.cnext[i as usize]); }
+        else {
+            let mut k = head;
+            while k != NONE && self.cnext[k as usize] != i { k = self.cnext[k as usize]; }
+            if k != NONE { self.cnext[k as usize] = self.cnext[i as usize]; }
+        }
+        self.cnext[i as usize] = NONE;
+    }
     fn index(&mut self, i: u32) {
         let b = self.tbox(i);
         let m = (0..3).map(|k| b.max[k] - b.min[k]).max().unwrap();
@@ -478,8 +600,12 @@ impl Bricks {
     /// fractured brick touch on their shared face (axis 3, p the lower cell of the pattern); otherwise the boxes
     /// touch on a face and the contact is where the bricks' polygons on it overlap.
     pub fn contact(&self, p: u32, q: u32) -> Option<(u8, u32, bool)> {
-        // a free piece is not its box: it joins nothing by the box's faces (joints of free pieces: docs/PHASE2.md, step 2)
-        if self.hull[p as usize] == HULL_FREE || self.hull[q as usize] == HULL_FREE { return None; }
+        // a free piece is not its box: it joins where its faces meet the other's flat (p is then the joint's first
+        // brick, the face's normal from p to q)
+        if self.hull[p as usize] == HULL_FREE || self.hull[q as usize] == HULL_FREE {
+            let poly = self.free_face(p, q)?;
+            return Some((JFREE, area_ticks(crate::hull::polygon(&poly).0), true));
+        }
         let (cp, cq) = (self.cell(p), self.cell(q));
         if let (Some(a), Some(b)) = (cp, cq) {
             if a.pattern == b.pattern && self.tbox(p) == self.tbox(q) {
@@ -504,11 +630,37 @@ impl Bricks {
         let mut n = [0.0; 3]; n[ax] = 1.0;
         crate::hull::intersect(&pa, &pb, n)
     }
+    /// Where p and q meet flat: of the faces of p and q that face each other within 1 degree with planes within 5 mm,
+    /// the largest overlap (q's face projected onto p's plane, cut to p's face), at least 1 cm^2. In m, on p's face,
+    /// counter-clockwise about p's outward normal (from p to q). Any two shapes (boxes, cells, free pieces).
+    pub fn free_face(&self, p: u32, q: u32) -> Option<Vec<[f64; 3]>> {
+        let (vp, fp) = self.shape(p); let (vq, fq) = self.shape(q);
+        let polys = |v: &[[f64; 3]], f: &[Vec<usize>]| -> Vec<(Vec<[f64; 3]>, [f64; 3], [f64; 3])> {
+            f.iter().map(|l| { let pl: Vec<[f64; 3]> = l.iter().map(|&k| v[k]).collect(); let (_, c, n) = crate::hull::polygon(&pl); (pl, c, n) }).collect()
+        };
+        let (pp, qq) = (polys(&vp, &fp), polys(&vq, &fq));
+        let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let mut best: Option<(f64, Vec<[f64; 3]>)> = None;
+        for (pa, ca, na) in &pp {
+            for (pb, cb, nb) in &qq {
+                if dot(*na, *nb) > -JOIN_COS { continue; }
+                let gap = dot(*na, [cb[0] - ca[0], cb[1] - ca[1], cb[2] - ca[2]]);
+                if gap.abs() > JOIN_GAP { continue; }
+                // q's face onto p's plane
+                let proj: Vec<[f64; 3]> = pb.iter().map(|x| { let e = dot(*na, [x[0] - ca[0], x[1] - ca[1], x[2] - ca[2]]); [x[0] - e * na[0], x[1] - e * na[1], x[2] - e * na[2]] }).collect();
+                let ov = crate::hull::intersect(pa, &proj, *na);
+                let a = crate::hull::polygon(&ov).0;
+                if a >= JOIN_MIN_AREA && best.as_ref().map_or(true, |b| a > b.0) { best = Some((a, ov)); }
+            }
+        }
+        best.map(|b| b.1)
+    }
     /// The face of joint j (m), counter-clockwise about the normal from ja to jb.
     pub fn joint_poly(&self, j: u32) -> Vec<[f64; 3]> {
         let ju = j as usize;
         let (a, b) = (self.ja[ju], self.jb[ju]);
         let ax = self.jaxis[ju] as usize;
+        if ax == JFREE as usize { return self.free_face(a, b).unwrap_or_default(); }
         if ax == 3 {
             let (ca, cb) = (self.cell(a).unwrap(), self.cell(b).unwrap());
             let (c, h) = self.box_m(a);
@@ -943,18 +1095,27 @@ mod piece_tests {
         assert!(b.add_piece([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], &box_pts([20.0, 0.5, 0.5]), mat::CONCRETE, 0, 0).is_none());
         assert_eq!(b.len(), 0);
     }
-    #[test] fn a_free_piece_is_not_its_box() {
+    #[test] fn a_free_piece_joins_by_its_faces_not_its_box() {
         // a 1 m cube on the ground and, on it, a 1 m cube turned 45 degrees about y: their tick boxes share a face
-        // (y = 1 m), but the turned cube is a free piece and joins nothing by its box (joints of free pieces come in
-        // step 2). It is drawn as its own six faces, its mesh encloses its volume, and it survives a save and load.
+        // (y = 1 m) of 1 m^2, but the joint is where the faces overlap: the square and the same square turned 45
+        // degrees about its centre share an octagon of 2 (sqrt 2 - 1) = 0.8284 m^2. Before step 2 a free piece
+        // joined nothing (0 joints); a box's joint would have been 1 m^2. It is drawn as its own six faces, its mesh
+        // encloses its volume, and it survives a save and load.
         let mut b = Bricks::new();
         let base = b.add([0, 0, 0], [8, 8, 8], mat::CONCRETE, 0, 0);
         let q = quat([0.0, 1.0, 0.0], core::f64::consts::FRAC_PI_4);
         let top = b.add_piece([0.5, 1.5, 0.5], q, &box_pts([0.5, 0.5, 0.5]), mat::CONCRETE, 3, 0).unwrap();
         assert_eq!(b.tbox(top).min[1], 8);
         b.build_joints();
-        assert_eq!(b.live_joints, 0);
-        assert_eq!(b.jhead[base as usize], NONE);
+        assert_eq!(b.live_joints, 1);
+        let j = b.jhead[base as usize];
+        assert_eq!(b.jaxis[j as usize], JFREE);
+        let (a, _, n) = crate::hull::polygon(&b.joint_poly(j));
+        assert!((a - 2.0 * (2f64.sqrt() - 1.0)).abs() < 1e-6, "joint area {a}");
+        // its normal runs from ja to jb
+        let up = if b.ja[j as usize] == base { 1.0 } else { -1.0 };
+        assert!((n[1] - up).abs() < 1e-9, "normal {n:?}");
+        assert!(b.detached().is_empty(), "the turned cube stands on the base");
         let m = crate::mesh::build(&b);
         // the base: 5 faces (its bottom is on the ground); the piece: 6
         assert_eq!(m.quads, 11);
@@ -970,5 +1131,262 @@ mod piece_tests {
         assert_eq!(c.piece_of.get(&top), Some(&0));
         assert_eq!(c.centroid(top), b.centroid(top));
         assert_eq!(c.hull[top as usize], HULL_FREE);
+        assert_eq!(c.joint_set(), b.joint_set());
+    }
+
+    // ---- joints of free pieces (docs/PHASE2.md, step 2) ----
+    fn area_of(b: &Bricks, j: u32) -> f64 { crate::hull::polygon(&b.joint_poly(j)).0 }
+    /// a piece from world points: centre at their mean, not turned
+    fn piece_at(b: &mut Bricks, pts: &[[f64; 3]], m: u8) -> u32 {
+        let n = pts.len() as f64;
+        let c = pts.iter().fold([0.0; 3], |a, p| [a[0] + p[0] / n, a[1] + p[1] / n, a[2] + p[2] / n]);
+        let cs = [(c[0] * 1000.0).round() / 1000.0, (c[1] * 1000.0).round() / 1000.0, (c[2] * 1000.0).round() / 1000.0];
+        let local: std::vec::Vec<[f64; 3]> = pts.iter().map(|p| [p[0] - cs[0], p[1] - cs[1], p[2] - cs[2]]).collect();
+        b.add_piece(cs, [0.0, 0.0, 0.0, 1.0], &local, m, 0, 0).unwrap()
+    }
+    #[test] fn a_turned_block_on_a_slab_joins_on_its_whole_face() {
+        // a 1 m cube turned 30 degrees about y, wholly on a 2 x 1 x 2 m block: the joint is the cube's 1 m^2 bottom
+        let mut b = Bricks::new();
+        b.add([0, 0, 0], [16, 8, 16], mat::CONCRETE, 0, 0);
+        b.add_piece([1.0, 1.5, 1.0], quat([0.0, 1.0, 0.0], 0.5236), &box_pts([0.5, 0.5, 0.5]), mat::CONCRETE, 0, 0).unwrap();
+        b.build_joints();
+        assert_eq!(b.live_joints, 1);
+        assert!((area_of(&b, 0) - 1.0).abs() < 1e-6, "{}", area_of(&b, 0));
+    }
+    #[test] fn two_wedges_join_on_the_diagonal() {
+        // a 1 m cube cut on its diagonal plane x = y into two wedges, both on the ground: one joint, the diagonal
+        // face, sqrt 2 x 1 = 1.4142 m^2, its normal along (1, -1, 0) / sqrt 2
+        let mut b = Bricks::new();
+        let lo = piece_at(&mut b, &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [1.0, 1.0, 1.0]], mat::MASONRY);
+        let _hi = piece_at(&mut b, &[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 1.0, 1.0]], mat::MASONRY);
+        b.build_joints();
+        assert_eq!(b.live_joints, 1);
+        assert!((area_of(&b, 0) - 2f64.sqrt()).abs() < 1e-6, "{}", area_of(&b, 0));
+        let n = crate::hull::polygon(&b.joint_poly(0)).2;
+        let s = if b.ja[0] == lo { 1.0 } else { -1.0 };
+        let r = 0.5f64.sqrt();
+        assert!((n[0] + s * r).abs() < 1e-9 && (n[1] - s * r).abs() < 1e-9, "normal {n:?}");
+        assert_eq!(b.detached().len(), 0);
+    }
+    #[test] fn a_brace_end_joins_a_column_face() {
+        // a 0.5 m square column, 3 m tall; a 0.2 x 0.2 m brace at 45 degrees, its end cut vertical against the
+        // column's face x = 0.5 m: the joint is the end, a 0.2 / cos 45 x 0.2 parallelogram, 0.05657 m^2, normal +x
+        let mut b = Bricks::new();
+        let col = b.add([0, 0, 0], [4, 24, 4], mat::STEEL, 0, 0);
+        let (c45, l) = (0.5f64.sqrt(), 2.0f64);
+        let mut pts = std::vec::Vec::new();
+        for &sd in &[-0.1, 0.1] { for &z in &[0.15, 0.35] {
+            let p = [0.5, 1.5 + sd / c45, z];
+            pts.push(p); pts.push([p[0] + l * c45, p[1] + l * c45, z]);
+        } }
+        let brace = piece_at(&mut b, &pts, mat::STEEL);
+        b.build_joints();
+        assert_eq!(b.live_joints, 1);
+        let j = b.jhead[brace as usize];
+        assert!((area_of(&b, j) - 0.04 / c45).abs() < 1e-6, "{}", area_of(&b, j));
+        let n = crate::hull::polygon(&b.joint_poly(j)).2;
+        let s = if b.ja[j as usize] == col { 1.0 } else { -1.0 };
+        assert!((n[0] - s).abs() < 1e-9, "normal {n:?}");
+    }
+    #[test] fn faces_join_within_one_degree_and_five_millimetres() {
+        // a 1 m cube on a 2 m block: tilted 0.5 degrees it joins, 1.5 degrees not; lifted 4 mm it joins, 6 mm not
+        let joins = |tilt_deg: f64, lift: f64| {
+            let mut b = Bricks::new();
+            b.add([0, 0, 0], [16, 8, 16], mat::CONCRETE, 0, 0);
+            let t = tilt_deg.to_radians();
+            b.add_piece([1.0, 1.0 + 0.5 * t.cos() + lift, 1.0], quat([1.0, 0.0, 0.0], t), &box_pts([0.5, 0.5, 0.5]), mat::CONCRETE, 0, 0).unwrap();
+            b.build_joints();
+            b.live_joints
+        };
+        assert_eq!(joins(0.5, 0.0), 1);
+        assert_eq!(joins(1.5, 0.0), 0);
+        assert_eq!(joins(0.0, 0.004), 1);
+        assert_eq!(joins(0.0, 0.006), 0);
+    }
+    #[test] fn a_turned_block_bears_on_a_slab_through_its_joint() {
+        // a 1 m cube turned 30 degrees about y with 3 MN on it, centred on the line between two of a 4 m slab's
+        // cells (the 4 x 0.5 x 2 m slab, on the ground, is cut into 2 m cells): the joint is split between the two cells, and summed
+        // back about its centre it is pure compression, (weight + 3 MN) / 1 m^2 against concrete's 30 MPa
+        let mut b = Bricks::new();
+        b.add([0, 0, 0], [32, 4, 16], mat::CONCRETE, 0, 0);
+        let top = b.add_piece([2.0, 1.0, 1.0], quat([0.0, 1.0, 0.0], 0.5236), &box_pts([0.5, 0.5, 0.5]), mat::CONCRETE, 0, 0).unwrap();
+        b.build_joints();
+        assert_eq!(b.live_joints, 1);
+        let set: std::vec::Vec<u32> = (0..b.len() as u32).collect();
+        let w = crate::structure::mass(&b, top) as f64 * 9.81;
+        let load: std::vec::Vec<f32> = set.iter().map(|&i| if i == top { (w + 3.0e6) as f32 } else { 0.0 }).collect();
+        let sink: std::vec::Vec<bool> = set.iter().map(|&i| i != top).collect();
+        let a = crate::structure::analyse(&b, &set, &load, &sink, crate::math::v3(0.0, -1.0, 0.0));
+        assert_eq!(a.nodes, 3, "two slab cells and the cube");
+        assert_eq!(a.ratios.len(), 1);
+        let want = (w + 3.0e6) / 1.0 / 30e6;
+        let got = a.ratios.iter().find(|r| r.0 == 0).unwrap().1 as f64;
+        std::println!("turned block on a slab: ratio {got:.5}, pure compression {want:.5}");
+        assert!((got - want).abs() < 0.01 * want, "ratio {got} want {want}");
+    }
+
+    // ---- the structure over free pieces (docs/PHASE2.md, step 3) ----
+    #[test] fn a_cut_piece_keeps_its_volume_and_is_joined_on_the_cut() {
+        // a 3 m long 0.3 m square bar turned 20 degrees about z, cut by a plane across it through its centre: two
+        // pieces of half the volume each, joined on the cut (the bar's section, 0.09 m^2)
+        let mut b = Bricks::new();
+        let q = quat([0.0, 0.0, 1.0], 0.349);
+        let i = b.add_piece([0.0, 5.0, 0.0], q, &box_pts([1.5, 0.15, 0.15]), mat::TIMBER, 0, 0).unwrap();
+        let ax = qrot(q, [1.0, 0.0, 0.0]);
+        let d = ax[0] * 0.0 + ax[1] * 5.0;
+        let o = b.cut_piece(i, ax, d).unwrap();
+        assert!((b.volume(i) - 0.135).abs() < 1e-6 && (b.volume(o) - 0.135).abs() < 1e-6, "{} {}", b.volume(i), b.volume(o));
+        assert_eq!(b.live_joints, 1);
+        let j = b.jhead[i as usize];
+        assert!((area_of(&b, j) - 0.09).abs() < 1e-6, "{}", area_of(&b, j));
+        // segmenting a 7 m bar: four pieces of 1.75 m, joined in a row
+        let mut c = Bricks::new();
+        let k = c.add_piece([0.0, 5.0, 0.0], q, &box_pts([3.5, 0.15, 0.15]), mat::TIMBER, 0, 0).unwrap();
+        let segs = c.segment(k, 2.0);
+        assert_eq!(segs.len(), 4);
+        for &s in &segs { assert!((c.volume(s) - 0.63 / 4.0).abs() < 1e-6, "{}", c.volume(s)); }
+        assert_eq!(c.live_joints, 3);
+        let cs: std::vec::Vec<f64> = segs.iter().map(|&s| { let p = c.centroid(s); p[0] * ax[0] + p[1] * ax[1] }).collect();
+        // in order along the bar (whichever way its length was measured)
+        for w in cs.windows(2) { assert!(((w[1] - w[0]).abs() - 1.75).abs() < 1e-6 && (w[1] - w[0]) * (cs[1] - cs[0]) > 0.0, "{cs:?}"); }
+    }
+    /// An A-frame: two 0.2 m square steel struts at `theta` from the ground, 4 m long, their feet cut level on
+    /// ground blocks, their heads cut vertical against a 0.5 m block between them that carries `p` (no self weight).
+    /// Returns the store, the struts' segments (left, right) and the block.
+    fn a_frame(theta: f64) -> (Bricks, std::vec::Vec<u32>, std::vec::Vec<u32>, u32) {
+        let mut b = Bricks::new();
+        let (c, s) = (theta.cos(), theta.sin());
+        let la = 4.0;
+        let (xt, yf) = (0.25, 0.5);
+        let yt = yf + la * s;
+        let top = b.add([-2, crate::math::floor64((yt - 0.5) / 0.125) as i32, 0], [4, 8, 2], mat::STEEL, 0, 0);
+        let mut sides = std::vec::Vec::new();
+        for &side in &[-1.0f64, 1.0] {
+            // the strut's axis from its foot (x = side (xt + la c), y = yf) up and in to (side xt, yt)
+            let d = [-side * c, s, 0.0];
+            let nrm = [s, side * c, 0.0];
+            let foot = [side * (xt + la * c), yf, 0.0];
+            let mut pts = std::vec::Vec::new();
+            for &o in &[-0.1, 0.1] { for &z in &[0.025, 0.225] {
+                let e = [foot[0] + o * nrm[0], foot[1] + o * nrm[1]];
+                // along the edge e + t d: level at y = yf, vertical at x = side xt
+                let t0 = (yf - e[1]) / d[1]; let t1 = (side * xt - e[0]) / d[0];
+                pts.push([e[0] + t0 * d[0], yf, z]); pts.push([side * xt, e[1] + t1 * d[1], z]);
+            } }
+            let k = piece_at(&mut b, &pts, mat::STEEL);
+            sides.push(b.segment(k, 2.0));
+            let fx = crate::math::floor64(foot[0] / 0.125) as i32;
+            b.add([fx - 8, 0, 0], [16, 4, 2], mat::STEEL, 0, 0);
+        }
+        b.build_joints();
+        let r = sides.pop().unwrap(); let l = sides.pop().unwrap();
+        (b, l, r, top)
+    }
+    #[test] fn an_a_frame_carries_its_load_as_struts() {
+        // A load P on the head of an A-frame of struts at theta to the ground goes down the struts: each carries
+        // N = P / (2 sin theta) along its length, and at its foot pushes down P / 2 and out H = P / (2 tan theta). The
+        // joints resist bending too, but struts 20 times longer than deep carry almost all of it axially.
+        for &deg in &[45.0f64, 60.0] {
+            let th = deg.to_radians();
+            let (b, l, r, top) = a_frame(th);
+            // (a strut's longest edge is 4 m plus its cut ends: 3 segments of at most 2 m)
+            assert_eq!((l.len(), r.len()), (3, 3));
+            assert!(b.detached().is_empty());
+            let set: std::vec::Vec<u32> = (0..b.len() as u32).filter(|&i| b.alive(i)).collect();
+            let p = 100e3;
+            let load: std::vec::Vec<f32> = set.iter().map(|&i| if i == top { p as f32 } else { 0.0 }).collect();
+            let sink: std::vec::Vec<bool> = set.iter().map(|&i| b.y[i as usize] <= 0).collect();
+            let a = crate::structure::analyse(&b, &set, &load, &sink, crate::math::v3(0.0, -1.0, 0.0));
+            let force = |x: u32, y: u32| -> [f64; 3] {
+                let j = { let mut j = b.jhead[x as usize]; while j != NONE && b.joint_other(j, x) != y { j = b.joint_next(j, x); } j };
+                assert!(j != NONE, "joint {x}-{y}");
+                a.forces.iter().find(|f| f.0 == j).unwrap().1
+            };
+            let n_want = p / (2.0 * th.sin());
+            for seg in [&l, &r] {
+                // the joints between its segments: across the strut, pure compression N
+                for w in seg.windows(2) {
+                    let f = force(w[0], w[1]);
+                    let sh = (f[1] * f[1] + f[2] * f[2]).sqrt();
+                    std::println!("A-frame at {deg} degrees: strut force {:.2} kN (P / 2 sin theta = {:.2}), shear across it {:.3} kN", -f[0] / 1e3, n_want / 1e3, sh / 1e3);
+                    assert!((-f[0] - n_want).abs() < 0.02 * n_want, "strut force {} want {n_want}", -f[0]);
+                    assert!(sh < 0.02 * n_want);
+                }
+                // the foot: on the ground block below its lower segment
+                let foot = { let mut j = b.jhead[seg[0] as usize]; let mut g = NONE; while j != NONE { let o = b.joint_other(j, seg[0]); if b.y[o as usize] == 0 { g = o; } j = b.joint_next(j, seg[0]); } g };
+                let f = force(seg[0], foot);
+                let (v, h) = (f[0].abs(), (f[1] * f[1] + f[2] * f[2]).sqrt());
+                std::println!("  foot: down {:.1} kN (P / 2 = {:.1}), out {:.1} kN (P / 2 tan theta = {:.1})", v / 1e3, p / 2e3, h / 1e3, p / (2e3 * th.tan()));
+                assert!((v - p / 2.0).abs() < 0.02 * p / 2.0);
+                assert!((h - p / (2.0 * th.tan())).abs() < 0.02 * p / (2.0 * th.tan()));
+            }
+        }
+    }
+    #[test] fn a_parabolic_arch_of_wedge_stones_thrusts_w_l2_over_8f() {
+        // The thrust of a rigid funicular arch is H = w L^2 / 8 f. An elastic arch without hinges thrusts less: its
+        // stones shorten under the compression, and the shortfall grows as I / (A f^2), the thickness squared (a fixed
+        // parabolic arch: H = H0 / (1 + 45/4 I / (A f^2)), 0.94 H0 at 0.4 m; two-hinged 15/8 instead of 45/4, 0.99 H0).
+        // Measured (12 stones): 143.8, 148.4 and 149.6 kN at 0.4, 0.2 and 0.1 m thick, against 150.0: shortfalls 6.2,
+        // 1.6, 0.4 kN, a quarter at each halving; extrapolated to no thickness, (4 H(t/2) - H(t)) / 3 = 149.9 kN.
+        let h0 = 50e3 * 36.0 / (8.0 * 1.5);
+        let hs: std::vec::Vec<f64> = [0.4f64, 0.2, 0.1].iter().map(|&t| arch_thrust(t)).collect();
+        for k in 0..2 {
+            let r = (h0 - hs[k]) / (h0 - hs[k + 1]);
+            assert!(r > 3.5 && r < 4.5, "shortfall ratio {r} at halving {k} (thrusts {hs:?})");
+            let ex = (4.0 * hs[k + 1] - hs[k]) / 3.0;
+            assert!((ex - h0).abs() < 0.005 * h0, "extrapolated thrust {ex}, w L^2 / 8 f = {h0}");
+        }
+        assert!((hs[2] - h0).abs() < 0.005 * h0, "0.1 m thick: {}", hs[2]);
+    }
+    /// The thrust at the crown of the arch below, `t` m thick (and checks its crown joint carries no shear).
+    fn arch_thrust(t: f64) -> f64 {
+        // An arch of 12 wedge stones (voussoirs) on the parabola y = 4 f x (L - x) / L^2, span L = 6 m, rise f = 1.5 m,
+        // t thick and 0.5 m deep, its joints cut square to the arch, springing from two sloped abutments on the
+        // ground, under w = 50 kN per metre of span (each stone carries w times its share of the span; no self weight).
+        // A parabola is the funicular of a uniform load, so the stones carry it in compression with little bending.
+        // The joint at the crown is vertical: it carries the thrust as its normal force and nothing in shear.
+        let (l, f, nst, w) = (6.0f64, 1.5f64, 12usize, 50e3f64);
+        let y0 = 1.0;   // the springing, above the ground
+        let at = |x: f64| -> ([f64; 3], [f64; 3]) {
+            let y = y0 + 4.0 * f * x * (l - x) / (l * l);
+            let sl = 4.0 * f * (l - 2.0 * x) / (l * l);
+            let n = 1.0 / (1.0 + sl * sl).sqrt();
+            ([x, y, 0.0], [-sl * n, n, 0.0])
+        };
+        let mut b = Bricks::new();
+        let mut stones = std::vec::Vec::new();
+        for k in 0..nst {
+            let (x0, x1) = (l * k as f64 / nst as f64, l * (k + 1) as f64 / nst as f64);
+            let mut pts = std::vec::Vec::new();
+            for &x in &[x0, x1] { let (p, n) = at(x); for &o in &[-t / 2.0, t / 2.0] { for &z in &[0.0, 0.5] { pts.push([p[0] + o * n[0], p[1] + o * n[1], z]); } } }
+            stones.push((piece_at(&mut b, &pts, mat::MASONRY), x1 - x0));
+        }
+        // the abutments: the springing face, swept back along the arch's tangent down to the ground
+        for &x in &[0.0, l] {
+            let (p, n) = at(x);
+            let tg = if x == 0.0 { [n[1], -n[0]] } else { [-n[1], n[0]] };   // pointing away from the arch, downward
+            let mut pts = std::vec::Vec::new();
+            for &o in &[-t / 2.0, t / 2.0] { for &z in &[0.0, 0.5] {
+                let c = [p[0] + o * n[0], p[1] + o * n[1]];
+                let s = -c[1] / tg[1];
+                pts.push([c[0], c[1], z]); pts.push([c[0] + s * tg[0], 0.0, z]);
+            } }
+            piece_at(&mut b, &pts, mat::MASONRY);
+        }
+        b.build_joints();
+        assert_eq!(b.live_joints, nst + 1, "stone to stone and to the abutments");
+        assert!(b.detached().is_empty());
+        let set: std::vec::Vec<u32> = (0..b.len() as u32).filter(|&i| b.alive(i)).collect();
+        let load: std::vec::Vec<f32> = set.iter().map(|&i| stones.iter().find(|s| s.0 == i).map_or(0.0, |s| (w * s.1) as f32)).collect();
+        let sink: std::vec::Vec<bool> = set.iter().map(|&i| b.y[i as usize] <= 0).collect();
+        let a = crate::structure::analyse(&b, &set, &load, &sink, crate::math::v3(0.0, -1.0, 0.0));
+        let (sa, sb) = (stones[nst / 2 - 1].0, stones[nst / 2].0);
+        let j = { let mut j = b.jhead[sa as usize]; while j != NONE && b.joint_other(j, sa) != sb { j = b.joint_next(j, sa); } j };
+        let fc = a.forces.iter().find(|x| x.0 == j).unwrap();
+        let h = w * l * l / (8.0 * f);
+        let shear = (fc.1[1] * fc.1[1] + fc.1[2] * fc.1[2]).sqrt();
+        assert!(shear < 0.001 * h, "shear at the crown {shear}");
+        std::println!("parabolic arch t={t}: thrust at the crown {:.1} kN (w L^2 / 8 f = {:.1}), shear {:.2} kN, moment {:.2} kN m; worst ratio {:.3}", -fc.1[0] / 1e3, h / 1e3, shear / 1e3, (fc.2[1] * fc.2[1] + fc.2[2] * fc.2[2]).sqrt() / 1e3, a.max_ratio);
+        -fc.1[0]
     }
 }

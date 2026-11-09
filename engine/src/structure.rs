@@ -119,6 +119,9 @@ pub struct Analysis {
     pub worst_in: (f32, u32, usize, f32, f32, f32),
     /// every joint checked, with its ratio
     pub ratios: Vec<(u32, f32)>,
+    /// every joint checked: its force and moment about its face's centre on jb from ja, in the face's frame
+    /// (normal from ja to jb, u, w; N and N m; a positive normal force is tension)
+    pub forces: Vec<(u32, [f64; 3], [f64; 3])>,
     /// faces inside bricks loaded past 0.7 of strength but under it: (brick, axis, plane, ratio) (they wear)
     pub inner: Vec<(u32, usize, i32, f32)>,
 }
@@ -255,7 +258,35 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
         let mut j = b.jhead[i as usize];
         while j != NONE {
             let o = b.joint_other(j, i);
-            if first[o as usize] != NONE && b.ja[j as usize] == i && b.jaxis[j as usize] == 3 {
+            if first[o as usize] != NONE && b.ja[j as usize] == i && b.jaxis[j as usize] == crate::brick::JFREE {
+                // a free piece meets something flat, at any angle: the joint's polygon, cut to each cell of a box on
+                // either side (a free piece and a convex cell are one node each)
+                let poly = b.joint_poly(j);
+                let (ka, kb) = (k, slot[o as usize] as usize);
+                let cells = |kk: usize, br: u32| -> Vec<u32> { let (nx, nz) = grid[kk]; (0..(nx * nz) as u32).map(|c| first[br as usize] + c).collect() };
+                let (ca, cb) = (cells(ka, i), cells(kb, o));
+                let tk = TICK as f64;
+                let cut = |pl: &[[f64; 3]], nd: &Node| -> Vec<[f64; 3]> {
+                    let mut q = pl.to_vec();
+                    for (d, lo, hi) in [(0usize, nd.lo[0], nd.hi[0]), (2usize, nd.lo[2], nd.hi[2])] {
+                        let mut e = [0.0; 3]; e[d] = 1.0; q = crate::hull::clip(&q, e, hi as f64 * tk + 1e-9);
+                        let mut e = [0.0; 3]; e[d] = -1.0; q = crate::hull::clip(&q, e, -(lo as f64 * tk) + 1e-9);
+                        if q.len() < 3 { return Vec::new(); }
+                    }
+                    q
+                };
+                for &na in &ca { for &nb in &cb {
+                    let mut pl = poly.clone();
+                    if ca.len() > 1 { pl = cut(&pl, &nodes[na as usize]); }
+                    if cb.len() > 1 && pl.len() >= 3 { pl = cut(&pl, &nodes[nb as usize]); }
+                    if pl.len() < 3 { continue; }
+                    if let Some(g) = geo_of(&pl, 3) {
+                        let q = |v: f64| floor64(v / tk + 0.5) as i32;
+                        let lo = [q(g.c[0]), q(g.c[1]), q(g.c[2])];
+                        links.push(Link { a: na, b: nb, joint: j, axis: 3, face_lo: lo, face_hi: lo, geo: Some(g) });
+                    }
+                } }
+            } else if first[o as usize] != NONE && b.ja[j as usize] == i && b.jaxis[j as usize] == 3 {
                 // two cells of one fractured brick, on their shared face
                 let (ia, ib) = (first[i as usize], first[o as usize]);
                 if let Some(g) = geo_of(&b.joint_poly(j), 3) {
@@ -347,7 +378,7 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
     let x0: Option<Vec<[f64; 6]>> = warm.as_ref().map(|w| (0..n).map(|k| if fixed[k] { [0.0; 6] } else { w.0.get(&key(k)).copied().unwrap_or([0.0; 6]) }).collect());
     let (x, it) = solve_network(&springs, &ends, &fixed, &pos, &f, x0);
     if let Some(w) = warm { w.0.clear(); for k in 0..n { if !fixed[k] { w.0.insert(key(k), x[k]); } } }
-    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), inner: Vec::new() };
+    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new() };
     // forces on each face (on the max side's cell, from the min side's): force and moment about the face centre
     let face_load = |l: usize| -> ([f64; 3], [f64; 3]) {
         let sp = &springs[l];
@@ -398,6 +429,7 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
         let flex = flexural_of(b, ia).min(flexural_of(b, ib)) * conn[1] * residual[1];
         let hinged = hinge(b, ia, ib);
         let (fl, mut ml) = (local(ax, &jgeo, ft), local(ax, &jgeo, mt));
+        out.forces.push((j, fl, ml));
         if hinged { ml = [0.0; 3]; }
         let ratio = section_ratio(&sect, fl, ml, cap, flex);
         out.ratios.push((j, ratio));
