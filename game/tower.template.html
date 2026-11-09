@@ -50,7 +50,8 @@ button:disabled { opacity: .5; cursor: default; }
 </div>
 <div class="settings" id="settings" hidden>
   <h2>Settings</h2>
-  <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option><option value="3">mixed: brick, steel, concrete, timber · 5 storeys</option><option value="4">complex: braced steel frame, timber roof, stone arcade · 2 storeys</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
+  <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option><option value="3">mixed: brick, steel, concrete, timber · 5 storeys</option><option value="4">complex: braced steel frame, timber roof, stone arcade · 2 storeys</option><option value="5">city: lots of every kind between streets</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
+  <label>City size <select id="s-city"><option value="2">2 × 2 lots</option><option value="3">3 × 3 lots</option><option value="4">4 × 4 lots</option><option value="5">5 × 5 lots</option><option value="6">6 × 6 lots</option><option value="8">8 × 8 lots</option></select><span class="hint">for the city: 40 m lots, a building of every kind; larger cities cost more GPU time and structure checks (the benchmark finds the limit); changing it rebuilds the city</span></label>
   <label>Quality <select id="s-preset"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">sets the debris budgets, physics sub-steps, solver colours and shadows; the sliders below fine-tune</span></label>
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
@@ -144,21 +145,38 @@ const LAB_SCENARIOS = {
   complexcol: { kind: 4, storeys: 3, frames: 600, title: 'complex: the north-east corner column shot out', script: [20, 24, 28, 32].map(f => [f, 'blast', [16, 1.5, 6, -1, 0, 0, 0.7]]), expect: { settle: true } },
   // a 1.5 m blast in a first-floor room (from the south, over the arcade, into the west bay: its cabinet)
   complexroom: { kind: 4, storeys: 3, frames: 600, title: 'complex: a blast in a first-floor room', script: [[20, 'blast', [-6, 5.5, -16, 0, 0, 1, 1.5]]], expect: { settle: true } },
-  // the keystone of the arcade's third arch knocked out (a 0.5 m shot from the south at its middle): the loggia bears
+  // the keystone of the arcade's third arch knocked out (a 0.75 m shot from the south at its middle; 0.5 m left its back
+  // half: engine test the_lab_keystone_shot_takes_the_keystone_out): the loggia bears
   // on the stones' level tops and holds the two halves on their piers (engine: complex::tests, nothing fails)
-  keystone: { kind: 4, storeys: 3, frames: 480, title: 'complex: an arch of the arcade loses its keystone', script: [[20, 'blast', [-1.5, 3.4, -16, 0, 0, 1, 0.5]]], expect: { settle: true } },
+  keystone: { kind: 4, storeys: 3, frames: 480, title: 'complex: the keystone shot out (third arch)', script: [[20, 'blast', [-1.5, 3.4, -16, 0, 0, 1, 0.75]]], expect: { settle: true } },
+  // the city (kind 5, docs/CITY.md): 3 x 3 lots left alone; then two lots' ground storeys cut (the complex building
+  // and the 7-storey concrete frame beside it), the rest of the city standing round them
+  citystand: { kind: 5, storeys: 3, frames: 600, title: 'city, 3 x 3 lots: left alone', script: [], expect: { stand: true, settle: true } },
+  city: { kind: 5, storeys: 3, frames: 600, title: 'city, 3 x 3 lots: two lots cut (complex and a 7-storey frame)', script: [[0, 'cut', [0, 1]]], expect: { settle: true } },
   rubble: { kind: 0, storeys: 3, frames: 720, title: 'concrete frame, 3 storeys: cut, then a blast into the rubble', script: [[0, 'cut'], [480, 'blast', [-14, 6, -14, 1, -0.45, 1, 2.5]]], expect: { settle: true } },
 };
-const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble', 'far'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'] };
+const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble', 'far'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'], city: ['citystand', 'city'] };
 let LABSTATE = null; try { LABSTATE = JSON.parse(localStorage.getItem('sf-lab') || 'null'); } catch (e) {}
 if (LABSTATE && !(LABSTATE.queue && LABSTATE.queue.length && LAB_SCENARIOS[LABSTATE.queue[0]])) LABSTATE = null;
 const LAB = { on: false, t: 0, f: 0 };
 // game time: the real clock, or the lab's virtual one
 const clock = () => (LAB.on ? LAB.t : performance.now());
 let KIND = 0; try { KIND = +(JSON.parse(localStorage.getItem('sf-settings') || '{}').kind || 0); } catch (e) {}
-if (![0, 1, 2, 3, 4].includes(KIND)) KIND = 0;
+if (![0, 1, 2, 3, 4, 5].includes(KIND)) KIND = 0;
+let CITY = 3; try { CITY = +(JSON.parse(localStorage.getItem('sf-settings') || '{}').city || 3); } catch (e) {}
+if (!(CITY >= 1 && CITY <= 16)) CITY = 3;
 if (LABSTATE) KIND = LAB_SCENARIOS[LABSTATE.queue[0]].kind;
-const STOREYS = LABSTATE ? LAB_SCENARIOS[LABSTATE.queue[0]].storeys : [12, 5, 6, 5, 3][KIND];
+// (the city: its size, lots a side, goes to the engine as its storeys)
+const STOREYS = LABSTATE ? LAB_SCENARIOS[LABSTATE.queue[0]].storeys : [12, 5, 6, 5, 3, CITY][KIND];
+const KIND_NAMES = ['concrete frame', 'masonry', 'mass timber', 'mixed', 'complex', 'city'];
+// the lots: where each building stands (one at the origin but in the city), from the engine's layout
+let LOTS = null;
+function lots() {
+  if (LOTS) return LOTS;
+  if (KIND !== 5 || !E || !E.city_lots) return (LOTS = [{ x: 0, z: 0, kind: KIND }]);
+  LOTS = []; for (let k = 0; k < E.city_lots(STOREYS); k++) LOTS.push({ kind: E.city_lot(STOREYS, k, 0), storeys: E.city_lot(STOREYS, k, 1), x: E.city_lot(STOREYS, k, 3), z: E.city_lot(STOREYS, k, 4) });
+  return LOTS;
+}
 let E = null, gpu = null, dev = null, slots = new Map(), debrisFrom = 2;
 let radius = 0.7, fly = false, locked = false, yaw = Math.PI, pitch = 0, physicsPaused = true, lastActive = -1e9;
 const keys = new Set();
@@ -185,6 +203,16 @@ const ground = new THREE.Mesh(new THREE.PlaneGeometry(800, 800), new THREE.MeshL
 ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
 const plaza = new THREE.Mesh(new THREE.PlaneGeometry(44, 44), new THREE.MeshLambertMaterial({ color: 0x8a867d }));
 plaza.rotation.x = -Math.PI / 2; plaza.position.y = 0.002; plaza.receiveShadow = true; scene.add(plaza);
+// the city: a paved lot under each building (the streets are the bare ground), the shadow box wide enough for a lot
+function setupCity() {
+  plaza.visible = false;
+  for (const L of lots()) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(32, 32), plaza.material);
+    m.rotation.x = -Math.PI / 2; m.position.set(L.x, 0.002, L.z); m.receiveShadow = true; scene.add(m);
+  }
+  Object.assign(sun.shadow.camera, { left: -48, right: 48, top: 48, bottom: -48 }); sun.shadow.camera.updateProjectionMatrix();
+  scene.fog.near = 120; scene.fog.far = 600;
+}
 function resize() { const w = innerWidth, h = innerHeight; renderer.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix(); }
 addEventListener('resize', resize); resize();
 
@@ -1217,6 +1245,8 @@ function setParam(id, v) { if (E) E.set_param(id, +v); if (worker) worker.postMe
 function initSettings() {
   let saved = {}; try { saved = JSON.parse(localStorage.getItem('sf-settings') || '{}'); } catch (e) {}
   const ks = $('s-kind'); ks.value = String(KIND);
+  const cs = $('s-city'); cs.value = String(CITY); setting.city = CITY;
+  cs.addEventListener('change', () => { setting.city = +cs.value; try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} if (KIND === 5) location.reload(); });
   ks.addEventListener('change', () => { setting.kind = +ks.value; try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} location.reload(); });
   setting.kind = KIND;
   for (const [k, d] of Object.entries(SETTINGS)) {
@@ -1307,7 +1337,8 @@ async function benchStart() {
   // a fixed view from outside, looking at the tower
   fly = true; E.player_set(-26, 10, -38); yaw = Math.PI + 0.62; pitch = -0.12;
   const t = performance.now();
-  for (let x = -10; x <= 10.1; x += 4) for (let z = -10; z <= 10.1; z += 4) jobs.blast.push({ op: 'blast', x, y: 1.8, z, r: 2.5, ctx: { d: [0, 0, 1], t0: t } });
+  // (the city: every lot's ground storey)
+  for (const L of lots()) for (let x = -10; x <= 10.1; x += 4) for (let z = -10; z <= 10.1; z += 4) jobs.blast.push({ op: 'blast', x: L.x + x, y: 1.8, z: L.z + z, r: 2.5, ctx: { d: [0, 0, 1], t0: t } });
   pump();
   await new Promise(res => { const c = () => (!busy && !jobs.blast.length) ? res() : setTimeout(c, 30); c(); });
   BENCH.cutMs = performance.now() - t;
@@ -1355,7 +1386,7 @@ function benchShow(done) {
   const r = BENCH.rows, last = r[r.length - 1] || {};
   const fm = BENCH.frameMs.slice().sort((a, b) => a - b), pct = (q) => fm.length ? fm[Math.min(fm.length - 1, Math.floor(q * fm.length))] : 0;
   const lines = [];
-  lines.push(`Shatterforge benchmark · ${['concrete frame', 'masonry', 'mass timber', 'mixed', 'complex'][KIND]}, ${STOREYS} storeys · ${new Date().toISOString().slice(0, 19)}Z`);
+  lines.push(`Shatterforge benchmark · ${KIND_NAMES[KIND]}, ${STOREYS} storeys · ${new Date().toISOString().slice(0, 19)}Z`);
   lines.push(`${navigator.userAgent}`);
   if (BENCH.dispatchUs != null) lines.push(`one compute dispatch: ${BENCH.dispatchUs} µs`);
   if (window.__gpuInfo) lines.push(`GPU: ${[window.__gpuInfo.vendor, window.__gpuInfo.architecture, window.__gpuInfo.device, window.__gpuInfo.description].filter(Boolean).join(' · ') || 'not told'}`);
@@ -1377,7 +1408,7 @@ function benchShow(done) {
     const rm = BENCH.restMs.slice().sort((a, b) => a - b), rg = BENCH.restGpu.slice().sort((a, b) => a - b), med = (a) => a.length ? a[a.length >> 1] : 0;
     lines.push(BENCH.settledAt != null ? `settled (nothing awake) at ${BENCH.settledAt.toFixed(1)} s · at rest: frame median ${med(rm).toFixed(1)} ms, GPU ${med(rg).toFixed(2)} ms` : `not settled by ${(BENCH.settleEnd / 60).toFixed(0)} s: ${gpu.stats.awake || 0} bodies and ${gpu.stats.pActive || 0} particles still awake`);
     // the same as data, for bench/ (paste it back)
-    BENCH.json = { date: new Date().toISOString(), ua: navigator.userAgent, gpu: window.__gpuInfo || null, building: { kind: ['concrete frame', 'masonry', 'mass timber', 'mixed', 'complex'][KIND], storeys: STOREYS }, settings: { ...setting }, cut_s: +(BENCH.cutMs / 1000).toFixed(2), realtime: +(simT / wallT).toFixed(3), frame_ms: { median: +pct(0.5).toFixed(2), p95: +pct(0.95).toFixed(2), worst: +pct(1).toFixed(2) }, gpu_worst_ms: +BENCH.gpuMax.toFixed(2), dispatch_us: BENCH.dispatchUs, settled_s: BENCH.settledAt, rest: { frame_ms: +med(rm).toFixed(2), gpu_ms: +med(rg).toFixed(3) }, rows: r };
+    BENCH.json = { date: new Date().toISOString(), ua: navigator.userAgent, gpu: window.__gpuInfo || null, building: { kind: KIND_NAMES[KIND], storeys: STOREYS }, settings: { ...setting }, cut_s: +(BENCH.cutMs / 1000).toFixed(2), realtime: +(simT / wallT).toFixed(3), frame_ms: { median: +pct(0.5).toFixed(2), p95: +pct(0.95).toFixed(2), worst: +pct(1).toFixed(2) }, gpu_worst_ms: +BENCH.gpuMax.toFixed(2), dispatch_us: BENCH.dispatchUs, settled_s: BENCH.settledAt, rest: { frame_ms: +med(rm).toFixed(2), gpu_ms: +med(rg).toFixed(3) }, rows: r };
     LAB.copyText = lines.join('\n') + '\n\n' + JSON.stringify(BENCH.json);
     $('bench-title').textContent = 'Benchmark: done';
   }
@@ -1406,6 +1437,8 @@ function frameBody(now, dt) {
     playerDebris();
     E.player_step(dt, w.x, w.y, w.z, keys.has('Space') ? 1 : 0, fly ? 1 : 0);
     cam.position.set(E.player_get(0), E.player_get(1) + 1.65, E.player_get(2));
+    // (the city is wider than the sun's shadow: the shadow follows the player)
+    if (KIND === 5) { const px = E.player_get(0), pz = E.player_get(2); sun.target.position.set(px, 0, pz); sun.position.set(px - 30, 60, pz - 22); }
     cam.rotation.set(pitch, yaw, 0);
     pump();
     // physics runs while anything is awake (and briefly after a blast, before the first stats arrive)
@@ -1480,11 +1513,13 @@ __LAB_JS__
     const bytes = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
     E = (await WebAssembly.instantiate(bytes, {})).instance.exports;
     E.game_new_kind(STOREYS, KIND);
-    $('title').textContent = ['A 12-storey concrete-frame tower at real scale', 'A 5-storey masonry building at real scale', 'A 6-storey mass-timber building at real scale', 'A 5-storey building of brick, steel, concrete and timber at real scale', 'A braced steel frame with a pitched timber roof and a masonry arcade, at real scale'][KIND];
+    $('title').textContent = ['A 12-storey concrete-frame tower at real scale', 'A 5-storey masonry building at real scale', 'A 6-storey mass-timber building at real scale', 'A 5-storey building of brick, steel, concrete and timber at real scale', 'A braced steel frame with a pitched timber roof and a masonry arcade, at real scale', `A city of ${STOREYS} × ${STOREYS} lots, a building of every kind, at real scale`][KIND];
+    if (KIND === 5) setupCity();
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
     if (!LABSTATE) await startWorker(bytes);   // (the lab runs the engine inline, its jobs delayed by whole frames)
     initSettings(); initDiag(); initPreset();
-    E.player_set(0, 0.0, -16);
+    // (in the city: in the street east of the first lot, facing it)
+    if (KIND === 5) { const L0 = lots()[0]; E.player_set(L0.x + 20, 0.0, L0.z - 16); } else E.player_set(0, 0.0, -16);
   } catch (e) { $('warn').textContent = 'Could not start the engine: ' + e.message; return; }
   try {
     if (navigator.gpu) {

@@ -164,7 +164,9 @@ fn boxes(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, x: f64, z: f64, y: f
     for k in 0..n { *sid += 1; part(b, out, [x, y + 0.375 * k as f64, z], [x + 0.5, y + 0.375 * (k + 1) as f64, z + 0.375], mat::TIMBER, 3, *sid); }
 }
 fn cabinet(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, x: f64, z: f64, y: f64) {
-    *sid += 1; part(b, out, [x, y, z], [x + 0.5, y + 1.25, z + 0.5], mat::STEEL, P_STEEL, *sid);
+    // (a steel cabinet is sheet steel, not solid: timber's density gives it 156 kg, solid steel gave 2,453 kg, under
+    // which a falling floor stopped)
+    *sid += 1; part(b, out, [x, y, z], [x + 0.5, y + 1.25, z + 0.5], mat::TIMBER, P_STEEL, *sid);
 }
 /// Furnish a room (its inner area x0..x1, z0..z1, at least 4.5 m square, floor at y).
 fn furnish(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, seed: &mut u32, x0: f64, x1: f64, z0: f64, z1: f64, y: f64, kind: Room) {
@@ -507,5 +509,49 @@ mod tests {
         assert_eq!(failed, 0);
         assert_eq!(fallen, 0);
         assert!(g.max_ratio < 1.0);
+    }
+    #[test] fn a_bare_arch_without_its_keystone_falls_alone() {
+        // The loggia and its parapet taken off, then the third arch's keystone (quietly: no fracture surfaces to
+        // spall): the stones beside it lean in on nothing, a mechanism, and fall; the lower stones of each half stand
+        // on their beds, held by the mortar's cohesion and their own level tops over the pier (corbels). Measured:
+        // 4 joints fail in 3 steps, the two stones beside the keystone fall, no stone of another arch.
+        // (Before, with the loggia taken off loudly, the step after spalled the stones' tops and the keystones went
+        // with them, and the test removed another brick in the keystone's slot: the crowns of all six arches failed,
+        // 90 joints. It was the test, not the analysis.)
+        let (_, p) = build_parts();
+        let mut g = crate::game::Game::new_kind(3, 4);
+        g.structure_step(64);
+        // (taken off quietly: a removal marks what it touched as a fracture surface, and the next step spalled the
+        // stones' tops, keystones and all)
+        g.b.remove_quiet(p.parapet); g.b.remove_quiet(p.loggia);
+        let n0 = g.structure_step(64);
+        let key = p.keystones[2];
+        g.b.remove_quiet(key);
+        let (mut steps, mut failed) = (0, 0);
+        loop { let n = g.structure_step(64); failed += n; steps += 1; if n == 0 || steps > 60 { break; } }
+        let others: std::vec::Vec<usize> = p.arches.iter().map(|a| a.iter().filter(|&&s| s != key && g.b.flags[s as usize] & crate::brick::F_DYNAMIC != 0).count()).collect();
+        std::println!("bare arcade: {n0} failed with the loggia off; keystone out: {failed} joints failed in {steps} steps; stones fallen per arch {others:?}");
+        assert_eq!(n0, 0, "the bare arcade stands");
+        assert!(others[2] >= 2, "the stones beside the keystone come down");
+        assert!(others.iter().enumerate().all(|(k, &n)| k == 2 || n == 0), "the other arches stand");
+    }
+    #[test] fn the_lab_keystone_shot_takes_the_keystone_out() {
+        // The lab's `keystone` scenario: a shot from the south at the third keystone's middle. At 0.5 m it took the
+        // half of the keystone in front (0.243 -> 0.126 m^3 of stone left where the keystone was) and the arch stood
+        // with a notch; at 0.75 m 0.029 m^3 is left, the stones beside it go with it, and the other arches stand
+        // (the floor over them holds the rest: an_arch_under_the_loggia_stands_without_its_keystone).
+        let (b0, p) = build_parts();
+        let kb = b0.tbox(p.keystones[2]);
+        let mut g = crate::game::Game::new_kind(3, 4);
+        g.structure_step(64);
+        let inside = |g: &crate::game::Game| -> f64 { (0..g.b.len() as u32).filter(|&i| g.b.alive(i) && g.b.flags[i as usize] & crate::brick::F_DYNAMIC == 0 && { let c = g.b.centroid(i); let t = |v: i32| v as f64 * crate::brick::TICK as f64; c[0] > t(kb.min[0]) && c[0] < t(kb.max[0]) && c[1] > t(kb.min[1]) && c[1] < t(kb.max[1]) && c[2] > t(kb.min[2]) && c[2] < t(kb.max[2]) }).map(|i| g.b.volume(i)).sum() };
+        let v0 = inside(&g);
+        g.blast(crate::math::v3(-1.5, 3.4, -9.5 + 0.05), 0.75);
+        let v1 = inside(&g);
+        let mut failed = 0; for _ in 0..30 { let n = g.structure_step(64); failed += n; if n == 0 { break; } }
+        let gone: std::vec::Vec<usize> = p.arches.iter().map(|a| a.iter().filter(|&&s| g.b.flags[s as usize] & crate::brick::F_DYNAMIC != 0 || !g.b.alive(s)).count()).collect();
+        std::println!("keystone shot 0.75 m: {v0:.3} -> {v1:.3} m^3 where the keystone was; then {failed} joints failed; stones gone per arch {gone:?}");
+        assert!(v1 < 0.15 * v0);
+        assert!(gone.iter().enumerate().all(|(k, &n)| (k == 2) == (n > 0)));
     }
 }

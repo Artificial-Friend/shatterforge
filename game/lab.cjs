@@ -12,8 +12,8 @@ const frames = opt('--frames', null), trace = opt('--trace', null);
 const twice = args.includes('--twice'); if (twice) args.splice(args.indexOf('--twice'), 1);
 const root = path.join(__dirname, '..');
 const page0 = fs.readFileSync(path.join(root, 'dist/tower.html'), 'utf8');
-const SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complexstand', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'] };
-const names = args.length ? args.flatMap(a => SUITES[a] || [a]) : SUITES.quick;
+const SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complexstand', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'], city: ['citystand', 'city'] };
+const names = args.length ? args.flatMap(a => a.startsWith('=') ? [a.slice(1)] : SUITES[a] || [a]) : SUITES.quick;   // (=name: the scenario, where a suite has its name)
 (async () => {
   fs.mkdirSync(outDir, { recursive: true });
   const html = path.join(outDir, 'lab_page.html');

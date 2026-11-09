@@ -41,6 +41,12 @@ pub struct Game {
     /// pieces the last structure step sent off (lost the ground, or loose contents)
     pub last_detached: usize,
     pub dirty: (i32, i32),
+    /// how the static bricks are meshed: in storey slices, and in a city also by lot (`Tiles`)
+    pub tiles: Tiles,
+    /// in a city, the lots the next structure step analyses: those changed since their last analysis, with rubble
+    /// on them or joints wearing (a lot left alone gives the same answer every time: the city's 9 lots took 1.2 s a
+    /// step), and each lot's worst ratio when last analysed
+    pub active: Vec<bool>, pub tile_ratio: Vec<f32>,
     /// bricks of each falling piece (empty = retired)
     pub pieces: Vec<Vec<u32>>,
     /// last structural check: worst joint stress / strength
@@ -78,6 +84,8 @@ pub struct Game {
     pub struct_dt: f32,
     /// joints wearing at the last check (loaded above SUSTAINED of their strength)
     pub wearing: usize,
+    /// a brick of each joint or face wearing in the last structure step
+    pub wearing_at: Vec<u32>,
     /// joints and faces that gave way by wear so far
     pub worn_total: usize,
     /// the last check's failing joints: (brick, brick, ratio)
@@ -137,16 +145,37 @@ const CRUMB_KEEP: usize = 256;
 /// how deep a section that gives way is crushed before what is beyond it moves freely (m)
 const CRUSH_DEPTH: f32 = 0.5;
 
-fn chunk_of(y: i32) -> i32 { y.div_euclid(tower::STOREY) }
+/// The static world's mesh chunks: slices a storey high, and in a city each lot's tile on its own (a change remeshes
+/// its lot's slices, not the city's). Chunk k is tile k / slices, slice k % slices; a brick is in the chunk of its
+/// min corner.
+#[derive(Clone, Copy, Debug)]
+pub struct Tiles { pub tile: i32, pub n: i32, pub slices: i32 }
+impl Tiles {
+    pub fn count(&self) -> usize { (self.n * self.n * self.slices) as usize }
+    pub fn tile_of(&self, x: i32, z: i32) -> i32 {
+        if self.tile == 0 { return 0; }
+        let f = |v: i32| (v + self.n * self.tile / 2).div_euclid(self.tile).clamp(0, self.n - 1);
+        f(z) * self.n + f(x)
+    }
+    pub fn chunk(&self, x: i32, y: i32, z: i32) -> i32 { self.tile_of(x, z) * self.slices + y.div_euclid(tower::STOREY).clamp(0, self.slices - 1) }
+    /// is a brick with min corner (x, y, z) in chunk k
+    pub fn holds(&self, k: i32, x: i32, y: i32, z: i32) -> bool { self.chunk(x, y, z) == k }
+}
 
 impl Game {
     pub fn new(storeys: i32) -> Self { Self::new_kind(storeys, 0) }
     /// A tower of `storeys` storeys built as `kind` (see `tower::element_in`).
     pub fn new_kind(storeys: i32, kind: u8) -> Self {
         let b = tower::build_kind(storeys, 1, kind);
-        let n = (storeys + 2) as usize;
-        let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, wearing: 0, worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
+        // (the city: storeys is its size, n x n lots; the slices reach its tallest building)
+        let tiles = if kind == 5 {
+            let top = (0..b.len() as u32).filter(|&i| b.alive(i)).map(|i| b.tbox(i).max[1]).max().unwrap_or(0);
+            Tiles { tile: crate::city::pitch(), n: crate::city::layout(storeys).n, slices: top / tower::STOREY + 2 }
+        } else { Tiles { tile: 0, n: 1, slices: storeys + 2 } };
+        let n = tiles.count();
+        let start = if kind == 5 { let l = crate::city::layout(storeys); let x = if l.n % 2 == 1 { crate::city::PITCH_M / 2.0 } else { 0.0 }; v3(x, 0.26, 0.0) } else { v3(0.0, 0.26, -14.0) };
+        let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, player: Player::new(start), tiles, active: vec![true; (tiles.n * tiles.n) as usize], tile_ratio: vec![0.0; (tiles.n * tiles.n) as usize], chunks: (0..n).map(|_| Mesh::default()).collect(),
+                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, wearing: 0, wearing_at: Vec::new(), worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
         for k in 0..n as i32 { g.remesh(k); }
         g.loose_pending = (0..g.b.len()).any(|i| g.b.flags[i] & crate::brick::F_LOOSE != 0);
         g
@@ -155,8 +184,8 @@ impl Game {
     pub fn remesh(&mut self, k: i32) {
         if !self.mesh { return; }
         if k < 0 || k as usize >= self.chunks.len() { return; }
-        let (y0, y1) = (k * tower::STOREY, (k + 1) * tower::STOREY);
-        self.chunks[k as usize] = mesh::build_filtered(&self.b, |b, i| { let y = b.y[i as usize] as i32; y >= y0 && y < y1 });
+        let t = self.tiles;
+        self.chunks[k as usize] = mesh::build_filtered(&self.b, |b, i| t.holds(k, b.x[i as usize] as i32, b.y[i as usize] as i32, b.z[i as usize] as i32));
     }
 
     /// A brick as [x, y, z, sx, sy, sz (ticks), material + 16 x paint + 512 x hull]. The hull is a library cell's
@@ -330,10 +359,13 @@ impl Game {
         // a brick now in a piece is gone from the static world
         let stat: Vec<u32> = log.into_iter().filter(|&i| (i as usize) < self.b.len()).collect();
         out.push(stat.len() as f32);
-        let (mut ylo, mut yhi) = (i32::MAX, i32::MIN);
+        // the chunks to remesh: each changed brick's, the slice under it and the one at its top (faces against it
+        // show or hide there)
+        let (mut klo, mut khi) = (i32::MAX, i32::MIN);
         for &i in &stat {
             let t = self.b.tbox(i);
-            ylo = ylo.min(t.min[1]); yhi = yhi.max(t.max[1]);
+            let tile = self.tiles.tile_of(t.min[0], t.min[2]) as usize; if tile < self.active.len() { self.active[tile] = true; }
+            for y in [t.min[1], t.min[1] - tower::STOREY, t.max[1]] { let k = self.tiles.chunk(t.min[0], y, t.min[2]); klo = klo.min(k); khi = khi.max(k); }
             let alive = self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE;
             out.extend_from_slice(&[i as f32, if alive { 1.0 } else { 0.0 }]);
             Self::push_box(&mut out, &self.b, i);
@@ -348,16 +380,21 @@ impl Game {
             for k in 0..self.pieces[p as usize].len() { let i = self.pieces[p as usize][k]; Self::push_box(&mut out, &self.b, i); }
         }
         self.out = out;
-        if ylo <= yhi {
-            let (k0, k1) = (chunk_of(ylo - tower::STOREY), chunk_of(yhi + 1));
-            for k in k0..=k1 { self.remesh(k); }
-            self.dirty = (k0.max(0), k1.min(self.chunks.len() as i32 - 1));
+        if klo <= khi {
+            for k in klo..=khi { self.remesh(k); }
+            self.dirty = (klo.max(0), khi.min(self.chunks.len() as i32 - 1));
         } else { self.dirty = (0, -1); }
     }
 
     /// Detach everything no longer connected to the ground as pieces; returns their ids.
     fn detach(&mut self) -> Vec<u32> {
-        let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
+        // (a city: only its active lots, see `active`; rubble lying on a lot makes it active)
+        let lots = self.tiles.tile != 0;
+        if lots { for r in &self.rest { let t = self.tiles.tile_of((r[0] / TICK) as i32, (r[2] / TICK) as i32) as usize; if t < self.active.len() { self.active[t] = true; } } }
+        let analysed = self.active.clone();
+        let tl = self.tiles;
+        let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && (!lots || analysed[tl.tile_of(self.b.x[i as usize] as i32, self.b.z[i as usize] as i32) as usize])).collect();
+        if lots { for a in self.active.iter_mut() { *a = false; } }
         sever_infill(&mut self.b, &set);
         let groups = self.b.detached();
         let mut ids = Vec::new();
@@ -400,7 +437,13 @@ impl Game {
     /// At most `max_fail` joints fail per call, the most overloaded first.
     pub fn structure_step(&mut self, max_fail: usize) -> usize {
         self.b.log.clear();
-        let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
+        // (a city: only its active lots, see `active`; rubble lying on a lot makes it active)
+        let lots = self.tiles.tile != 0;
+        if lots { for r in &self.rest { let t = self.tiles.tile_of((r[0] / TICK) as i32, (r[2] / TICK) as i32) as usize; if t < self.active.len() { self.active[t] = true; } } }
+        let analysed = self.active.clone();
+        let tl = self.tiles;
+        let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && (!lots || analysed[tl.tile_of(self.b.x[i as usize] as i32, self.b.z[i as usize] as i32) as usize])).collect();
+        if lots { for a in self.active.iter_mut() { *a = false; } }
         let mut load: Vec<f32> = set.iter().map(|&i| structure::mass(&self.b, i) * 9.81).collect();
         // rubble lying on the structure weighs on the brick under it: a floor heaped with debris carries it, and
         // fails when it is too much
@@ -417,13 +460,44 @@ impl Game {
         }
         let _ = &mut load;
         let sink: Vec<bool> = set.iter().map(|&i| self.b.y[i as usize] <= 0).collect();
-        let a = structure::analyse_warm(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0), Some(&mut self.warm));
+        let a = if !lots { structure::analyse_warm(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0), Some(&mut self.warm)) } else {
+            // each lot on its own: nothing joins two lots, and the solver's accuracy is relative to what it solves
+            // (all 25 lots of a 5 x 5 city at once, two complex buildings' arches came out as mechanisms, 2.25 and
+            // 1.19 of strength, where on their own they stand at 0.66)
+            let mut by: crate::Map<usize, Vec<usize>> = Default::default();
+            for (k, &i) in set.iter().enumerate() { by.entry(tl.tile_of(self.b.x[i as usize] as i32, self.b.z[i as usize] as i32) as usize).or_default().push(k); }
+            let mut keys: Vec<usize> = by.keys().copied().collect(); keys.sort_unstable();
+            let mut all: Option<structure::Analysis> = None;
+            for t in keys {
+                let ks = &by[&t];
+                let mut local = vec![NONE; set.len()]; for (n, &k) in ks.iter().enumerate() { local[k] = n as u32; }
+                let s2: Vec<u32> = ks.iter().map(|&k| set[k]).collect();
+                let l2: Vec<f32> = ks.iter().map(|&k| load[k]).collect();
+                let k2: Vec<bool> = ks.iter().map(|&k| sink[k]).collect();
+                let p2: Vec<(u32, f32, f32, f32)> = point.iter().filter(|p| local[p.0 as usize] != NONE).map(|p| (local[p.0 as usize], p.1, p.2, p.3)).collect();
+                let a = structure::analyse_warm(&self.b, &s2, &l2, &p2, &k2, v3(0.0, -1.0, 0.0), Some(&mut self.warm));
+                all = Some(match all { None => a, Some(mut m) => { m.merge(a); m } });
+            }
+            all.unwrap_or_else(structure::Analysis::empty)
+        };
         self.last_iterations = a.iterations;
         // (the worst ratio with rubble on the floors: since the spring network, the building's worst)
         self.panel_ratio = a.max_ratio;
         self.max_ratio = a.max_ratio;
         let mut a = a;
         self.wear_joints(&mut a);
+        if lots {
+            // each analysed lot's worst ratio; a lot with joints wearing (or failing: they change it) stays active
+            let tile_b = |b: &Bricks, i: u32| tl.tile_of(b.x[i as usize] as i32, b.z[i as usize] as i32) as usize;
+            for (t, &on) in analysed.iter().enumerate() { if on { self.tile_ratio[t] = 0.0; } }
+            for &(j, r) in &a.ratios { let i = self.b.ja[j as usize]; if i == NONE { continue; } let t = tile_b(&self.b, i); self.tile_ratio[t] = self.tile_ratio[t].max(r); }
+            for &(i, _, _, r) in &a.inner { let t = tile_b(&self.b, i); self.tile_ratio[t] = self.tile_ratio[t].max(r); }
+            for &i in &self.wearing_at { let t = tile_b(&self.b, i); self.active[t] = true; }
+            for &(j, _) in &a.failed { let i = self.b.ja[j as usize]; if i != NONE { let t = tile_b(&self.b, i); self.active[t] = true; } }
+            for c in &a.cracks { let t = tile_b(&self.b, c.brick); self.active[t] = true; }
+            self.max_ratio = self.tile_ratio.iter().copied().fold(0.0, f32::max);
+            self.panel_ratio = self.max_ratio;
+        }
         self.last_failed = a.failed.iter().filter_map(|&(j, r)| { let (p, q) = (self.b.ja[j as usize], self.b.jb[j as usize]); if p == NONE { None } else { Some((p, q, r)) } }).collect();
         for c in &a.cracks { self.last_failed.push((c.brick, c.brick, c.ratio)); }
         let work = self.apply_failures(&a, max_fail);
@@ -449,6 +523,7 @@ impl Game {
     /// of standing unchanged until one more cut fails it all at once.
     fn wear_joints(&mut self, a: &mut structure::Analysis) {
         self.wearing = 0;
+        self.wearing_at.clear();
         if self.struct_dt <= 0.0 { return; }
         let dt = self.struct_dt.min(1.0);
         let failing: crate::Set<u32> = a.failed.iter().map(|&(j, _)| j).collect();
@@ -459,7 +534,7 @@ impl Game {
             if ju >= self.b.jdmg.len() || self.b.ja[ju] == NONE { continue; }
             let s0 = sustained(self.b.mat[self.b.ja[ju] as usize]).min(sustained(self.b.mat[self.b.jb[ju] as usize]));
             if r < s0 { continue; }
-            self.wearing += 1;
+            self.wearing += 1; self.wearing_at.push(self.b.ja[ju]);
             let x = (r - s0) / (1.0 - s0);
             let d = self.b.jdmg[ju];
             let wear = self.joint_wear.get(&j).copied().unwrap_or(0.0) + dt * WEAR_RATE * x * x;
@@ -473,7 +548,7 @@ impl Game {
         for &(i, ax, at, r) in &a.inner {
             let s0 = sustained(self.b.mat[i as usize]);
             if r < s0 { continue; }
-            self.wearing += 1;
+            self.wearing += 1; self.wearing_at.push(i);
             let x = (r - s0) / (1.0 - s0);
             let key = (i, ax as u8, at);
             let w = self.inner_wear.get(&key).copied().unwrap_or(0.0) + dt * WEAR_RATE * x * x;
@@ -672,7 +747,13 @@ impl Game {
         let mut rubble: Vec<u32> = Vec::new();
         let mut spieces = Vec::new();
         if !extra.is_empty() || !scrumbs.is_empty() || !side.is_empty() {
-            let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
+            // (a city: only its active lots, see `active`; rubble lying on a lot makes it active)
+        let lots = self.tiles.tile != 0;
+        if lots { for r in &self.rest { let t = self.tiles.tile_of((r[0] / TICK) as i32, (r[2] / TICK) as i32) as usize; if t < self.active.len() { self.active[t] = true; } } }
+        let analysed = self.active.clone();
+        let tl = self.tiles;
+        let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && (!lots || analysed[tl.tile_of(self.b.x[i as usize] as i32, self.b.z[i as usize] as i32) as usize])).collect();
+        if lots { for a in self.active.iter_mut() { *a = false; } }
             let mut idx = vec![NONE; self.b.len()];
             for (k, &i) in set.iter().enumerate() { idx[i as usize] = k as u32; }
             let load: Vec<f32> = set.iter().map(|&i| structure::mass(&self.b, i) * 9.81).collect();
@@ -681,7 +762,26 @@ impl Game {
             for &(i, f, p) in &extra { let k = idx[i as usize]; if k != NONE { point.push((k, p[0], p[2], f)); } }
             let sink: Vec<bool> = set.iter().map(|&i| self.b.y[i as usize] <= 0).collect();
             if !extra.is_empty() {
-                let a = structure::analyse_warm(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0), Some(&mut self.warm));
+                let a = if !lots { structure::analyse_warm(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0), Some(&mut self.warm)) } else {
+            // each lot on its own: nothing joins two lots, and the solver's accuracy is relative to what it solves
+            // (all 25 lots of a 5 x 5 city at once, two complex buildings' arches came out as mechanisms, 2.25 and
+            // 1.19 of strength, where on their own they stand at 0.66)
+            let mut by: crate::Map<usize, Vec<usize>> = Default::default();
+            for (k, &i) in set.iter().enumerate() { by.entry(tl.tile_of(self.b.x[i as usize] as i32, self.b.z[i as usize] as i32) as usize).or_default().push(k); }
+            let mut keys: Vec<usize> = by.keys().copied().collect(); keys.sort_unstable();
+            let mut all: Option<structure::Analysis> = None;
+            for t in keys {
+                let ks = &by[&t];
+                let mut local = vec![NONE; set.len()]; for (n, &k) in ks.iter().enumerate() { local[k] = n as u32; }
+                let s2: Vec<u32> = ks.iter().map(|&k| set[k]).collect();
+                let l2: Vec<f32> = ks.iter().map(|&k| load[k]).collect();
+                let k2: Vec<bool> = ks.iter().map(|&k| sink[k]).collect();
+                let p2: Vec<(u32, f32, f32, f32)> = point.iter().filter(|p| local[p.0 as usize] != NONE).map(|p| (local[p.0 as usize], p.1, p.2, p.3)).collect();
+                let a = structure::analyse_warm(&self.b, &s2, &l2, &p2, &k2, v3(0.0, -1.0, 0.0), Some(&mut self.warm));
+                all = Some(match all { None => a, Some(mut m) => { m.merge(a); m } });
+            }
+            all.unwrap_or_else(structure::Analysis::empty)
+        };
                 self.max_ratio = self.max_ratio.max(a.max_ratio);
                 let work = self.apply_failures(&a, 256);
                 self.failed_total += work.len();
@@ -692,7 +792,13 @@ impl Game {
             let total = side.iter().fold(v3(0.0, 0.0, 0.0), |a, &(_, l, _)| a + l);
             if total.len() > 0.0 {
                 let dirn = total * (1.0 / total.len());
-                let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
+                // (a city: only its active lots, see `active`; rubble lying on a lot makes it active)
+        let lots = self.tiles.tile != 0;
+        if lots { for r in &self.rest { let t = self.tiles.tile_of((r[0] / TICK) as i32, (r[2] / TICK) as i32) as usize; if t < self.active.len() { self.active[t] = true; } } }
+        let analysed = self.active.clone();
+        let tl = self.tiles;
+        let set: Vec<u32> = (0..self.b.len() as u32).filter(|&i| self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && (!lots || analysed[tl.tile_of(self.b.x[i as usize] as i32, self.b.z[i as usize] as i32) as usize])).collect();
+        if lots { for a in self.active.iter_mut() { *a = false; } }
                 let mut idx = vec![NONE; self.b.len()];
                 for (k, &i) in set.iter().enumerate() { idx[i as usize] = k as u32; }
                 let lload = vec![0.0f32; set.len()];

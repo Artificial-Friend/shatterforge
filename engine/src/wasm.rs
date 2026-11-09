@@ -93,11 +93,11 @@ static mut SNAP: Vec<u8> = Vec::new();
 /// that what is drawn never loses volume except to dust.
 #[no_mangle] pub extern "C" fn chunk_volume(k: i32) -> f32 {
     let g = game();
-    let (y0, y1) = (k * crate::tower::STOREY, (k + 1) * crate::tower::STOREY);
+    let t = g.tiles;
     let mut v = 0.0f64;
     for i in 0..g.b.len() {
         if g.b.flags[i] & (crate::brick::F_ALIVE | crate::brick::F_DYNAMIC) != crate::brick::F_ALIVE { continue; }
-        let y = g.b.y[i] as i32; if y < y0 || y >= y1 { continue; }
+        if !t.holds(k, g.b.x[i] as i32, g.b.y[i] as i32, g.b.z[i] as i32) { continue; }
         let t = g.b.tbox(i as u32);
         // (a convex cell: its share of its box)
         v += ((t.max[0] - t.min[0]) as f64) * ((t.max[1] - t.min[1]) as f64) * ((t.max[2] - t.min[2]) as f64) * g.b.vol_share(i as u32);
@@ -162,3 +162,11 @@ static mut SNAP: Vec<u8> = Vec::new();
 /// The break plans made by the last call (see Game::plan_out)
 #[no_mangle] pub extern "C" fn plan_ptr() -> *const f32 { game().plan_out.as_ptr() }
 #[no_mangle] pub extern "C" fn plan_len() -> u32 { game().plan_out.len() as u32 }
+/// The city's lots (kind 5, `n` a side): how many, and lot k's field f: 0 kind, 1 storeys, 2 quarter turns, 3 x, 4 z
+/// (m, its centre).
+#[no_mangle] pub extern "C" fn city_lots(n: u32) -> u32 { crate::city::layout(n as i32).lots.len() as u32 }
+#[no_mangle] pub extern "C" fn city_lot(n: u32, k: u32, f: u32) -> f32 {
+    let l = crate::city::layout(n as i32);
+    let Some(o) = l.lots.get(k as usize) else { return 0.0 };
+    match f { 0 => o.kind as f32, 1 => o.storeys as f32, 2 => o.quarter as f32, 3 => o.off[0] as f32 * crate::brick::TICK, 4 => o.off[2] as f32 * crate::brick::TICK, _ => 0.0 }
+}

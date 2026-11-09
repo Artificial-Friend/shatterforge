@@ -428,3 +428,32 @@ After the arcade's redesign and the furniture (9 November, later; software GPU, 
 - `keystone` (0.5 m shot at the third keystone's middle) passes and settles at 4.8 s; the shot takes 58 crumbs and no stone ("tool": 0 m^3), so it does not yet test the arch losing its keystone in the page: the engine test (`complex::tests::an_arch_under_the_loggia_stands_without_its_keystone`) does. Still to do: a shot that takes the keystone out.
 Box buildings on the same build: `collapse` as the phase-0 baseline (2 below, 7 jumps, 3 rebounds, 21 energy gains), `ball` passes, deterministic over 150 frames; page checks `rest` and `debris` pass.
 
+
+## 9 November, evening: the city; the keystone shot; the complex building's rebounds traced
+
+Software GPU, 300 frames each (`node game/lab.cjs complex --frames 300`, `node game/lab.cjs city --frames 300`).
+
+**The city (`citystand`, `city`; docs/CITY.md)**
+- `citystand` (3 × 3 lots, left alone) passes. It settles at once; the GPU takes 55 ms a step (median), the same as one complex building standing (22 ms), plus the static shapes.
+- `city` (lots 0 and 1 cut: the complex building and the 7-storey frame beside it) fails:
+  - Both buildings come down, with 41,405 particles at the peak and 845 bodies awake. The GPU takes 2.0 s a step (median).
+  - It fails the same checks as `collapse` and `complex`: 13 frames drawn below and 10 above what exists, 3 jumps, 12 rebounds, one piece thrown up at over 5 m/s, a crumbled share of 0.58, and not settled by 5 s.
+  - Nothing on the other seven lots fails.
+
+**`keystone`, now a 0.75 m shot**
+- It takes the keystone (engine test: 0.243 -> 0.029 m³ left where the keystone was). 3 joints fail and 2 bricks crack; the arch stands under the loggia.
+- It fails one check: not settled by 5 s. 3 of the 119 crumbs stay awake at zero speed in the notch the shot left on the stone tops (particle cells at -2, 4, -10), and the GPU never puts them to sleep. Still to do.
+
+**`complex`: the rebounds traced**
+- The lab's bounce trace (`SF_TRACE_BODIES`, `--trace 33:41`) shows the first floor as one body: 602 t, 4,337 shapes, falling at 5.9 m/s.
+- At frame 36 it lands on a 158 kg piece of a cut ground-storey column. That piece takes 1.2 MN s in one step, before the crush test, which runs after the solve, can crush it. The floor is stopped from 5.8 to 1.7 m/s and turned at 0.55 rad/s.
+- The turn throws up the furniture standing on it: a 59 kg part goes from -6.05 to +5.73 m/s, and a cabinet and others go up 2 to 3 m/s. That gives the 14 to 15 rebounds and the launch.
+- Tried: furniture as fragile bodies, crushed before the solve when a body 20 times heavier moves onto them (GPU test `fragile`). It changed nothing, because the floor is stopped by a column stub, not by furniture. Reverted.
+- Kept: the steel cabinet is no longer solid steel (2,453 kg). It now weighs 156 kg, as sheet steel would.
+- Next: crushing before the solve for what a 20-times-heavier body lands on, column stubs included. This is the same open problem as `collapse`'s rebounds.
+
+**Box buildings on the same build**
+- `collapse` matches the phase-0 baseline (2 drawn below, 7 jumps, 3 rebounds, 21 energy gains).
+- `ball` passes.
+- Deterministic over 150 frames.
+- Page checks `rest` and `debris` pass.

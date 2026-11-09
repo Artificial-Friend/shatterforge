@@ -43,6 +43,11 @@ The walker is a 0.6 × 1.8 m body with gravity and a 0.35 m step-up.
 
 The test walks in through the core door, up flight A, across the landing and up flight B, and arrives at the next floor at 4.00 m (storey 3.75 m + slab 0.25 m).
 
+Later (phase 2, 9 November):
+- The walker stands on debris and walks into it. The page passes the debris near the player as oriented boxes (`player_debris_box`), and free pieces count by their faces (`player::tests`: on a tilted slab, feet at its surface, 1.216 m, not its box's top, 1.778).
+- Debris that moves into the player does not trap it.
+- The player jumps out of debris it stands in. Going up, what it is already in does not stop it; only what it newly meets above does. In a heap 0.4 m deep, the jump used to reach only the heap's top, 0.40 m; it now rises 0.86 m, as on open ground. A slab over its head still stops it (`jumps_out_of_debris_it_stands_in`).
+
 ## Blasts (`engine/src/game.rs`)
 
 A blast works in four steps:

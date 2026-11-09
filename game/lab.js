@@ -251,7 +251,9 @@ async function labAct(act, a) {
   if (act === 'cut') {
     // the benchmark's cut: the ground storey's columns and walls blown out, before the physics runs
     physicsPaused = true;
-    for (let x = -10; x <= 10.1; x += 4) for (let z = -10; z <= 10.1; z += 4) jobs.blast.push({ op: 'blast', x, y: 1.8, z, r: 2.5, ctx: { d: [0, 0, 1], t0: clock() } });
+    // (a: in the city, the lots to cut, by index; all of them when absent)
+    const at = lots().filter((_, k) => !a || a.includes(k));
+    for (const P of at) for (let x = -10; x <= 10.1; x += 4) for (let z = -10; z <= 10.1; z += 4) jobs.blast.push({ op: 'blast', x: P.x + x, y: 1.8, z: P.z + z, r: 2.5, ctx: { d: [0, 0, 1], t0: clock() } });
     pump();
     const T0 = L.T;
     while (L.jobq.length) { const j = L.jobq.shift(); finish(runInline(j.job)); labParticlesMade(); }
@@ -324,7 +326,7 @@ function labReport(wallS) {
   if (S.expect && S.expect.settle) checks.push({ name: 'settled (s)', value: L.settledAt == null ? 'no' : +(L.settledAt / 60).toFixed(1), limit: `by ${(S.frames / 60).toFixed(0)}`, pass: L.settledAt != null, what: 'everything asleep before the end' });
   const gpuMs = se.map(x => x.gpu), jsMs = L.jsMs;
   return {
-    scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: ['concrete frame', 'masonry', 'mass timber', 'mixed', 'complex'][S.kind], storeys: S.storeys, frames: S.frames,
+    scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: KIND_NAMES[S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
     pass: checks.every(c => c.pass), checks, colConflicts: L.colConflicts || 0, colConflictAt: L.colConflictAt || null, digest: L.digest, dumpRaw: L.dumpRaw ? { ...L.dumpRaw, colRows: L.colRows, allRows: L.allRows } : (L.colRows ? { colRows: L.colRows, allRows: L.allRows } : null),
     physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_by: { ...partsBy }, big_breaks: L.bigBreaks, made: L.made, gains: L.gains, spill_why: { crumbs: E.spill_why(0), fragments: E.spill_why(1), crushed_storey: E.spill_why(2), static: E.spill_why(3), fragment_bricks_by_mat: [0, 1, 2, 3, 4, 5, 6, 7].map(k => E.spill_mat(k)), single_brick_fragments: E.spill_mat(8) }, over_breaks: L.overBreaks, dbg_breaks: L.dbgBreaks, lost_m3: Object.fromEntries(Object.entries({ ...L.lostBy, particles_crushed: L.lostParticles || 0, building: L.V0 }).map(([k, v]) => [k, +v.toFixed(1)])), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, removed_far: { bodies: L.farBodies || 0, particles: L.farParts || 0, m3: +((L.lostBy.far || 0)).toFixed(2) }, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps, gradual: L.gradual || undefined, awake_at_end: L.awakeEnd || undefined, late_calls: L.lateCalls || {}, late_inputs: L.lateInputs || null, skip_state: { inputs: gpu.inputs, statsInputs: gpu.statsInputs, skipped: gpu.skipped || 0, frame: gpu.frame, realFrame: gpu.realFrame, awake: gpu.stats.awake, pActive: gpu.stats.pActive, blasts: (gpu.pBlasts || []).length, wakeReq: !!gpu.wakeReq, inherit: (gpu.pendingInherit || []).length, sleep: gpu.sleep } },

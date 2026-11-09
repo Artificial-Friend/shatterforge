@@ -381,6 +381,8 @@ pub fn build(storeys: i32, structure: u16) -> Bricks { build_kind(storeys, struc
 pub fn build_kind(storeys: i32, structure: u16, kind: u8) -> Bricks {
     // kind 4: the complex building, of boxes and free pieces at any angle (crate::complex); its size is its own
     if kind == 4 { return crate::complex::build(); }
+    // kind 5: the city, `storeys` lots a side (crate::city)
+    if kind == 5 { return crate::city::build(storeys); }
     let mut b = Bricks::new();
     for k in 0..=storeys {
         let mut s = Storey::new(k * STOREY);

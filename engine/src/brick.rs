@@ -280,6 +280,44 @@ impl Bricks {
         self.pieces.push(Piece { c, q: ql, s });
         Some(i)
     }
+    /// Copy the live bricks of `o` into this store, turned `quarter` quarter turns about the vertical (+x towards +z
+    /// is a quarter turn: x' = -z, z' = x) and moved by `off` (ticks); their `structure` ids raised by `sid_off`.
+    /// Free pieces keep their shapes, turned with them; flags and damage are kept. A library cell (a box's fracture
+    /// cell) is copied only unturned. Joints are not copied: `build_joints` after the last copy. (The city: each
+    /// building built where it was designed, then set on its lot.)
+    pub fn place(&mut self, o: &Bricks, off: [i32; 3], quarter: u8, sid_off: u16) {
+        let k = quarter & 3;
+        let (c, sn) = [(1i32, 0i32), (0, 1), (-1, 0), (0, -1)][k as usize];
+        let turn = |x: i32, z: i32| (c * x - sn * z, sn * x + c * z);
+        // (about +y a turn by th takes +x to -z: the positions' turn, +x to +z, is -90 degrees a quarter)
+        let th = -(k as f32) * core::f32::consts::FRAC_PI_2;
+        let qy = [0.0, crate::math::sin(th / 2.0), 0.0, crate::math::cos(th / 2.0)];
+        let qmul = |a: [f32; 4], b: [f32; 4]| [a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1], a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0], a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3], a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]];
+        for i in 0..o.len() as u32 {
+            let iu = i as usize;
+            if o.flags[iu] & F_ALIVE == 0 { continue; }
+            let sid = o.structure[iu].wrapping_add(sid_off);
+            let n = if let Some(p) = o.piece(i) {
+                let (x, z) = (p.c[0] as f64 / 1000.0, p.c[2] as f64 / 1000.0);
+                let t = TICK as f64;
+                let (xr, zr) = (c as f64 * x - sn as f64 * z, sn as f64 * x + c as f64 * z);
+                let centre = [xr + off[0] as f64 * t, p.c[1] as f64 / 1000.0 + off[1] as f64 * t, zr + off[2] as f64 * t];
+                let pts: Vec<[f64; 3]> = p.v.iter().map(|v| [v[0] as f64, v[1] as f64, v[2] as f64]).collect();
+                match self.add_piece(centre, qmul(qy, p.q), &pts, o.mat[iu], o.paint[iu], sid) { Some(n) => n, None => continue }
+            } else {
+                if k != 0 && o.hull[iu] != 0 { continue; }
+                let b = o.tbox(i);
+                let (ax, az) = turn(b.min[0], b.min[2]); let (bx, bz) = turn(b.max[0], b.max[2]);
+                let lo = [ax.min(bx) + off[0], b.min[1] + off[1], az.min(bz) + off[2]];
+                let hi = [ax.max(bx) + off[0], b.max[1] + off[1], az.max(bz) + off[2]];
+                let n = self.add(lo, [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]], o.mat[iu], o.paint[iu], sid);
+                self.hull[n as usize] = o.hull[iu];
+                n
+            };
+            self.flags[n as usize] = o.flags[iu];
+            self.damage[n as usize] = o.damage[iu];
+        }
+    }
     /// keep a shape once: the index of the same shape if there is one, else of this one, added
     fn intern(&mut self, shape: PieceShape) -> u32 {
         let (h, q) = shape_key(&shape);

@@ -162,6 +162,16 @@ pub struct Analysis {
     /// wear (an arch whose thrust runs at 0.7 of the way to the edge stands for centuries)
     pub beds: Vec<u32>,
 }
+impl Analysis {
+    pub fn empty() -> Analysis { Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: 0, nodes: 0, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new() } }
+    /// add another part's analysis (a city's lots, each analysed on its own)
+    pub fn merge(&mut self, o: Analysis) {
+        self.failed.extend(o.failed); self.cracks.extend(o.cracks); self.ratios.extend(o.ratios); self.forces.extend(o.forces);
+        self.inner.extend(o.inner); self.beds.extend(o.beds);
+        self.max_ratio = self.max_ratio.max(o.max_ratio); self.iterations += o.iterations; self.nodes += o.nodes;
+        if o.worst_in.0 > self.worst_in.0 { self.worst_in = o.worst_in; }
+    }
+}
 
 struct Node { brick: u32, lo: [i32; 3], hi: [i32; 3], load: f32, sink: bool, c: [f64; 3] }
 /// A link: between two cells of one brick (`joint` NONE), or across a joint. `face_lo..face_hi` is its face on the

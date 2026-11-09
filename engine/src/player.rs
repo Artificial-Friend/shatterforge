@@ -75,10 +75,14 @@ impl Player {
     /// Highest top (m) of a live brick or obstacle overlapping the player box at feet position p, if any.
     /// (Bricks are their boxes, free pieces their faces, the debris the page passed in its oriented boxes; one the
     /// player stands inside deeper than a step, debris that moved into the player, is passed through, not a trap.)
-    fn hit(&mut self, b: &Bricks, p: V3) -> Option<f32> {
+    fn hit(&mut self, b: &Bricks, p: V3) -> Option<f32> { self.hit_from(b, p, false) }
+    /// hit(), and with `rising`, what the player is already in at its present place is not in the way: moving up
+    /// out of debris it stands in (or on, sunk a little into it), only what it newly meets above stops it
+    fn hit_from(&mut self, b: &Bricks, p: V3, rising: bool) -> Option<f32> {
         let e = 1e-4;
         let lo = [p.x - RADIUS + e, p.y + e, p.z - RADIUS + e];
         let hi = [p.x + RADIUS - e, p.y + HEIGHT - e, p.z + RADIUS - e];
+        let (lo0, hi0) = ([self.p.x - RADIUS + e, self.p.y + e, self.p.z - RADIUS + e], [self.p.x + RADIUS - e, self.p.y + HEIGHT - e, self.p.z + RADIUS - e]);
         let t = |x: f32| floor(x / TICK) as i32;
         self.scratch.clear();
         b.query([t(lo[0]), t(lo[1]), t(lo[2])], [t(hi[0]) + 1, t(hi[1]) + 1, t(hi[2]) + 1], false, &mut self.scratch);
@@ -86,15 +90,17 @@ impl Player {
         for &i in &self.scratch {
             if let Some(pc) = b.piece(i) {
                 let o = Obstacle::convex(&pc.world(), &pc.world_faces());
+                if rising && o.overlaps(lo0, hi0) { continue; }
                 if o.overlaps(lo, hi) { let t = o.top(lo, hi); top = Some(top.map_or(t, |v: f32| v.max(t))); }
                 continue;
             }
             let tb = b.tbox(i);
             let (mn, mx) = ([tb.min[0] as f32 * TICK, tb.min[1] as f32 * TICK, tb.min[2] as f32 * TICK], [tb.max[0] as f32 * TICK, tb.max[1] as f32 * TICK, tb.max[2] as f32 * TICK]);
+            if rising && (0..3).all(|k| mn[k] < hi0[k] && mx[k] > lo0[k]) { continue; }
             if (0..3).all(|k| mn[k] < hi[k] && mx[k] > lo[k]) { top = Some(top.map_or(mx[1], |v: f32| v.max(mx[1]))); }
         }
         for o in &self.extra {
-            if !o.overlaps(lo, hi) { continue; }
+            if !o.overlaps(lo, hi) || (rising && o.overlaps(lo0, hi0)) { continue; }
             let t = o.top(lo, hi);
             if t - self.p.y > STEP_UP + 0.25 && o.overlaps([self.p.x - RADIUS + e, self.p.y + e, self.p.z - RADIUS + e], [self.p.x + RADIUS - e, self.p.y + HEIGHT - e, self.p.z + RADIUS - e]) { continue; }
             top = Some(top.map_or(t, |v: f32| v.max(t)));
@@ -135,7 +141,7 @@ impl Player {
         self.on_ground = false;
         for _ in 0..n {
             let q = v3(self.p.x, self.p.y + total / n as f32, self.p.z);
-            match self.hit(b, q) {
+            match self.hit_from(b, q, total > 0.0) {
                 None => self.p = q,
                 Some(top) => {
                     if self.v.y <= 0.0 { self.p.y = top.max(self.p.y.min(top)); self.on_ground = true; }
@@ -237,5 +243,26 @@ mod tests {
         for _ in 0..120 { pl.step(&b, 1.0 / 60.0, v3(0.0, 0.0, 2.0), false, false); }
         assert!(pl.p.z > 1.5 && pl.p.y < 0.01, "walked under it: {:?}", pl.p);
     }
+    #[test] fn jumps_out_of_debris_it_stands_in() {
+        // The player stands in a heap: a block 0.4 m tall around its legs (debris that fell onto it). Jumping, it got
+        // no higher than the block's top (0.40 m: going up, what it was already in stopped it as if it were a
+        // ceiling, and it was only lifted out by the step-up); it now jumps 0.86 m, as on open ground. Also checked:
+        // on a slab it has sunk 2 cm into (the read-back's poses are a frame old) it jumps 0.86 m (it did before), and
+        // a slab over its head still stops it.
+        let b = Bricks::new();
+        let peak = |obs: &[Obstacle], y0: f32| -> f32 {
+            let mut pl = Player::new(v3(0.0, y0, 0.0));
+            for o in obs { pl.extra.push(o.clone()); }
+            pl.on_ground = true;
+            let mut top = y0;
+            for k in 0..60 { pl.step(&b, 1.0 / 60.0, V3::ZERO, k == 0, false); top = top.max(pl.p.y); }
+            top - y0
+        };
+        let legs = peak(&[Obstacle::obb([0.1, 0.2, 0.0], [0.0, 0.0, 0.0, 1.0], [0.6, 0.2, 0.6])], 0.0);
+        let sunk = peak(&[Obstacle::obb([0.0, 0.48, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 0.1, 1.0])], 0.56);
+        let ceiling = peak(&[Obstacle::obb([0.0, 2.3, 0.0], [0.0, 0.0, 0.0, 1.0], [1.0, 0.1, 1.0])], 0.0);
+        std::println!("jump: in a heap {legs:.2} m, on a sunk slab {sunk:.2} m, under a slab at 2.2 m {ceiling:.2} m");
+        assert!(legs > 0.8 && sunk > 0.8);
+        assert!(ceiling < 2.2 - HEIGHT + 0.05);
+    }
 }
-

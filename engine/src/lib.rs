@@ -25,6 +25,7 @@ pub mod brick;
 pub mod phys;
 pub mod tower;
 pub mod complex;
+pub mod city;
 pub mod mesh;
 pub mod player;
 pub mod game;
