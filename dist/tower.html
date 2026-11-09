@@ -518,6 +518,10 @@ fn hdir(t: u32, k: u32) -> vec3f { return shp[P.o_hull + t * HSTR + 65u + k].xyz
 // near an edge or corner); under 0: inside, by as much as to the nearest face. A particle took a hull for its box:
 // a free piece's box (an inclined brace's, unturned) is far bigger than the piece, and crumbs by it were pushed
 // out of empty air, or lay on nothing (lab complex: 0.45 m jumps in a frame; GPU test freehullp)
+// (the library's 63 cells come first: they fill their boxes, and particles keep taking them for their boxes, as
+// validated in the lab; a crumb coming off a cell left in another direction with the faces, lab ball: a 0.31 m jump.
+// Runtime hulls, free pieces, from HULL_LIB on, use their faces. GpuWorld.create checks the library's size.)
+const HULL_LIB = 63u;
 fn hull_sd(t: u32, lc: vec3f, h: vec3f) -> vec4f {
   let nf = u32(hhead(t).y);
   var best = vec4f(0.0, 1.0, 0.0, -1e9);
@@ -1984,7 +1988,7 @@ const P_SEP = 2.0;
     let cl = clamp(lc, -h, h); let df = lc - cl; let d2 = dot(df, df);
     var nl = vec3f(0.0); var pen = 0.0;
     let ht = u32(Hs(j, H_ID).w);
-    if (ht != 0u) {
+    if (ht >= HULL_LIB) {
       // a convex chunk or free piece: its own faces, not its box
       let sd = hull_sd(ht, lc, h);
       if (sd.w >= ri + 0.01) { continue; }
@@ -2066,8 +2070,8 @@ fn sup_record(s: u32, i: u32, depth: f32, low: u32) {
     let dl = x - wp; let lc = vec3f(dot(Rm[0], dl), dot(Rm[1], dl), dot(Rm[2], dl));
     var cl = clamp(lc, -h, h); var nl = lc - cl; var dist = length(nl);
     let ht = u32(Hs(s, H_ID).w);
-    // (a chunk or free piece: its nearest face, the point under the particle on it)
-    if (ht != 0u) { let sd = hull_sd(ht, lc, h); dist = max(sd.w, 0.0); nl = sd.xyz * max(sd.w, 0.0); cl = lc - sd.xyz * sd.w; }
+    // (a free piece: its nearest face, the point under the particle on it)
+    if (ht >= HULL_LIB) { let sd = hull_sd(ht, lc, h); dist = max(sd.w, 0.0); nl = sd.xyz * max(sd.w, 0.0); cl = lc - sd.xyz * sd.w; }
     // (a particle whose centre is inside the shape holds nothing up: it is on its way out of it)
     if (dist < 1e-6) { continue; }
     nl = nl / dist;
@@ -2565,6 +2569,7 @@ class GpuWorld {
     this.solBuf = buf(sol.byteLength, U.STORAGE | U.COPY_DST | U.COPY_SRC, sol);
     this.shpBuf = buf(shp.byteLength + (HULLS.lib + HULL_RUNTIME) * HULL.STRIDE * 16, U.STORAGE | U.COPY_DST | U.COPY_SRC, shp);
     d.queue.writeBuffer(this.shpBuf, shp.byteLength, HULLS.data); this.oHull = shp.byteLength / 16; this.hullsUp = HULLS.lib;
+    if (HULLS.lib !== 63) throw new Error('hull library size ' + HULLS.lib + ': HULL_LIB in the shaders is 63');
     this.uploadHulls();
     this.intBuf = buf(this.nInts * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC);
     this.manBuf = buf(2 * this.maxMan * 17 * 16, U.STORAGE | U.COPY_SRC);

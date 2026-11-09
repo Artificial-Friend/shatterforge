@@ -263,7 +263,7 @@ Collisions: box against box keeps its own routine. Anything with a chunk uses se
 
 **Runtime hulls (phase 2, docs/PHASE2.md step 5).** After the library come up to 4,096 hulls registered at runtime (`GpuWorld.pieceShape`, `registerHull`), each a free piece's corners and faces in its own box mapped to [-1,1]^3, registered by content (the same piece shape takes the same slot) and uploaded to every world at its next step (`uploadHulls`). Static shapes may be turned (`setStaticShape(..., hull, q)`).
 
-**Particles against a hull** test its faces (`hull_sd`: the face plane the particle is farthest outside, its distance and normal), in `p_contact` and `p_support`; boxes keep the clamp. Particles took every hull for its box: near enough for the library's cells, which fill their boxes, but a free piece's box (an inclined brace's, built unturned) is mostly air, and crumbs by one were pushed out of nothing (lab `complex`: 0.45 m jumps in a frame).
+**Particles against a free piece** (a runtime hull, id from `HULL_LIB` = 63 on) test its faces (`hull_sd`: the face plane the particle is farthest outside, its distance and normal), in `p_contact` and `p_support`; boxes and the library's cells keep the clamp to the box (the cells fill their boxes; with their faces, a crumb coming off one in the lab's `ball` left another way and jumped 0.31 m, over the 0.26 m limit). Particles took every hull for its box: near enough for the library's cells, which fill their boxes, but a free piece's box (an inclined brace's, built unturned) is mostly air, and crumbs by one were pushed out of nothing (lab `complex`: 0.45 m jumps in a frame).
 
 ## Determinism
 
