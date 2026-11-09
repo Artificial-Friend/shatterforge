@@ -408,6 +408,22 @@ fn hfidx(t: u32, f: u32, i: u32) -> u32 { let v = shp[P.o_hull + t * HSTR + 29u 
 fn hfcnt(t: u32, f: u32) -> u32 { let v = shp[P.o_hull + t * HSTR + 77u + f / 4u]; return u32(v[f % 4u]); }
 fn hseg(t: u32, k: u32) -> vec2u { let v = shp[P.o_hull + t * HSTR + 53u + k / 2u]; return select(vec2u(u32(v.x), u32(v.y)), vec2u(u32(v.z), u32(v.w)), (k & 1u) != 0u); }
 fn hdir(t: u32, k: u32) -> vec3f { return shp[P.o_hull + t * HSTR + 65u + k].xyz; }
+// A point (lc, in a hull shape's frame, h its half size) against the hull: the face plane it is farthest outside, as
+// (outward normal in the shape's frame, signed distance m). Over 0: outside by at least that much (a little more
+// near an edge or corner); under 0: inside, by as much as to the nearest face. A particle took a hull for its box:
+// a free piece's box (an inclined brace's, unturned) is far bigger than the piece, and crumbs by it were pushed
+// out of empty air, or lay on nothing (lab complex: 0.45 m jumps in a frame; GPU test freehullp)
+fn hull_sd(t: u32, lc: vec3f, h: vec3f) -> vec4f {
+  let nf = u32(hhead(t).y);
+  var best = vec4f(0.0, 1.0, 0.0, -1e9);
+  for (var k = 0u; k < nf; k++) {
+    let pl = hplane(t, k);
+    let nl = pl.xyz / h; let L = length(nl);
+    let d = (dot(nl, lc) - pl.w) / L;
+    if (d > best.w) { best = vec4f(nl / L, d); }
+  }
+  return best;
+}
 struct HShape { p: vec3f, R: mat3x3f, h: vec3f, t: u32 }
 fn hw(s: HShape, k: u32) -> vec3f { return s.p + s.R * (s.h * hv(s.t, k)); }
 // the face's outward normal and plane offset in the world
@@ -1862,7 +1878,14 @@ const P_SEP = 2.0;
     let lc = vec3f(dot(Rm[0], dl), dot(Rm[1], dl), dot(Rm[2], dl));
     let cl = clamp(lc, -h, h); let df = lc - cl; let d2 = dot(df, df);
     var nl = vec3f(0.0); var pen = 0.0;
-    if (d2 > 1e-12) {
+    let ht = u32(Hs(j, H_ID).w);
+    if (ht != 0u) {
+      // a convex chunk or free piece: its own faces, not its box
+      let sd = hull_sd(ht, lc, h);
+      if (sd.w >= ri + 0.01) { continue; }
+      touch = 1.0; if (sd.w >= ri) { continue; }
+      nl = sd.xyz; pen = ri - sd.w;
+    } else if (d2 > 1e-12) {
       let dist = sqrt(d2); if (dist >= ri + 0.01) { continue; }
       touch = 1.0; if (dist >= ri) { continue; }
       nl = df / dist; pen = ri - dist;
@@ -1936,7 +1959,10 @@ fn sup_record(s: u32, i: u32, depth: f32, low: u32) {
     let i = v & 0xffffu; let r0 = R(i, 0); let x = r0.xyz;
     if (R(i, 1).w == 0.0 || R(i, 1).w >= 3.0) { continue; }
     let dl = x - wp; let lc = vec3f(dot(Rm[0], dl), dot(Rm[1], dl), dot(Rm[2], dl));
-    let cl = clamp(lc, -h, h); var nl = lc - cl; var dist = length(nl);
+    var cl = clamp(lc, -h, h); var nl = lc - cl; var dist = length(nl);
+    let ht = u32(Hs(s, H_ID).w);
+    // (a chunk or free piece: its nearest face, the point under the particle on it)
+    if (ht != 0u) { let sd = hull_sd(ht, lc, h); dist = max(sd.w, 0.0); nl = sd.xyz * max(sd.w, 0.0); cl = lc - sd.xyz * sd.w; }
     // (a particle whose centre is inside the shape holds nothing up: it is on its way out of it)
     if (dist < 1e-6) { continue; }
     nl = nl / dist;
@@ -2187,27 +2213,82 @@ function hullLibrary(nPatterns = 16, seed = 7) {
     patterns.push(cells.map(cl => { hulls.push(cl); return hulls.length - 1; }));
     p++;
   }
-  // packed for the GPU: per hull 80 vec4: [nv, nf, nseg, ndir] · 16 vertices · 12 planes (n, d) · 12 faces x 2
-  // (8 vertex indices) · 24 segments (2 per vec4) · 12 directions · face vertex counts
+  // packed for the GPU (packHull)
   const data = new Float32Array(hulls.length * HULL.STRIDE * 4);
-  hulls.forEach((H, i) => {
-    const o = i * HULL.STRIDE * 4;
-    data.set([H.V.length, H.faces.length, H.seg.length, H.dirs.length], o);
-    H.V.forEach((v, k) => data.set([...v, 0], o + 4 * (1 + k)));
-    H.faces.forEach((f, k) => {
-      data.set([...f.n, f.d], o + 4 * (17 + k));
-      const ix = f.v.concat(new Array(8 - f.v.length).fill(0));
-      data.set(ix.slice(0, 4), o + 4 * (29 + 2 * k)); data.set(ix.slice(4, 8), o + 4 * (30 + 2 * k));
-    });
-    data.set([H.V.length, H.faces.length, H.seg.length, H.dirs.length], o);
-    H.seg.forEach(([x, y], k) => { data[o + 4 * (53 + (k >> 1)) + 2 * (k & 1)] = x; data[o + 4 * (53 + (k >> 1)) + 2 * (k & 1) + 1] = y; });
-    H.dirs.forEach((d, k) => data.set([...d, 0], o + 4 * (65 + k)));
-    // the face vertex counts: 12 numbers in vec4s 77..79
-    H.faces.forEach((f, k) => { data[o + 4 * 77 + k] = f.v.length; });
+  hulls.forEach((H, i) => packHull(H, data, i * HULL.STRIDE * 4));
+  const lib = hulls.length;
+  return { hulls, patterns, data, count: hulls.length, lib, keys: new Map() };
+}
+// A hull packed for the GPU at float offset o: per hull 80 vec4: [nv, nf, nseg, ndir] · 16 vertices · 12 planes
+// (n, d) · 12 faces x 2 (8 vertex indices) · 24 segments (2 per vec4) · 12 directions · face vertex counts
+function packHull(H, data, o) {
+  data.fill(0, o, o + HULL.STRIDE * 4);
+  data.set([H.V.length, H.faces.length, H.seg.length, H.dirs.length], o);
+  H.V.forEach((v, k) => data.set([...v, 0], o + 4 * (1 + k)));
+  H.faces.forEach((f, k) => {
+    data.set([...f.n, f.d], o + 4 * (17 + k));
+    const ix = f.v.concat(new Array(8 - f.v.length).fill(0));
+    data.set(ix.slice(0, 4), o + 4 * (29 + 2 * k)); data.set(ix.slice(4, 8), o + 4 * (30 + 2 * k));
   });
-  return { hulls, patterns, data, count: hulls.length };
+  H.seg.forEach(([x, y], k) => { data[o + 4 * (53 + (k >> 1)) + 2 * (k & 1)] = x; data[o + 4 * (53 + (k >> 1)) + 2 * (k & 1) + 1] = y; });
+  H.dirs.forEach((d, k) => data.set([...d, 0], o + 4 * (65 + k)));
+  // the face vertex counts: 12 numbers in vec4s 77..79
+  H.faces.forEach((f, k) => { data[o + 4 * 77 + k] = f.v.length; });
 }
 const HULLS = hullLibrary();
+// Runtime hulls (free pieces, docs/PHASE2.md): after the library, up to HULL_RUNTIME more, each in its own box mapped to
+// [-1,1]^3 like the library's cells, so a shape is the hull placed by its p, q and stretched by its h. Registered
+// by content: a piece that comes back the same takes the same slot. Slots are not freed (a limit, written down).
+const HULL_RUNTIME = 4096;
+// A hull from corners (any units) and faces (corner loops, counter-clockwise seen from outside): its record and
+// its box ({ c, h } in the corners' units), or null beyond the limits (16 corners, 12 faces of up to 8, 24 edges in
+// up to 12 directions) or flat.
+function hullOfCorners(P, loops) {
+  const sub = (p, q) => [p[0] - q[0], p[1] - q[1], p[2] - q[2]], dot = (p, q) => p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+  const cross = (p, q) => [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
+  const nrm = (p) => { const l = Math.hypot(p[0], p[1], p[2]); return [p[0] / l, p[1] / l, p[2] / l]; };
+  const lo = [0, 1, 2].map(q => Math.min(...P.map(v => v[q]))), hi = [0, 1, 2].map(q => Math.max(...P.map(v => v[q])));
+  const c = lo.map((l, q) => (l + hi[q]) / 2), h = lo.map((l, q) => (hi[q] - l) / 2);
+  if (h.some(x => !(x > 0))) return null;
+  const V = P.map(v => v.map((x, q) => (x - c[q]) / h[q]));
+  const faces = loops.map(l => {
+    // the plane through the loop (Newell's normal), in the box coordinates
+    let n = [0, 0, 0];
+    for (let k = 0; k < l.length; k++) { const a = V[l[k]], b = V[l[(k + 1) % l.length]]; n[0] += (a[1] - b[1]) * (a[2] + b[2]); n[1] += (a[2] - b[2]) * (a[0] + b[0]); n[2] += (a[0] - b[0]) * (a[1] + b[1]); }
+    n = nrm(n);
+    return { n, d: l.reduce((s, i) => s + dot(n, V[i]), 0) / l.length, v: l.slice() };
+  });
+  const seg = [];
+  for (const f of faces) for (let k = 0; k < f.v.length; k++) { const i = f.v[k], j = f.v[(k + 1) % f.v.length]; if (!seg.some(([x, y]) => (x === i && y === j) || (x === j && y === i))) seg.push([i, j]); }
+  const dirs = [];
+  for (const [i, j] of seg) { const d = nrm(sub(V[j], V[i])); if (!dirs.some(e => Math.abs(dot(e, d)) > 0.9995)) dirs.push(d); }
+  if (V.length > HULL.V || faces.length > HULL.F || seg.length > HULL.S || dirs.length > HULL.D || faces.some(f => f.v.length > HULL.FV)) return null;
+  // volume, centroid and covariance about it per unit volume (box coordinates), as the library's cells
+  const o = [0, 1, 2].map(q => V.reduce((s, v) => s + v[q], 0) / V.length);
+  let vol = 0; const m1 = [0, 0, 0], m2 = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  for (const f of faces) for (let t = 1; t + 1 < f.v.length; t++) {
+    const P4 = [o, V[f.v[0]], V[f.v[t]], V[f.v[t + 1]]];
+    const tv = Math.abs(dot(sub(P4[1], o), cross(sub(P4[2], o), sub(P4[3], o)))) / 6;
+    vol += tv;
+    const S = [0, 1, 2].map(q => P4.reduce((s, v) => s + v[q], 0));
+    for (let q = 0; q < 3; q++) m1[q] += tv * S[q] / 4;
+    for (let r = 0; r < 3; r++) for (let cc = 0; cc < 3; cc++) m2[r][cc] += tv / 20 * (P4.reduce((s, v) => s + v[r] * v[cc], 0) + S[r] * S[cc]);
+  }
+  if (!(vol > 1e-9)) return null;
+  const cen = m1.map(x => x / vol);
+  const cov = m2.map((row, r) => row.map((x, cc) => x / vol - cen[r] * cen[cc]));
+  return { rec: { V, faces, seg, dirs, box: { c: [0, 0, 0], h: [1, 1, 1] }, vol: vol / 8, cen, cov }, box: { c, h } };
+}
+// Register a hull (from hullOfCorners) at runtime: its id (the library's ids come first), the same id for the same
+// corners and faces; -1 when the runtime slots are full.
+function registerHull(rec) {
+  const key = rec.V.map(v => v.map(x => x.toFixed(5)).join(',')).join(';') + '|' + rec.faces.map(f => f.v.join(',')).join(';');
+  const had = HULLS.keys.get(key); if (had !== undefined) return had;
+  if (HULLS.hulls.length >= HULLS.lib + HULL_RUNTIME) return -1;
+  const id = HULLS.hulls.length;
+  HULLS.hulls.push(rec); HULLS.count = HULLS.hulls.length; HULLS.keys.set(key, id);
+  return id;
+}
 
 function buildBodies(list) {
   const bodies = [], shapes = [];
@@ -2253,6 +2334,15 @@ class GpuWorld {
   // the convex chunk library: { hulls (vertices, faces, box, volume share), patterns (lists of hull ids that tile
   // a brick: give each piece shape { hull, p, h } from hullPiece) }
   static get hulls() { return HULLS; }
+  // A free piece as a shape: its corners (m, in its own frame about its centre) and faces, its centre (m) and
+  // rotation: { p, q, h, hull } for a body or a static shape, or null if its hull is beyond the GPU's limits or the
+  // runtime hull slots are full. The hull is registered (and uploaded to every world at its next step).
+  static pieceShape(corners, loops, centre, q, mat, col) {
+    const H = hullOfCorners(corners, loops); if (!H) return null;
+    const id = registerHull(H.rec); if (id < 0) return null;
+    const R = q2m(q), c = H.box.c;
+    return { p: [0, 1, 2].map(i => centre[i] + R[i][0] * c[0] + R[i][1] * c[1] + R[i][2] * c[2]), q, h: H.box.h, hull: id, mat, col: col ?? mat };
+  }
   // the shapes of a brick (centre p, rotation q, half size h) broken by a pattern: one per cell, tiling it
   static hullShapes(p, q, h, pattern, mat, col) {
     const R = q2m(q);
@@ -2368,8 +2458,9 @@ class GpuWorld {
     const buf = (size, usage, data) => { const b = d.createBuffer({ size, usage }); if (data) d.queue.writeBuffer(b, 0, data); return b; };
     this.bodBuf = buf(bod.byteLength, U.STORAGE | U.COPY_DST | U.COPY_SRC, bod);
     this.solBuf = buf(sol.byteLength, U.STORAGE | U.COPY_DST | U.COPY_SRC, sol);
-    this.shpBuf = buf(shp.byteLength + HULLS.data.byteLength, U.STORAGE | U.COPY_DST | U.COPY_SRC, shp);
-    d.queue.writeBuffer(this.shpBuf, shp.byteLength, HULLS.data); this.oHull = shp.byteLength / 16;
+    this.shpBuf = buf(shp.byteLength + (HULLS.lib + HULL_RUNTIME) * HULL.STRIDE * 16, U.STORAGE | U.COPY_DST | U.COPY_SRC, shp);
+    d.queue.writeBuffer(this.shpBuf, shp.byteLength, HULLS.data); this.oHull = shp.byteLength / 16; this.hullsUp = HULLS.lib;
+    this.uploadHulls();
     this.intBuf = buf(this.nInts * 4, U.STORAGE | U.COPY_DST | U.COPY_SRC);
     this.manBuf = buf(2 * this.maxMan * 17 * 16, U.STORAGE | U.COPY_SRC);
     this.coldBuf = buf(2 * this.maxMan * 6 * 16, U.STORAGE | U.COPY_SRC);
@@ -2699,7 +2790,8 @@ class GpuWorld {
   }
   // Static shapes of fixed body `body` (1-based body index): set (create when slot is null) or kill.
   // centre and half extents in metres, axis-aligned; returns the slot (1-based shape index).
-  setStaticShape(slot, body, centre, half, mat, hull = 0) {
+  setStaticShape(slot, body, centre, half, mat, hull = 0, q = [0, 0, 0, 1]) {
+    this.uploadHulls();
     this.inputs++;
     const b = this.bodies[body - 1];
     if (slot == null) {
@@ -2713,9 +2805,10 @@ class GpuWorld {
     // a new shape in this slot gets a new generation, so read-backs never take it for the slot's old shape
     if (!this.shapes[slot - 1] || this.shapes[slot - 1].dead) { this.shapeGen = this.shapeGen || []; this.shapeGen[slot - 1] = (this.shapeGen[slot - 1] || 0) + 1; }
     const lp = [centre[0] - b.p[0], centre[1] - b.p[1], centre[2] - b.p[2]];
-    const rec = { body, mat, lp, lq: [0, 0, 0, 1], h: half, hull };
+    // (a free piece's shape is turned: q, in the fixed body's frame, which is the world's)
+    const rec = { body, mat, lp, lq: q.slice(), h: half, hull };
     this.shapes[slot - 1] = rec;
-    this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, mat, 0, hull, ...lp, 0, 0, 0, 0, 1, ...half, 0]));
+    this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, mat, 0, hull, ...lp, 0, ...q, ...half, 0]));
     return slot;
   }
   // Retire a body: it stops moving and colliding (its slot is not reused).
@@ -2907,7 +3000,17 @@ class GpuWorld {
     this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([s.body, s.mat, 1, 0]));
   }
 
+  // the runtime hulls registered since the last upload, into this world's hull table
+  uploadHulls() {
+    const n = HULLS.hulls.length;
+    if (n <= this.hullsUp) return;
+    const data = new Float32Array((n - this.hullsUp) * HULL.STRIDE * 4);
+    for (let i = this.hullsUp; i < n; i++) packHull(HULLS.hulls[i], data, (i - this.hullsUp) * HULL.STRIDE * 4);
+    this.device.queue.writeBuffer(this.shpBuf, (this.oHull + this.hullsUp * HULL.STRIDE) * 16, data);
+    this.hullsUp = n;
+  }
   step(dt = 1 / 60) {
+    this.uploadHulls();
     const enc = this.device.createCommandEncoder();
     this.encode(enc, dt);
     this.device.queue.submit([enc.finish()]);

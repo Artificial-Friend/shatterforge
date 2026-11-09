@@ -112,6 +112,9 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn rest_applied() -> f32 { game().rest_applied }
 #[no_mangle] pub extern "C" fn cracked_total() -> u32 { game().cracked_total as u32 }
 #[no_mangle] pub extern "C" fn bricks_dump() { game().dump(); }
+/// a free piece's shape (Game::piece_shape) into its own buffer: its length; then piece_ptr
+#[no_mangle] pub extern "C" fn piece_shape(k: u32) -> u32 { game().piece_shape(k) as u32 }
+#[no_mangle] pub extern "C" fn piece_ptr() -> *const f32 { game().piece_out.as_ptr() }
 #[no_mangle] pub extern "C" fn blast(x: f32, y: f32, z: f32, r: f32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.blast(v3(x, y, z), r) as u32; g.finish_plans(); n }
 #[no_mangle] pub extern "C" fn raycast(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32, max: f32) -> f32 { game().raycast(v3(ox, oy, oz), v3(dx, dy, dz), max) }
 #[no_mangle] pub extern "C" fn bricks_alive() -> u32 { game().b.alive_count() as u32 }
@@ -124,6 +127,10 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn player_get(axis: u32) -> f32 { game().player.p.get(axis as usize) }
 #[no_mangle] pub extern "C" fn player_on_ground() -> u32 { game().player.on_ground as u32 }
 #[no_mangle] pub extern "C" fn structure_step(max_fail: u32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.structure_step(max_fail as usize) as u32; g.finish_plans(); n }
+/// pieces the last structure step sent off: with no failures, loose contents (the page applies its output then too)
+/// the building has loose bricks (room contents) not yet sent off: the page runs a first structure step
+#[no_mangle] pub extern "C" fn loose_pending() -> u32 { game().loose_pending as u32 }
+#[no_mangle] pub extern "C" fn last_detached() -> u32 { game().last_detached as u32 }
 #[no_mangle] pub extern "C" fn structure_ratio() -> f32 { game().max_ratio }
 #[no_mangle] pub extern "C" fn structure_wearing() -> u32 { game().wearing as u32 }
 #[no_mangle] pub extern "C" fn worn_total() -> u32 { game().worn_total as u32 }

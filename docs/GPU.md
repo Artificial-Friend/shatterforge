@@ -258,7 +258,12 @@ Collisions: box against box keeps its own routine. Anything with a chunk uses se
 | `hullpairs`: 200 random chunks dropped on fixed (or resting) chunks | no corner > 3 cm inside | 0 mm |
 | `hullthrow`: 200 chunks thrown at 4–14 m/s, spinning up to 26 rad/s | no corner > 5 cm into the ground | 4 mm (11 cm with one 4-point ground contact) |
 
-Particles still collide with a chunk's box.
+| `freehull`: runtime hulls (free pieces): a wedge dropped 0.2 m onto a slab; three courses of wedge pairs; a block on a static slab turned 15 degrees | lands flat; the stack stands; rests on the slope | down 0.2000 m, turned 0.00 degrees; 6.6 mm; 5.2 mm and 0.00 degrees |
+| `freehullp`: particles dropped over a static wedge whose box is half empty air | rest on the slope, never inside | 0.050 m over it (r 0.05); with the old box test 0.850 m, on the box's top |
+
+**Runtime hulls (phase 2, docs/PHASE2.md step 5).** After the library come up to 4,096 hulls registered at runtime (`GpuWorld.pieceShape`, `registerHull`), each a free piece's corners and faces in its own box mapped to [-1,1]^3, registered by content (the same piece shape takes the same slot) and uploaded to every world at its next step (`uploadHulls`). Static shapes may be turned (`setStaticShape(..., hull, q)`).
+
+**Particles against a hull** test its faces (`hull_sd`: the face plane the particle is farthest outside, its distance and normal), in `p_contact` and `p_support`; boxes keep the clamp. Particles took every hull for its box: near enough for the library's cells, which fill their boxes, but a free piece's box (an inclined brace's, built unturned) is mostly air, and crumbs by one were pushed out of nothing (lab `complex`: 0.45 m jumps in a frame).
 
 ## Determinism
 
@@ -321,6 +326,8 @@ What is not covered:
 Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall through the ground. The default is now 24 per shape (it was 8, and a heap of chunks overflowed it: chunks fell to -7.8 m). `stats.pairsLost` and `lost` (steps that lost contacts or pairs) report it, and the lab checks it.
 
 ## Still to do
+
+- **A fast-spinning chunk sinks into the ground (open, 9 November).** The GPU test `hullthrow` throws the hull library's cells; with six runtime hulls registered before it (`freehull` ran first), it drew another random sample, and library cell 39, thrown as body 75 spinning at 49 rad/s (corners at about 15 m/s), had a corner 7.6 cm inside the ground at frame 8 (limit 5 cm; the scene's own sample: 1.2 cm). Reproduce: `HTHROW_ALL=1 node gpu/test_gpu.cjs freehull hullthrow`. The scene now throws the library's cells only, as written (the runtime hulls have `freehull`); the deeper case is not the margin (`ground_margin` covers w r dt) but the contacts: found once a frame, they cannot follow a body that turns 0.8 rad (47 degrees) in that frame, and corners that were not touching at its start come round into the ground. Candidates: a cap on the turn per frame (0.25 rad: 15 rad/s at 60 Hz) for bodies off the ground, or contacts found again in the sub-steps for the few spinning that fast.
 
 - **Rebounds in the collapse (open).** With shock propagation, the lab collapse (150 frames, seeds 0 / 7 / 8) counts 10 / 6 / 11 rebounds and 5 / 2 / 0 launches, against 13 / 26 / 16 and 7 / 6 / 8 without it. What is left is mostly pieces landing at 2–3 m/s and leaving at 1–2 m/s. Some may be real: the check reads the centre's speed, and a spinning piece that lands on one end can send its centre up. The launches left are spares and slivers at 5–14 m/s.
 

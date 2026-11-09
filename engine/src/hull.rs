@@ -114,30 +114,70 @@ pub fn moments(v: &[[f64; 3]], faces: &[Vec<usize>]) -> (f64, [f64; 3], [[f64; 3
 pub struct Shape { pub v: Vec<[f64; 3]>, pub faces: Vec<([f64; 3], f64, Vec<usize>)> }
 /// The convex hull of points (m), within the GPU's limits on a hull (16 corners, 12 faces of up to 8 corners, 24
 /// edges in up to 12 directions); none if the points are flat (no volume) or the hull is beyond the limits.
-pub fn convex(pts: &[[f64; 3]]) -> Option<Shape> {
-    if pts.len() < 4 { return None; }
+/// Faces come straight from the points: a plane through three of them with every point on one side (within 1 um
+/// per m of size) is a face, its corners the points on it in order round it (points along an edge dropped). The
+/// corners are the points given, not planes' intersections: corners kept in f32 are coplanar only to ~1e-7 m, and
+/// a face missed at a tighter tolerance left the hull a face short (a piece cut four ways came out 9% too big).
+pub fn convex(pts_in: &[[f64; 3]]) -> Option<Shape> {
+    if pts_in.len() < 4 { return None; }
     let mut lo = [f64::MAX; 3]; let mut hi = [f64::MIN; 3];
-    for p in pts { for q in 0..3 { lo[q] = lo[q].min(p[q]); hi[q] = hi[q].max(p[q]); } }
+    for p in pts_in { for q in 0..3 { lo[q] = lo[q].min(p[q]); hi[q] = hi[q].max(p[q]); } }
     let size = (0..3).map(|q| hi[q] - lo[q]).fold(0.0, f64::max);
     if size <= 0.0 { return None; }
-    let eps = 1e-9 * size.max(1.0);
-    // the hull's planes: every plane through three points with all points on one side
-    let mut planes: Vec<([f64; 3], f64)> = Vec::new();
+    let eps = 1e-6 * size.max(1.0);
+    // the points, without repeats
+    let mut pts: Vec<[f64; 3]> = Vec::new();
+    for p in pts_in { if !pts.iter().any(|q| len(sub(*q, *p)) < eps) { pts.push(*p); } }
     let n = pts.len();
+    if n < 4 { return None; }
+    let mut faces: Vec<([f64; 3], f64, Vec<usize>)> = Vec::new();
+    let mut seen: Vec<Vec<usize>> = Vec::new();
     for i in 0..n { for j in i + 1..n { for k in j + 1..n {
         let c = cross(sub(pts[j], pts[i]), sub(pts[k], pts[i]));
-        if len(c) < 1e-12 * size * size { continue; }
+        if len(c) < 1e-6 * size * size { continue; }
         let nn = nrm(c); let d = dot(nn, pts[i]);
         let (mut above, mut below) = (false, false);
-        for p in pts { let e = dot(nn, *p) - d; if e > eps { above = true; } if e < -eps { below = true; } }
-        let pl = match (above, below) { (false, true) => (nn, d), (true, false) => ([-nn[0], -nn[1], -nn[2]], -d), _ => continue };
-        if !planes.iter().any(|q| dot(q.0, pl.0) > 1.0 - 1e-9 && (q.1 - pl.1).abs() < eps * 10.0) { planes.push(pl); }
+        let mut on: Vec<usize> = Vec::new();
+        for (m, p) in pts.iter().enumerate() { let e = dot(nn, *p) - d; if e > eps { above = true; } else if e < -eps { below = true; } else { on.push(m); } }
+        let out = match (above, below) { (false, true) => nn, (true, false) => [-nn[0], -nn[1], -nn[2]], _ => continue };
+        if seen.contains(&on) { continue; }
+        seen.push(on.clone());
+        // the face's corners in order round it, counter-clockwise seen from outside, points along an edge dropped
+        let u = nrm(sub(pts[on[1]], pts[on[0]]));
+        let w = cross(out, u);
+        let p2: Vec<(f64, f64)> = on.iter().map(|&m| (dot(pts[m], u), dot(pts[m], w))).collect();
+        let mut ord: Vec<usize> = (0..on.len()).collect();
+        ord.sort_by(|&a, &b| p2[a].partial_cmp(&p2[b]).unwrap_or(core::cmp::Ordering::Equal));
+        let turn = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0);
+        let tol = eps * size;
+        let mut hull: Vec<usize> = Vec::new();
+        for pass in 0..2 {
+            let start = hull.len();
+            let seq: Vec<usize> = if pass == 0 { ord.clone() } else { ord.iter().rev().cloned().collect() };
+            for &m in &seq {
+                while hull.len() >= start + 2 && turn(p2[hull[hull.len() - 2]], p2[hull[hull.len() - 1]], p2[m]) <= tol { hull.pop(); }
+                hull.push(m);
+            }
+            hull.pop();
+        }
+        if hull.len() < 3 { continue; }
+        let lp: Vec<usize> = hull.iter().map(|&m| on[m]).collect();
+        let dd = lp.iter().map(|&m| dot(out, pts[m])).sum::<f64>() / lp.len() as f64;
+        faces.push((out, dd, lp));
     } } }
-    if planes.len() < 4 { return None; }
-    let p = polytope(&planes);
-    if p.v.len() < 4 || p.v.len() > MAXV || p.faces.len() > MAXF || p.nseg > MAXS || p.ndir > MAXD || p.faces.iter().any(|f| f.1.len() > MAXFV) { return None; }
-    let faces = p.faces.iter().map(|(pi, f)| (planes[*pi].0, planes[*pi].1, f.clone())).collect();
-    Some(Shape { v: p.v, faces })
+    if faces.len() < 4 { return None; }
+    // only the corners the faces use, renumbered
+    let mut used: Vec<usize> = faces.iter().flat_map(|f| f.2.iter().cloned()).collect();
+    used.sort_unstable(); used.dedup();
+    let v: Vec<[f64; 3]> = used.iter().map(|&m| pts[m]).collect();
+    let faces: Vec<([f64; 3], f64, Vec<usize>)> = faces.into_iter().map(|(nn, d, lp)| (nn, d, lp.iter().map(|m| used.binary_search(m).unwrap()).collect())).collect();
+    // the GPU's limits: corners, faces, corners a face, edges and their directions
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for f in &faces { for k in 0..f.2.len() { let (a, b) = (f.2[k], f.2[(k + 1) % f.2.len()]); let e = (a.min(b), a.max(b)); if !edges.contains(&e) { edges.push(e); } } }
+    let mut dirs: Vec<[f64; 3]> = Vec::new();
+    for &(a, b) in &edges { let d = nrm(sub(v[b], v[a])); if !dirs.iter().any(|q| dot(*q, d).abs() > 1.0 - 1e-6) { dirs.push(d); } }
+    if v.len() > MAXV || faces.len() > MAXF || faces.iter().any(|f| f.2.len() > MAXFV) || edges.len() > MAXS || dirs.len() > MAXD { return None; }
+    Some(Shape { v, faces })
 }
 
 fn build(n_patterns: usize, seed: u32) -> Lib {

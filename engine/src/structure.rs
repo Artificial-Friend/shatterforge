@@ -59,6 +59,34 @@ pub fn connection(b: &Bricks, j: u32) -> [f32; 3] {
     [1.0, 0.7, 0.7]
 }
 
+/// Stones on a mortar bed: masonry where a free piece (a cut stone: an arch's voussoir, a stone beam) meets another
+/// member (a different `structure`, the member id; the segments of one member share it, and their seams are the stone
+/// itself), on a face within 70 degrees of level (a bed joint: an arch's radial joints, its springing, a stone on a
+/// keystone; upright joints keep the material's rule). Checked as masonry arches are (Heyman): no tension, the
+/// thrust inside the face (`bed_ratio`). As the stone itself (0.3 MPa in tension, 0.5 in bending) a half arch stood
+/// as a cantilever off its pier with its keystone gone, at 0.78 of strength.
+pub fn mortar_bed(b: &Bricks, j: u32, normal: [f64; 3]) -> bool {
+    let (a, c) = (b.ja[j as usize] as usize, b.jb[j as usize] as usize);
+    let free = |i: usize| b.hull[i] == crate::brick::HULL_FREE;
+    b.mat[a] == mat::MASONRY && b.mat[c] == mat::MASONRY && (free(a) || free(c)) && b.structure[a] != b.structure[c] && fabs64s(normal[1]) > 0.3
+}
+#[inline] fn fabs64s(x: f64) -> f64 { if x < 0.0 { -x } else { x } }
+/// A bed joint's ratio, with no tension (Heyman): force `f` and moment `m` on the max side in the face's frame
+/// (normal, u, w). The thrust N must press (pulled apart, the bed opens: 10), and pass inside the face: its
+/// eccentricities over the extreme fibres' distances, e_w / z_u + e_u / z_w, is 1 where it reaches the edge (a hinge
+/// opens through: the joint gives way). Its compression is checked on what still bears, A (1 - that), and its
+/// shear against cohesion on that area plus friction (0.4) on N. The worst of the three.
+fn bed_ratio(s: &Sect, f: [f64; 3], m: [f64; 3], cap: [f32; 3]) -> f32 {
+    let n = -f[0];
+    if n <= 1e-9 { return 10.0; }
+    let ecc = fabs64s(m[1]) / n / s.zu.max(1e-6) + fabs64s(m[2]) / n / s.zw.max(1e-6);
+    let bearing = (1.0 - ecc).max(1e-3) * s.area;
+    let comp = n / bearing / cap[0] as f64;
+    let v = sqrt64(f[1] * f[1] + f[2] * f[2]) + fabs64s(m[0]) * s.rmax / s.j * s.area;
+    let shear = v / (cap[2] as f64 * bearing + 0.4 * n);
+    ecc.max(comp).max(shear) as f32
+}
+
 pub fn crush_energy(m: u8) -> f32 {
     match m { mat::CONCRETE => 1.0e6, mat::MASONRY => 0.4e6, mat::STEEL => 20e6, mat::GLASS => 0.05e6, _ => 0.2e6 }
 }
@@ -124,6 +152,9 @@ pub struct Analysis {
     pub forces: Vec<(u32, [f64; 3], [f64; 3])>,
     /// faces inside bricks loaded past 0.7 of strength but under it: (brick, axis, plane, ratio) (they wear)
     pub inner: Vec<(u32, usize, i32, f32)>,
+    /// the joints checked as stones' beds (`mortar_bed`): their ratio is where the thrust passes, which does not
+    /// wear (an arch whose thrust runs at 0.7 of the way to the edge stands for centuries)
+    pub beds: Vec<u32>,
 }
 
 struct Node { brick: u32, lo: [i32; 3], hi: [i32; 3], load: f32, sink: bool, c: [f64; 3] }
@@ -166,6 +197,8 @@ fn geo_of(poly: &[[f64; 3]], ax: usize) -> Option<Geo> {
     for p in poly { let r = [p[0] - c[0], p[1] - c[1], p[2] - c[2]]; rmax = rmax.max(sqrt64(r[0] * r[0] + r[1] * r[1] + r[2] * r[2])); }
     Some(Geo { c, fr, s: Sect { area, iu: iu.max(1e-12), iw: iw.max(1e-12), zu: zu.max(1e-4), zw: zw.max(1e-4), j: (iu + iw).max(1e-12), rmax } })
 }
+/// The frame (rows: normal, u, w) a polygonal face is checked in: that of `Analysis::forces`.
+pub fn face_frame(poly: &[[f64; 3]]) -> [[f64; 3]; 3] { geo_of(poly, 3).map_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], |g| g.fr) }
 fn rot(fr: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] { [fr[0][0] * v[0] + fr[0][1] * v[1] + fr[0][2] * v[2], fr[1][0] * v[0] + fr[1][1] * v[1] + fr[1][2] * v[2], fr[2][0] * v[0] + fr[2][1] * v[1] + fr[2][2] * v[2]] }
 fn rot_t(fr: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] { [fr[0][0] * v[0] + fr[1][0] * v[1] + fr[2][0] * v[2], fr[0][1] * v[0] + fr[1][1] * v[1] + fr[2][1] * v[2], fr[0][2] * v[0] + fr[1][2] * v[1] + fr[2][2] * v[2]] }
 
@@ -378,7 +411,7 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
     let x0: Option<Vec<[f64; 6]>> = warm.as_ref().map(|w| (0..n).map(|k| if fixed[k] { [0.0; 6] } else { w.0.get(&key(k)).copied().unwrap_or([0.0; 6]) }).collect());
     let (x, it) = solve_network(&springs, &ends, &fixed, &pos, &f, x0);
     if let Some(w) = warm { w.0.clear(); for k in 0..n { if !fixed[k] { w.0.insert(key(k), x[k]); } } }
-    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new() };
+    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new() };
     // forces on each face (on the max side's cell, from the min side's): force and moment about the face centre
     let face_load = |l: usize| -> ([f64; 3], [f64; 3]) {
         let sp = &springs[l];
@@ -431,7 +464,11 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
         let (fl, mut ml) = (local(ax, &jgeo, ft), local(ax, &jgeo, mt));
         out.forces.push((j, fl, ml));
         if hinged { ml = [0.0; 3]; }
-        let ratio = section_ratio(&sect, fl, ml, cap, flex);
+        // (a stone's bed: no tension, the thrust inside the face)
+        let normal = match &jgeo { Some(g) => g.fr[0], None => { let mut e = [0.0; 3]; e[ax.min(2)] = 1.0; e } };
+        let bed = mortar_bed(b, j, normal);
+        if bed { out.beds.push(j); }
+        let ratio = if bed { bed_ratio(&sect, fl, ml, [sa[0].min(sb[0]), 0.0, 0.2 * sa[2].min(sb[2])]) } else { section_ratio(&sect, fl, ml, cap, flex) };
         out.ratios.push((j, ratio));
         if ratio > out.max_ratio { out.max_ratio = ratio; }
         if ratio > 1.0 { out.failed.push((j, ratio)); }
@@ -462,15 +499,18 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
 /// A face that is not on an axis plane (between two cells of a fractured brick) has its frame in `fr`, and `k`, `kr`
 /// are then along its normal, u and w.
 #[derive(Clone)]
-struct Spring { c: [f64; 3], ra: [f64; 3], rb: [f64; 3], k: [f64; 3], kr: [f64; 3], fr: Option<[[f64; 3]; 3]> }
+/// A face's springs: translation stiffness `k` along the rows of frame `fr` (world axes if none), rotation
+/// stiffness `kr` along the rows of `frr` (`fr` if none: a free piece's link has its own frames for the two).
+struct Spring { c: [f64; 3], ra: [f64; 3], rb: [f64; 3], k: [f64; 3], kr: [f64; 3], fr: Option<[[f64; 3]; 3]>, frr: Option<[[f64; 3]; 3]> }
 impl Spring {
     /// force and moment (world) for relative displacement d and rotation r
     #[inline] fn force(&self, d: [f64; 3], r: [f64; 3]) -> ([f64; 3], [f64; 3]) {
         match &self.fr {
             None => ([self.k[0] * d[0], self.k[1] * d[1], self.k[2] * d[2]], [self.kr[0] * r[0], self.kr[1] * r[1], self.kr[2] * r[2]]),
             Some(fr) => {
-                let (dl, rl) = (rot(fr, d), rot(fr, r));
-                (rot_t(fr, [self.k[0] * dl[0], self.k[1] * dl[1], self.k[2] * dl[2]]), rot_t(fr, [self.kr[0] * rl[0], self.kr[1] * rl[1], self.kr[2] * rl[2]]))
+                let frr = self.frr.as_ref().unwrap_or(fr);
+                let (dl, rl) = (rot(fr, d), rot(frr, r));
+                (rot_t(fr, [self.k[0] * dl[0], self.k[1] * dl[1], self.k[2] * dl[2]]), rot_t(frr, [self.kr[0] * rl[0], self.kr[1] * rl[1], self.kr[2] * rl[2]]))
             }
         }
     }
@@ -479,7 +519,7 @@ impl Spring {
         let mut d = [[0.0; 6]; 6];
         match &self.fr {
             None => { for i in 0..3 { d[i][i] = self.k[i]; d[3 + i][3 + i] = self.kr[i]; } }
-            Some(fr) => { for i in 0..3 { for j in 0..3 { for a in 0..3 { d[i][j] += fr[a][i] * self.k[a] * fr[a][j]; d[3 + i][3 + j] += fr[a][i] * self.kr[a] * fr[a][j]; } } } }
+            Some(fr) => { let frr = self.frr.as_ref().unwrap_or(fr); for i in 0..3 { for j in 0..3 { for a in 0..3 { d[i][j] += fr[a][i] * self.k[a] * fr[a][j]; d[3 + i][3 + j] += frr[a][i] * self.kr[a] * frr[a][j]; } } } }
         }
         d
     }
@@ -489,6 +529,25 @@ impl Spring {
         let (pa, pb) = (pt(xa, &self.ra), pt(xb, &self.rb));
         ([pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]], [xb[3] - xa[3], xb[4] - xa[4], xb[5] - xa[5]])
     }
+}
+#[inline] fn fabs64(x: f64) -> f64 { if x < 0.0 { -x } else { x } }
+/// Eigenvalues and eigenvectors (rows) of a symmetric 3 x 3 matrix (Jacobi rotations).
+fn eig3(m: [[f64; 3]; 3]) -> ([f64; 3], [[f64; 3]; 3]) {
+    let mut a = m;
+    let mut v = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];   // columns are the eigenvectors
+    for _ in 0..50 {
+        let (mut p, mut q, mut big) = (0, 1, 0.0);
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] { if fabs64(a[i][j]) > big { big = fabs64(a[i][j]); p = i; q = j; } }
+        if big < 1e-30 + 1e-14 * (fabs64(a[0][0]) + fabs64(a[1][1]) + fabs64(a[2][2])) { break; }
+        // the rotation that clears a[p][q], without trigonometry
+        let th = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+        let t = (if th >= 0.0 { 1.0 } else { -1.0 }) / (fabs64(th) + sqrt64(th * th + 1.0));
+        let c = 1.0 / sqrt64(t * t + 1.0); let s = t * c;
+        for k in 0..3 { let (akp, akq) = (a[k][p], a[k][q]); a[k][p] = c * akp - s * akq; a[k][q] = s * akp + c * akq; }
+        for k in 0..3 { let (apk, aqk) = (a[p][k], a[q][k]); a[p][k] = c * apk - s * aqk; a[q][k] = s * apk + c * aqk; }
+        for k in 0..3 { let (vkp, vkq) = (v[k][p], v[k][q]); v[k][p] = c * vkp - s * vkq; v[k][q] = s * vkp + c * vkq; }
+    }
+    ([a[0][0], a[1][1], a[2][2]], [[v[0][0], v[1][0], v[2][0]], [v[0][1], v[1][1], v[2][1]], [v[0][2], v[1][2], v[2][2]]])
 }
 /// Young's modulus of brick `i` (Pa). A timber floor is joists (50 x 225 mm at 400 mm): its plate has the
 /// bending stiffness of the joists, about a tenth of solid timber's.
@@ -520,7 +579,7 @@ fn spring(b: &Bricks, nodes: &[Node], l: &Link) -> Spring {
     // in the face's frame: normal, two shears; torsion, bending about u (stresses vary along w), about w
     let kl = [sec.area / comp, sec.area / gcomp, sec.area / gcomp];
     let krl = [sec.j / gcomp, sec.iu / comp, sec.iw / comp];
-    let (mut k, mut kr, gen) = if ax < 3 {
+    let (mut k, mut kr, mut gen_fr) = if ax < 3 {
         let (u, w) = ((ax + 1) % 3, (ax + 2) % 3);
         let (mut k, mut kr) = ([0.0; 3], [0.0; 3]);
         k[ax] = kl[0]; k[u] = kl[1]; k[w] = kl[2]; kr[ax] = krl[0]; kr[u] = krl[1]; kr[w] = krl[2];
@@ -544,10 +603,38 @@ fn spring(b: &Bricks, nodes: &[Node], l: &Link) -> Spring {
     // bending both ways, a 3.25 m bay under 40 kPa came out at a third of its strength; with the boards soft but
     // the deck still twisting as a solid plate, 0.68 (torsion about the joists carried a third of the load to the
     // walls along the bay's sides)
+    // A free piece's side of a face at an angle to it (a brace's end cut level on a footing) is a bar from its
+    // centroid to the face: along that line it is stretched, across it sheared, over its true section A |n . r|
+    // (taken along the face's normal, a brace force crossing a level cut at 40 degrees sheared the brace's whole
+    // length to the cut: a braced portal frame came out half as stiff as frame plus brace). The two halves'
+    // compliances add as tensors; the stiffness is that sum's inverse, in its own frame. Rotation keeps the face's.
+    let free = |i: usize| b.hull[i] == crate::brick::HULL_FREE;
+    let mut frr = None;
+    if l.geo.is_some() && (free(ia) || free(ib)) {
+        let mut cm = [[0.0f64; 3]; 3];
+        for (p, e, side_free) in [(pa, ea, free(ia)), (pb, eb, free(ib))] {
+            let r = [c[0] - p[0], c[1] - p[1], c[2] - p[2]];
+            let rl = sqrt64(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+            let (dir, len, area) = if side_free && rl > 1e-9 {
+                let d = [r[0] / rl, r[1] / rl, r[2] / rl];
+                let cs = fabs64(d[0] * n[0] + d[1] * n[1] + d[2] * n[2]).max(0.1);
+                (d, rl.max(0.5 * t), sec.area * cs)
+            } else { (n, along(p), sec.area) };
+            for i in 0..3 { for j in 0..3 {
+                let dd = dir[i] * dir[j];
+                let id = if i == j { 1.0 } else { 0.0 };
+                cm[i][j] += len / (e * area) * dd + len / (0.4 * e * area) * (id - dd);
+            } }
+        }
+        let (vals, vecs) = eig3(cm);
+        k = [f / vals[0], f / vals[1], f / vals[2]];
+        frr = Some(fr);
+        gen_fr = Some(vecs);
+    }
     let tf = |i: usize| b.mat[i] == mat::TIMBER && b.paint[i] == 8;
     if tf(ia) && tf(ib) && ax == 2 { kr[0] *= 0.05; kr[2] *= 0.05; }
     if tf(ia) && tf(ib) && ax == 0 { kr[0] *= 0.05; }
-    Spring { c, ra: [c[0] - pa[0], c[1] - pa[1], c[2] - pa[2]], rb: [c[0] - pb[0], c[1] - pb[1], c[2] - pb[2]], k, kr, fr: gen }
+    Spring { c, ra: [c[0] - pa[0], c[1] - pa[1], c[2] - pa[2]], rb: [c[0] - pb[0], c[1] - pb[1], c[2] - pb[2]], k, kr, fr: gen_fr, frr }
 }
 /// Stress over strength of a face (section `s`) under force `f` and moment `m` on the max side, in the face's frame
 /// (normal, u, w; N and N m): the worst of

@@ -379,6 +379,8 @@ fn stair(s: &mut Storey, floor: i32) {
 /// Build the tower: `storeys` storeys plus the roof with its penthouse. Returns the brick store with joints.
 pub fn build(storeys: i32, structure: u16) -> Bricks { build_kind(storeys, structure, 0) }
 pub fn build_kind(storeys: i32, structure: u16, kind: u8) -> Bricks {
+    // kind 4: the complex building, of boxes and free pieces at any angle (crate::complex); its size is its own
+    if kind == 4 { return crate::complex::build(); }
     let mut b = Bricks::new();
     for k in 0..=storeys {
         let mut s = Storey::new(k * STOREY);

@@ -50,7 +50,7 @@ button:disabled { opacity: .5; cursor: default; }
 </div>
 <div class="settings" id="settings" hidden>
   <h2>Settings</h2>
-  <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option><option value="3">mixed: brick, steel, concrete, timber · 5 storeys</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
+  <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option><option value="3">mixed: brick, steel, concrete, timber · 5 storeys</option><option value="4">complex: braced steel frame, timber roof, stone arcade · 2 storeys</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
   <label>Quality <select id="s-preset"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">sets the debris budgets, physics sub-steps, solver colours and shadows; the sliders below fine-tune</span></label>
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
@@ -134,18 +134,29 @@ const LAB_SCENARIOS = {
   // the clean-up distance, short: a steel ball fired at the facade from 30 m goes once it has flown 15 m from where
   // it was fired (a blast into a cut building's rubble threw nothing 8 m: the scenario must throw something)
   far: { kind: 0, storeys: 3, frames: 240, far: 15, title: 'concrete frame, 3 storeys: a steel ball fired from 30 m, clean-up distance 15 m', script: [[10, 'ball', [-4, 4, -30, 0.15, 0.02]]], expect: { far: true } },
+  // the complex building (kind 4, docs/PHASE2.md): steel frame with free-piece braces, a roof of rafters and boards
+  // at 26 degrees, an arcade of stone arches; the ground storey and the arcade's piers cut
+  complex: { kind: 4, storeys: 3, frames: 600, title: 'complex (braced steel frame, pitched timber roof, stone arcade): the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
+  // the frame's north-east corner column shot out at 1.5 m (four shots of the 0.7 m tool from the east)
+  complexcol: { kind: 4, storeys: 3, frames: 600, title: 'complex: the north-east corner column shot out', script: [20, 24, 28, 32].map(f => [f, 'blast', [16, 1.5, 6, -1, 0, 0, 0.7]]), expect: { settle: true } },
+  // a 1.5 m blast in a first-floor room (from the south, over the arcade, into the west bay: its cabinet)
+  complexroom: { kind: 4, storeys: 3, frames: 600, title: 'complex: a blast in a first-floor room', script: [[20, 'blast', [-6, 5.5, -16, 0, 0, 1, 1.5]]], expect: { settle: true } },
+  // the keystone of the arcade's third arch knocked out (a 0.5 m shot from the south: a 0.3 m one took 7 crumbs off it,
+  // and the arch stood): the arch falls, the beam over it
+  // hangs on its neighbours
+  keystone: { kind: 4, storeys: 3, frames: 480, title: 'complex: an arch of the arcade loses its keystone', script: [[20, 'blast', [-1.5, 4.3, -16, 0, 0, 1, 0.5]]], expect: { settle: true } },
   rubble: { kind: 0, storeys: 3, frames: 720, title: 'concrete frame, 3 storeys: cut, then a blast into the rubble', script: [[0, 'cut'], [480, 'blast', [-14, 6, -14, 1, -0.45, 1, 2.5]]], expect: { settle: true } },
 };
-const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'rubble', 'nibble', 'far'] };
+const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble', 'far'], complex: ['complex', 'complexcol', 'complexroom', 'keystone'] };
 let LABSTATE = null; try { LABSTATE = JSON.parse(localStorage.getItem('sf-lab') || 'null'); } catch (e) {}
 if (LABSTATE && !(LABSTATE.queue && LABSTATE.queue.length && LAB_SCENARIOS[LABSTATE.queue[0]])) LABSTATE = null;
 const LAB = { on: false, t: 0, f: 0 };
 // game time: the real clock, or the lab's virtual one
 const clock = () => (LAB.on ? LAB.t : performance.now());
 let KIND = 0; try { KIND = +(JSON.parse(localStorage.getItem('sf-settings') || '{}').kind || 0); } catch (e) {}
-if (![0, 1, 2, 3].includes(KIND)) KIND = 0;
+if (![0, 1, 2, 3, 4].includes(KIND)) KIND = 0;
 if (LABSTATE) KIND = LAB_SCENARIOS[LABSTATE.queue[0]].kind;
-const STOREYS = LABSTATE ? LAB_SCENARIOS[LABSTATE.queue[0]].storeys : [12, 5, 6, 5][KIND];
+const STOREYS = LABSTATE ? LAB_SCENARIOS[LABSTATE.queue[0]].storeys : [12, 5, 6, 5, 3][KIND];
 let E = null, gpu = null, dev = null, slots = new Map(), debrisFrom = 2;
 let radius = 0.7, fly = false, locked = false, yaw = Math.PI, pitch = 0, physicsPaused = true, lastActive = -1e9;
 const keys = new Set();
@@ -211,14 +222,17 @@ scene.add(dMesh);
 // convex chunks: one instanced mesh per cell of the library (made when first needed), drawn from the same
 // read-backs; a chunk's instance is its cell in [-1,1]^3, scaled by the shape's h
 const hullMeshes = new Map(), HULL_CAP = 16384;
+// (a runtime hull is one free piece's shape, shared only by identical members: 256 instances, not the library's
+// 16,384, whose buffers take 1.2 MB a mesh)
+const hullCap = (id) => id >= GpuWorld.hulls.lib ? 256 : HULL_CAP;
 function hullMesh(id) {
   let m = hullMeshes.get(id); if (m) return m;
   const H = GpuWorld.hulls.hulls[id], pos = [];
   for (const f of H.faces) for (let t = 1; t + 1 < f.v.length; t++) for (const i of [f.v[0], f.v[t], f.v[t + 1]]) pos.push(...H.V[i]);
   const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.computeVertexNormals();
-  m = new THREE.InstancedMesh(g, dMesh.material, HULL_CAP);
+  m = new THREE.InstancedMesh(g, dMesh.material, hullCap(id));
   m.instanceMatrix.setUsage(THREE.DynamicDrawUsage); m.count = 0; m.frustumCulled = false; m.castShadow = true; m.receiveShadow = true;
-  m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(HULL_CAP * 3).fill(1), 3); m.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(hullCap(id) * 3).fill(1), 3); m.instanceColor.setUsage(THREE.DynamicDrawUsage);
   scene.add(m); hullMeshes.set(id, m); return m;
 }
 // where each read-back shape is drawn: box (-1) or a chunk mesh, and its instance there
@@ -228,7 +242,7 @@ function drawTargets(r) {
   for (let k = 0; k < n; k++) {
     const sh = gpu.shapes[r.slots[k] - 1], h = sh && sh.hull ? sh.hull : 0;
     if (!h) { tgt[k] = -1; idx[k] = nb++; continue; }
-    const c = cnt.get(h) || 0; if (c >= HULL_CAP) { tgt[k] = -2; continue; }
+    const c = cnt.get(h) || 0; if (c >= hullCap(h)) { tgt[k] = -2; continue; }
     tgt[k] = h; idx[k] = c; cnt.set(h, c + 1);
   }
   r.tgt = tgt; r.tidx = idx; r.nBox = nb; r.hullCount = cnt;
@@ -400,14 +414,14 @@ function drawDebris(now) {
         const sc = Math.cbrt(1 / GpuWorld.hulls.hulls[hid].vol); SS.multiplyScalar(sc);
         M4.compose(PP, QQ, SS);
         const c = (r.hullCount ? r.hullCount.get(hid) || 0 : 0) + (pHull.get(hid) || 0);
-        if (c < HULL_CAP) { const m = hullMesh(hid); m.setMatrixAt(c, M4); m.setColorAt(c, debrisColour(inf.col || 0, i)); pHull.set(hid, (pHull.get(hid) || 0) + 1); }
+        if (c < hullCap(hid)) { const m = hullMesh(hid); m.setMatrixAt(c, M4); m.setColorAt(c, debrisColour(inf.col || 0, i)); pHull.set(hid, (pHull.get(hid) || 0) + 1); }
       } else if (nb + np2 < MAXD) { M4.compose(PP, QQ, SS); dMesh.setMatrixAt(nb + np2, M4); np2++; }
       if (lab) labDrawn(-(pr.gens[k] * 1048576 + i) - 1, PP.x, PP.y, PP.z, Math.hypot(d[o + 3], d[o + 4], d[o + 5]), vol);
     }
   }
   dMesh.count = nb + np2; debrisShapes = n; particlesDrawn = np;
   dMesh.instanceMatrix.updateRange.count = (nb + np2) * 16; dMesh.instanceMatrix.needsUpdate = true;
-  for (const [h, m] of hullMeshes) { const c = Math.min(HULL_CAP, (r.hullCount ? r.hullCount.get(h) || 0 : 0) + (pHull.get(h) || 0)); m.count = c; if (c) { m.instanceMatrix.updateRange.count = c * 16; m.instanceMatrix.needsUpdate = true; if (pHull.get(h)) { m.instanceColor.updateRange.count = c * 3; m.instanceColor.needsUpdate = true; } } }
+  for (const [h, m] of hullMeshes) { const c = Math.min(hullCap(h), (r.hullCount ? r.hullCount.get(h) || 0 : 0) + (pHull.get(h) || 0)); m.count = c; if (c) { m.instanceMatrix.updateRange.count = c * 16; m.instanceMatrix.needsUpdate = true; if (pHull.get(h)) { m.instanceColor.updateRange.count = c * 3; m.instanceColor.needsUpdate = true; } } }
 }
 
 // ---- the static tower, falling pieces and their breaking
@@ -451,11 +465,27 @@ function boxShape(f, o) {
   // cell of the hull library (the engine's and the GPU's are the same, gpu/test_hulls.cjs), mapped into the box
   const p = [(x + sx / 2) * TICK, (y + sy / 2) * TICK, (z + sz / 2) * TICK], h = [sx * TICK / 2, sy * TICK / 2, sz * TICK / 2];
   const hull = Math.floor(code / 512), s = { p, q: [0, 0, 0, 1], h, mat: code & 15, col: code & 255, hull: 0 };
-  if (hull && GpuWorld.hulls && hull < GpuWorld.hulls.count) {
+  // a free piece (docs/PHASE2.md): 256 + its index in the engine; its shape is its own hull, turned
+  if (hull >= 256) { const ps = pieceShapeOf(hull - 256, code); if (ps) return ps; piecesAsBoxes++; return s; }
+  if (hull && GpuWorld.hulls && hull < GpuWorld.hulls.lib) {
     const bx = GpuWorld.hulls.hulls[hull].box;
     s.p = p.map((c, k) => c + bx.c[k] * h[k]); s.h = h.map((x, k) => x * bx.h[k]); s.hull = hull;
   }
   return s;
+}
+// Free piece k of the engine as a GPU shape (GpuWorld.pieceShape: its hull registered by its corners), or null
+// beyond the GPU's hull limits or with the runtime hull slots full (then it is its box: counted in piecesAsBoxes)
+let piecesAsBoxes = 0;
+function pieceShapeOf(k, code) {
+  if (!E || !E.piece_shape || !GpuWorld.pieceShape) return null;
+  const n = E.piece_shape(k); if (!n) return null;
+  const f = new Float32Array(E.memory.buffer, E.piece_ptr(), n).slice();
+  const centre = [f[0], f[1], f[2]], q = [f[3], f[4], f[5], f[6]], nv = f[7];
+  const corners = []; let o = 8;
+  for (let i = 0; i < nv; i++, o += 3) corners.push([f[o], f[o + 1], f[o + 2]]);
+  const nf = f[o++], loops = [];
+  for (let i = 0; i < nf; i++) { const c = f[o++]; loops.push(Array.from(f.subarray(o, o + c))); o += c; }
+  return GpuWorld.pieceShape(corners, loops, centre, q, code & 15, code & 255);
 }
 // a shape's volume (a cell: its share of its own box)
 const shapeVol = (s) => 8 * s.h[0] * s.h[1] * s.h[2] * (s.hull ? GpuWorld.hulls.hulls[s.hull].vol : 1);
@@ -465,7 +495,7 @@ function applyStatic(updates) {
     const [idx, alive] = [u[0], u[1]];
     const s = boxShape(u, 2);
     // (a brick split into convex cells: each cell is a brick of its own, a hull shape)
-    if (alive) slots.set(idx, gpu.setStaticShape(slots.get(idx) ?? null, 1, s.p, s.h, s.mat, s.hull));
+    if (alive) slots.set(idx, gpu.setStaticShape(slots.get(idx) ?? null, 1, s.p, s.h, s.mat, s.hull, s.q));
     else if (slots.has(idx)) {
       gpu.killShape(slots.get(idx)); slots.delete(idx);
       // what rested on it must fall: woken round the brick (30 cm), not the whole world (which never came to rest
@@ -569,7 +599,8 @@ function addPieces(list, xf, vel, cool) {
     const shapes = b.boxes.map((bx) => {
       const s = boxShape(bx, 0);
       const w = mv(R, [s.p[0] - C[0], s.p[1] - C[1], s.p[2] - C[2]]);
-      s.p = [T[0] + w[0], T[1] + w[1], T[2] + w[2]]; s.q = qs;
+      // (a free piece's shape is turned in the structure: its rotation follows the piece's)
+      s.p = [T[0] + w[0], T[1] + w[1], T[2] + w[2]]; s.q = s.hull >= GpuWorld.hulls.lib ? qmul(qs, s.q) : qs;
       // (a cell's mass is at its centroid, not its box's centre: near enough for the velocity it starts with)
       const vol = shapeVol(s); m += vol; for (let k = 0; k < 3; k++) c[k] += vol * s.p[k];
       return s;
@@ -584,7 +615,7 @@ function addPieces(list, xf, vel, cool) {
     const w = mv(R, [s.p[0] - C[0], s.p[1] - C[1], s.p[2] - C[2]]);
     const c = [T[0] + w[0], T[1] + w[1], T[2] + w[2]];
     const v = vel ? vel(c, b) : { v: [0, 0, 0], w: [0, 0, 0] };
-    return { e: { p: c, v: v.v, w: v.w, q: qs, r: Math.cbrt(6 * shapeVol(s) / 8 / Math.PI), mat: s.mat, wait: !!xf }, s };
+    return { e: { p: c, v: v.v, w: v.w, q: s.hull >= GpuWorld.hulls.lib ? qmul(qs, s.q) : qs, r: Math.cbrt(6 * shapeVol(s) / 8 / Math.PI), mat: s.mat, wait: !!xf }, s };
   });
   const parts = gpu.addParticles ? gpu.addParticles(pent.map(x => x.e)) : [];
   for (const b of pl) { const k = b.id === -2 ? 'spill' : b.id < 0 ? 'crumb' : 'piece'; partsBy[k] = (partsBy[k] || 0) + 1; }   // (where particles come from)
@@ -634,8 +665,10 @@ onmessage = async (m) => {
   const out = d.op === 'snap' ? Float32Array.from(d.outs) : new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
   const plans = new Float32Array(E.memory.buffer, E.plan_ptr(), E.plan_len()).slice();
   let snap = null;
-  if (n > 0) { const len = E.snap_save(); snap = new Uint8Array(E.memory.buffer, E.snap_ptr(), len).slice(); }
-  const r = { op: d.op, n, out, snap, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans, ms: performance.now() - t0 };
+  // (a structure step that failed nothing may still send pieces off: loose room contents, at the first one)
+  const detached = d.op === 'structure' && E.last_detached ? E.last_detached() : 0;
+  if (n > 0 || detached > 0) { const len = E.snap_save(); snap = new Uint8Array(E.memory.buffer, E.snap_ptr(), len).slice(); }
+  const r = { op: d.op, n, detached, out, snap, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans, ms: performance.now() - t0 };
   postMessage(r, snap ? [out.buffer, snap.buffer, plans.buffer] : [out.buffer, plans.buffer]);
 };`;
 let worker = null, busy = null;
@@ -660,7 +693,7 @@ function runInline(job) {
   else if (job.op === 'pblast') n = E.piece_blast(job.piece, job.x, job.y, job.z, job.r);
   else if (job.op === 'snap') { const o = []; for (const pc of job.pieces) { n += E.piece_snap(pc); o.push(...new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len())); } job.outs = o; }
   else { const p = E.impacts_in(job.recs.length / 11); new Float32Array(E.memory.buffer, p, job.recs.length).set(job.recs); n = E.impacts(job.dt); }
-  return { op: job.op, n, out: job.op === 'snap' ? Float32Array.from(job.outs) : new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans: new Float32Array(E.memory.buffer, E.plan_ptr(), E.plan_len()).slice(), ms: performance.now() - t0, inline: true };
+  return { op: job.op, n, detached: job.op === 'structure' && E.last_detached ? E.last_detached() : 0, out: job.op === 'snap' ? Float32Array.from(job.outs) : new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans: new Float32Array(E.memory.buffer, E.plan_ptr(), E.plan_len()).slice(), ms: performance.now() - t0, inline: true };
 }
 // Rubble lying on the building weighs on it: once a second the weight of the debris at rest (bodies slower than
 // 0.5 m/s and particles asleep) goes to the engine with a structure check, binned in 0.5 m cells; the engine
@@ -898,8 +931,9 @@ function onStructure(r) {
   structRounds++;
   if (r.wearing > 0) wearNext = clock() + WEAR_EVERY;
   structWearing = r.wearing || 0; wornJoints = r.worn || 0;
-  if (r.n === 0) return;
-  jobs.structure = true;
+  if (r.n === 0 && !r.detached) return;
+  // (another round only after failures: pieces sent off with none, loose contents, need none)
+  if (r.n > 0) jobs.structure = true;
   failedJoints += r.n;
   const { updates, bodies } = readStatic(r.out);
   remeshDirty();
@@ -1298,7 +1332,7 @@ function benchShow(done) {
   const r = BENCH.rows, last = r[r.length - 1] || {};
   const fm = BENCH.frameMs.slice().sort((a, b) => a - b), pct = (q) => fm.length ? fm[Math.min(fm.length - 1, Math.floor(q * fm.length))] : 0;
   const lines = [];
-  lines.push(`Shatterforge benchmark · ${['concrete frame', 'masonry', 'mass timber', 'mixed'][KIND]}, ${STOREYS} storeys · ${new Date().toISOString().slice(0, 19)}Z`);
+  lines.push(`Shatterforge benchmark · ${['concrete frame', 'masonry', 'mass timber', 'mixed', 'complex'][KIND]}, ${STOREYS} storeys · ${new Date().toISOString().slice(0, 19)}Z`);
   lines.push(`${navigator.userAgent}`);
   if (BENCH.dispatchUs != null) lines.push(`one compute dispatch: ${BENCH.dispatchUs} µs`);
   if (window.__gpuInfo) lines.push(`GPU: ${[window.__gpuInfo.vendor, window.__gpuInfo.architecture, window.__gpuInfo.device, window.__gpuInfo.description].filter(Boolean).join(' · ') || 'not told'}`);
@@ -1320,7 +1354,7 @@ function benchShow(done) {
     const rm = BENCH.restMs.slice().sort((a, b) => a - b), rg = BENCH.restGpu.slice().sort((a, b) => a - b), med = (a) => a.length ? a[a.length >> 1] : 0;
     lines.push(BENCH.settledAt != null ? `settled (nothing awake) at ${BENCH.settledAt.toFixed(1)} s · at rest: frame median ${med(rm).toFixed(1)} ms, GPU ${med(rg).toFixed(2)} ms` : `not settled by ${(BENCH.settleEnd / 60).toFixed(0)} s: ${gpu.stats.awake || 0} bodies and ${gpu.stats.pActive || 0} particles still awake`);
     // the same as data, for bench/ (paste it back)
-    BENCH.json = { date: new Date().toISOString(), ua: navigator.userAgent, gpu: window.__gpuInfo || null, building: { kind: ['concrete frame', 'masonry', 'mass timber', 'mixed'][KIND], storeys: STOREYS }, settings: { ...setting }, cut_s: +(BENCH.cutMs / 1000).toFixed(2), realtime: +(simT / wallT).toFixed(3), frame_ms: { median: +pct(0.5).toFixed(2), p95: +pct(0.95).toFixed(2), worst: +pct(1).toFixed(2) }, gpu_worst_ms: +BENCH.gpuMax.toFixed(2), dispatch_us: BENCH.dispatchUs, settled_s: BENCH.settledAt, rest: { frame_ms: +med(rm).toFixed(2), gpu_ms: +med(rg).toFixed(3) }, rows: r };
+    BENCH.json = { date: new Date().toISOString(), ua: navigator.userAgent, gpu: window.__gpuInfo || null, building: { kind: ['concrete frame', 'masonry', 'mass timber', 'mixed', 'complex'][KIND], storeys: STOREYS }, settings: { ...setting }, cut_s: +(BENCH.cutMs / 1000).toFixed(2), realtime: +(simT / wallT).toFixed(3), frame_ms: { median: +pct(0.5).toFixed(2), p95: +pct(0.95).toFixed(2), worst: +pct(1).toFixed(2) }, gpu_worst_ms: +BENCH.gpuMax.toFixed(2), dispatch_us: BENCH.dispatchUs, settled_s: BENCH.settledAt, rest: { frame_ms: +med(rm).toFixed(2), gpu_ms: +med(rg).toFixed(3) }, rows: r };
     LAB.copyText = lines.join('\n') + '\n\n' + JSON.stringify(BENCH.json);
     $('bench-title').textContent = 'Benchmark: done';
   }
@@ -1422,7 +1456,7 @@ __LAB_JS__
     const bytes = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
     E = (await WebAssembly.instantiate(bytes, {})).instance.exports;
     E.game_new_kind(STOREYS, KIND);
-    $('title').textContent = ['A 12-storey concrete-frame tower at real scale', 'A 5-storey masonry building at real scale', 'A 6-storey mass-timber building at real scale', 'A 5-storey building of brick, steel, concrete and timber at real scale'][KIND];
+    $('title').textContent = ['A 12-storey concrete-frame tower at real scale', 'A 5-storey masonry building at real scale', 'A 6-storey mass-timber building at real scale', 'A 5-storey building of brick, steel, concrete and timber at real scale', 'A braced steel frame with a pitched timber roof and a masonry arcade, at real scale'][KIND];
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
     if (!LABSTATE) await startWorker(bytes);   // (the lab runs the engine inline, its jobs delayed by whole frames)
     initSettings(); initDiag(); initPreset();
@@ -1442,6 +1476,8 @@ __LAB_JS__
         if (window.__colR) { const [x, y] = window.__colR.split(',').map(Number); gpu.colRoundsS = x; gpu.colRounds = y; }   // (debugging: the colour rounds)
         gpu.substeps = setting.substeps || 12; gpu.maxColors = setting.colors || 16; gpu.colorLimit = Math.min(gpu.colorLimit, gpu.maxColors);
         idx.forEach((b, k) => slots.set(b, k + 1));
+        // (loose room contents, kind 4: the first structure step sends them off as bodies resting where they stand)
+        if (E.loose_pending && E.loose_pending()) jobs.structure = true;
       }
     }
     if (!gpu) $('warn').textContent = 'WebGPU is not available in this browser: holes still work, but loose pieces are not simulated.';

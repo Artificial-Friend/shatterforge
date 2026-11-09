@@ -24,6 +24,7 @@ pub type Set<K> = hashbrown::HashSet<K, core::hash::BuildHasherDefault<Fx>>;
 pub mod brick;
 pub mod phys;
 pub mod tower;
+pub mod complex;
 pub mod mesh;
 pub mod player;
 pub mod game;

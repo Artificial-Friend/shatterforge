@@ -61,7 +61,10 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
         let mut j = b.jhead[i as usize];
         while j != NONE {
             let ju = j as usize;
-            if b.jdmg[ju] & 1 != 0 {
+            // (seams on the grid's joints: a cracked joint to a free piece or between cells, axis 4 or 3, indexed past
+            // the box's three axes and panicked when a box's joint to an arch stone cracked; complex test
+            // an_arch_without_its_keystone_falls)
+            if b.jdmg[ju] & 1 != 0 && b.jaxis[ju] < 3 {
                 let a = b.jaxis[ju] as usize;
                 let o = b.tbox(b.joint_other(j, i));
                 let mut ov = TBox { min: [0; 3], max: [0; 3] };
@@ -149,7 +152,7 @@ fn cell_faces(b: &Bricks, i: u32, cl: &crate::hull::Cell, col: [f32; 3], m: &mut
 }
 /// The faces of a free piece, all of them but one lying on the ground (facing down at y = 0). (Faces against its
 /// neighbours: with its joints, docs/PHASE2.md step 5.)
-fn piece_faces(p: &crate::brick::Piece, col: [f32; 3], m: &mut Mesh) {
+fn piece_faces(p: crate::brick::PieceRef, col: [f32; 3], m: &mut Mesh) {
     for (n, poly) in p.world_faces() {
         if n[1] < -0.999 && poly.iter().all(|q| q[1].abs() < 1e-4) { continue; }
         let base = (m.v.len() / 9) as u32;

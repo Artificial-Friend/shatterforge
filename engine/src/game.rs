@@ -33,6 +33,13 @@ pub struct Game {
     pub player: Player,
     pub chunks: Vec<Mesh>,
     pub out: Vec<f32>,
+    /// a free piece's shape for the page (`piece_shape`), apart from `out` so it can be read while `out` is
+    pub piece_out: Vec<f32>,
+    /// loose bricks (room contents) not yet sent off as pieces: the next structure step detaches them even if
+    /// nothing failed
+    pub loose_pending: bool,
+    /// pieces the last structure step sent off (lost the ground, or loose contents)
+    pub last_detached: usize,
     pub dirty: (i32, i32),
     /// bricks of each falling piece (empty = retired)
     pub pieces: Vec<Vec<u32>>,
@@ -139,8 +146,9 @@ impl Game {
         let b = tower::build_kind(storeys, 1, kind);
         let n = (storeys + 2) as usize;
         let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, player: Player::new(v3(0.0, 0.26, -14.0)), chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, wearing: 0, worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
+                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, wearing: 0, worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
         for k in 0..n as i32 { g.remesh(k); }
+        g.loose_pending = (0..g.b.len()).any(|i| g.b.flags[i] & crate::brick::F_LOOSE != 0);
         g
     }
 
@@ -151,10 +159,25 @@ impl Game {
         self.chunks[k as usize] = mesh::build_filtered(&self.b, |b, i| { let y = b.y[i as usize] as i32; y >= y0 && y < y1 });
     }
 
-    /// A brick as [x, y, z, sx, sy, sz (ticks), material + 16 x paint].
+    /// A brick as [x, y, z, sx, sy, sz (ticks), material + 16 x paint + 512 x hull]. The hull is a library cell's
+    /// id (0 a box), or for a free piece 256 + its index in `Bricks::pieces` (its shape: `piece_shape`). (The code is
+    /// a float, exact to 2^24: up to 32,512 free pieces.)
     fn push_box(out: &mut Vec<f32>, b: &Bricks, i: u32) {
         let t = b.tbox(i);
-        out.extend_from_slice(&[t.min[0] as f32, t.min[1] as f32, t.min[2] as f32, (t.max[0] - t.min[0]) as f32, (t.max[1] - t.min[1]) as f32, (t.max[2] - t.min[2]) as f32, (b.mat[i as usize] as u32 + 16 * b.paint[i as usize] as u32 + 512 * b.hull[i as usize] as u32) as f32]);
+        let h = if b.hull[i as usize] == crate::brick::HULL_FREE { 256 + b.piece_of.get(&i).copied().unwrap_or(0).min(32_511) } else { b.hull[i as usize] as u32 };
+        out.extend_from_slice(&[t.min[0] as f32, t.min[1] as f32, t.min[2] as f32, (t.max[0] - t.min[0]) as f32, (t.max[1] - t.min[1]) as f32, (t.max[2] - t.min[2]) as f32, (b.mat[i as usize] as u32 + 16 * b.paint[i as usize] as u32 + 512 * h) as f32]);
+    }
+    /// Free piece `k` into `piece_out`: [centre (m) x y z, rotation x y z w, corners n, corners (m, its own frame
+    /// about the centre) ..., faces n, per face: corners n, corner indices ...]. Returns its length (0: no piece).
+    pub fn piece_shape(&mut self, k: u32) -> usize {
+        self.piece_out.clear();
+        let Some(p) = self.b.piece_k(k) else { return 0 };
+        let c = p.centre();
+        self.piece_out.extend_from_slice(&[c[0] as f32, c[1] as f32, c[2] as f32, p.q[0], p.q[1], p.q[2], p.q[3], p.v.len() as f32]);
+        for v in p.v { self.piece_out.extend_from_slice(v); }
+        self.piece_out.push(p.faces.len() as f32);
+        for f in p.faces { self.piece_out.push(f.len() as f32); for &i in f { self.piece_out.push(i as f32); } }
+        self.piece_out.len()
     }
 
     /// All static bricks: [n, (index, x, y, z, sx, sy, sz, material) ...] in ticks.
@@ -408,7 +431,9 @@ impl Game {
         let mut crumbs = self.shatter_pending();
         let keep = self.crumb_keep;
         let sp = self.shed(&mut crumbs, keep); self.spill.extend(sp);
-        let pieces = if work.is_empty() { Vec::new() } else { self.detach() };
+        let pieces = if work.is_empty() && !self.loose_pending { Vec::new() } else { self.detach() };
+        self.loose_pending = false;
+        self.last_detached = pieces.len();
         self.emit(&crumbs, &pieces);
         work.len()
     }
@@ -427,8 +452,9 @@ impl Game {
         if self.struct_dt <= 0.0 { return; }
         let dt = self.struct_dt.min(1.0);
         let failing: crate::Set<u32> = a.failed.iter().map(|&(j, _)| j).collect();
+        let beds: crate::Set<u32> = a.beds.iter().copied().collect();
         for &(j, r) in &a.ratios {
-            if r < SUSTAINED || r >= 1.0 || failing.contains(&j) { continue; }
+            if r < SUSTAINED || r >= 1.0 || failing.contains(&j) || beds.contains(&j) { continue; }
             let ju = j as usize;
             if ju >= self.b.jdmg.len() || self.b.ja[ju] == NONE { continue; }
             let s0 = sustained(self.b.mat[self.b.ja[ju] as usize]).min(sustained(self.b.mat[self.b.jb[ju] as usize]));
@@ -1006,7 +1032,8 @@ fn cut_section(b: &mut Bricks, set: &mut Vec<u32>, ax: usize, at_oriented: i32) 
             let i = set[k];
             let t = b.tbox(i);
             if t.min[ax] < plane && plane < t.max[ax] {
-                let m = b.split(i, ax, plane);
+                // (a free piece is cut by the plane itself, or not at all if the plane misses it)
+                let Some(m) = b.cut(i, ax, plane) else { continue };
                 let mut jj = b.jhead[m as usize];
                 while jj != NONE { if b.joint_other(jj, m) == i { b.fracture_joint(jj); break; } jj = b.joint_next(jj, m); }
                 set.push(m); n += 1;
