@@ -411,3 +411,13 @@ Fixes after the first real-GPU benchmark (bench/2026-11-08_linux-chrome152_nvidi
 
 **Last runs of phase 0** (software GPU, 960 frames, commit 4637074, removing a brick wakes only what is round it): both buildings settle, `collapse` at 15.3 s (roof 18.64 → 15.67 m, volume lost 0.1%), `mixed` at 15.5 s (roof 22.39 → 9.28 m this time, volume lost 0.7%; 27 rebounds and 12 launches while its upper part came down, crumbled share 0.54). GPU suite 38 of 38, determinism, `far` and `ball` pass.
 
+## 9 November: the complex building (kind 4, phase 2)
+
+Scenarios `complex`, `complexcol`, `complexroom`, `keystone` (suite `complex`; docs/PHASE2.md, step 6). Software GPU, 300 frames each, commit after "Particles take free pieces by their faces":
+- `complex` (the ground storey and the arcade's piers cut): the frame comes down, roof 10.89 -> 7.71 m by 5 s (2.7 m in a run before the last change: it is still falling at 5 s), volume lost 0.02% to dust. Open: 6 frames drawn below what exists and 2 above (holes and duplicates while parts are cut free, as in `collapse`'s 2, but more), 5 pieces moving further than their speed allows (crumbs: 1 to 5 from run to run; one by a ground-storey brace went up 0.47 m in a frame), 2 rebounds, not settled by 5 s.
+- `complexcol` (the north-east corner column shot out, four 0.7 m shots): passes; the braced frame carries the corner (0 joints failed).
+- `complexroom` (a 1.5 m blast in a first-floor room): passes; the blast takes the brace in front of the room apart (engine test: 0.127 m^3 of its 0.238) and nothing else fails.
+- `keystone` (the third arch's keystone shot out, 0.5 m): the arch falls (146 joints failed), and only settling fails: at 5 s stones of the east arches are still coming down (the engine test, without impacts, has those standing).
+
+The box buildings on the same build (quick suite, full length): `collapse` as at the end of phase 0 (2 frames drawn below, 7 jumps, 3 rebounds, 21 energy gains, not settled by 10 s; it settles at 15 s), `ball` passes, determinism OK. With particles taking every hull (the library's cells too) by its faces, `ball` had a crumb jump 0.31 m (limit 0.26): cells keep their boxes for particles (docs/GPU.md, Convex chunks).
+
