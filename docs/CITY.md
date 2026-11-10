@@ -33,6 +33,12 @@ Test `city::tests::the_city_is_what_it_should_be_and_stands` (native, release, b
 - In the 3 × 3 city, every kind appears and nothing fails under its own weight.
 - An 8 × 8 city (`bigger_cities_cost`, ignored by default; same machine) has 57,924 bricks and 5.3 MB of bricks and joints. It builds in 1.8 s with meshes, and its first structure step takes 5.0 s (20.8 s with all lots analysed at once).
 
+## The dynamic structure by lot (branch `test`, docs/DYNAMIC.md)
+
+- Each lot keeps its own displacements, velocities and beds (`Game::dynst`), and is stepped on its own. A lot still moving stays active; the others cost nothing.
+- Test `dyn_tests::a_city_is_stepped_lot_by_lot` (native, release, build machine): the 3 × 3 city's first step solves its 9 lots at rest in 704–990 ms; at rest a step takes 0.2 ms. A column of the complex building shot out moves lot 0 only: at rest again after 87 steps (1.5 s), the slowest 28 ms.
+- The engineer's view (key V) colours every brick of the city by its load and draws the lots where their solutions put them: 7,539 bricks and 32,819 cells, 475 kB when it is switched on (every lot analysed once), then only the lots that change.
+
 ## Meshes by lot
 
 The static world is meshed in chunks a storey high, and in the city also by lot: chunk k is lot k / slices, slice k % slices (`game::Tiles`). A brick is in the chunk of its minimum corner. A change remeshes its own lot's slices, not the whole city's. The 3 × 3 city has 90 chunks.

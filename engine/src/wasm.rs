@@ -78,10 +78,13 @@ static mut SNAP: Vec<u8> = Vec::new();
     g.dirty = (lo.max(0), hi.min(g.chunks.len() as i32 - 1));
 }
 /// Settings: 0 crumbs kept per impacts call, 1 rubble fragments kept, 2 crush depth (m), 3 standing bricks split
-/// into convex cells at most (0: fracture leaves boxes).
+/// into convex cells at most (0: fracture leaves boxes), 7 the standing structure stepped dynamically (docs/DYNAMIC.md).
 #[no_mangle] pub extern "C" fn set_param(id: u32, v: f32) {
     let g = game();
-    match id { 0 => g.crumb_keep = (v.max(0.0) as usize).max(2), 1 => g.rubble_keep = v.max(0.0) as usize, 2 => g.crush_depth = v.max(0.0), 3 => g.frac_max = v.max(0.0) as usize, 4 => g.struct_dt = v.max(0.0), 5 => g.spill_on = v > 0.5, 6 => g.masonry_parts = v > 0.5, _ => {} }
+    match id { 0 => g.crumb_keep = (v.max(0.0) as usize).max(2), 1 => g.rubble_keep = v.max(0.0) as usize, 2 => g.crush_depth = v.max(0.0), 3 => g.frac_max = v.max(0.0) as usize, 4 => g.struct_dt = v.max(0.0), 5 => g.spill_on = v > 0.5, 6 => g.masonry_parts = v > 0.5, 7 => g.dynamic = v > 0.5,
+        // (the view asked for: the next structure step analyses every lot, so that all of them are drawn)
+        8 => { g.view_want = v > 0.5; if g.view_want { for a in g.active.iter_mut() { *a = true; } } }
+        _ => {} }
 }
 #[no_mangle] pub extern "C" fn game_mesh(on: u32) { game().mesh = on != 0; }
 #[no_mangle] pub extern "C" fn chunk_count() -> u32 { game().chunks.len() as u32 }
@@ -135,6 +138,19 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn loose_pending() -> u32 { game().loose_pending as u32 }
 #[no_mangle] pub extern "C" fn last_detached() -> u32 { game().last_detached as u32 }
 #[no_mangle] pub extern "C" fn structure_ratio() -> f32 { game().max_ratio }
+/// The structure as the engineer sees it (Game::view_out, view_apply): what the last structure step wrote, and in
+/// the page's copy room to take it, drawing it, and leaving the view.
+#[no_mangle] pub extern "C" fn view_ptr() -> *const f32 { game().view_out.as_ptr() }
+#[no_mangle] pub extern "C" fn view_len() -> u32 { game().view_out.len() as u32 }
+#[no_mangle] pub extern "C" fn view_in(n: u32) -> *mut f32 { let g = game(); g.view_in.clear(); g.view_in.resize(n as usize, 0.0); g.view_in.as_mut_ptr() }
+#[no_mangle] pub extern "C" fn view_apply(scale: f32, stress: u32) { game().view_apply(scale, stress != 0); }
+#[no_mangle] pub extern "C" fn view_off() { game().view_off(); }
+/// The dynamic structure after the last step: f 0 still moving (another step is due), 1 its fastest cell (m/s),
+/// 2 the solver's iterations (the lot that took most), 3 the cells' kinetic energy (J), 4 the largest displacement (m)
+#[no_mangle] pub extern "C" fn structure_dyn(f: u32) -> f32 {
+    let g = game();
+    match f { 0 => g.moving as u32 as f32, 1 => g.dyn_speed, 2 => g.dyn_its as f32, 3 => g.dyn_kinetic, 4 => g.dynst.values().map(|s| s.0.max_disp()).fold(0.0, f64::max) as f32, _ => 0.0 }
+}
 #[no_mangle] pub extern "C" fn structure_wearing() -> u32 { game().wearing as u32 }
 #[no_mangle] pub extern "C" fn worn_total() -> u32 { game().worn_total as u32 }
 #[no_mangle] pub extern "C" fn dup_bricks() -> u32 { game().dup_bricks as u32 }

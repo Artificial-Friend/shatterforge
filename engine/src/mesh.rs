@@ -46,16 +46,80 @@ pub fn colour(b: &Bricks, i: u32) -> [f32; 3] {
 
 pub fn build(b: &Bricks) -> Mesh { build_filtered(b, |_, _| true) }
 
+/// The structure as the engineer sees it (docs/DYNAMIC.md): each brick coloured by how near its worst joint or
+/// section is to its strength, and the building drawn where the structure's solution puts it, its displacements
+/// `scale` times as large (a building sags millimetres). The cells are those of the structure's last step.
+#[derive(Default)]
+pub struct View {
+    pub on: bool,
+    /// displacements drawn this many times as large (0: not drawn)
+    pub scale: f32,
+    /// colour by load / strength
+    pub stress: bool,
+    pub ratio: crate::Map<u32, f32>,
+    pub cells: crate::Map<u32, Vec<ViewCell>>,
+}
+/// A cell of a brick: its corners in x and z (ticks), its centre (m), displacement (m) and rotation (rad).
+#[derive(Clone, Copy)]
+pub struct ViewCell { pub lo: [i32; 2], pub hi: [i32; 2], pub c: [f32; 3], pub u: [f32; 3], pub r: [f32; 3] }
+impl View {
+    /// load / strength as a colour: blue (unloaded) to green (a third) to yellow (0.7, where joints begin to
+    /// wear) to red (at strength)
+    pub fn tint(r: f32) -> [f32; 3] {
+        let l = |a: [f32; 3], b: [f32; 3], t: f32| { let t = t.clamp(0.0, 1.0); [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t] };
+        let (c0, c1, c2, c3) = ([0.27, 0.42, 0.70], [0.30, 0.68, 0.36], [0.93, 0.80, 0.22], [0.86, 0.16, 0.13]);
+        if r < 0.35 { l(c0, c1, r / 0.35) } else if r < 0.7 { l(c1, c2, (r - 0.35) / 0.35) } else { l(c2, c3, (r - 0.7) / 0.3) }
+    }
+    /// where the structure's solution puts point p (m) of brick i, `scale` times its displacement: the mean over
+    /// the brick's cells that hold p (a point on the face between two cells belongs to both, so the brick stays
+    /// in one piece)
+    pub fn moved(&self, i: u32, p: [f32; 3]) -> [f32; 3] {
+        if self.scale == 0.0 { return p; }
+        let Some(cs) = self.cells.get(&i) else { return p };
+        let (tx, tz) = (p[0] / TICK, p[2] / TICK);
+        let (mut d, mut n) = ([0.0f32; 3], 0.0f32);
+        for pass in 0..2 {
+            for c in cs {
+                // (second pass, a point outside every cell: a convex cell's or a free piece's own corner, the one cell)
+                if pass == 0 && (tx < c.lo[0] as f32 - 0.01 || tx > c.hi[0] as f32 + 0.01 || tz < c.lo[1] as f32 - 0.01 || tz > c.hi[1] as f32 + 0.01) { continue; }
+                let q = [p[0] - c.c[0], p[1] - c.c[1], p[2] - c.c[2]];
+                d[0] += c.u[0] + c.r[1] * q[2] - c.r[2] * q[1];
+                d[1] += c.u[1] + c.r[2] * q[0] - c.r[0] * q[2];
+                d[2] += c.u[2] + c.r[0] * q[1] - c.r[1] * q[0];
+                n += 1.0;
+            }
+            if n > 0.0 { break; }
+        }
+        if n == 0.0 { return p; }
+        [p[0] + self.scale * d[0] / n, p[1] + self.scale * d[1] / n, p[2] + self.scale * d[2] / n]
+    }
+    /// brick i's cell boundaries along x and z (ticks), for cutting its faces where it bends
+    fn cuts(&self, i: u32) -> (Vec<i32>, Vec<i32>) {
+        let (mut xs, mut zs) = (Vec::new(), Vec::new());
+        if self.scale != 0.0 { if let Some(cs) = self.cells.get(&i) { for c in cs { xs.push(c.lo[0]); xs.push(c.hi[0]); zs.push(c.lo[1]); zs.push(c.hi[1]); } } }
+        xs.sort_unstable(); xs.dedup(); zs.sort_unstable(); zs.dedup();
+        (xs, zs)
+    }
+}
+
 /// Mesh of the live bricks that pass `keep` (a chunk of the store).
-pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
+pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh { build_view(b, keep, None) }
+/// As `build_filtered`, drawn as `view` shows the structure.
+pub fn build_view(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool, view: Option<&View>) -> Mesh {
+    let view = view.filter(|v| v.on);
     let mut m = Mesh::default();
     let mut rects: Vec<Rect> = Vec::new();
+    let mut cut: Vec<Rect> = Vec::new();
     for i in 0..b.len() as u32 {
         if !b.alive(i) || b.flags[i as usize] & crate::brick::F_DYNAMIC != 0 || !keep(b, i) { continue; }
         let tb = b.tbox(i);
-        let col = colour(b, i);
-        if let Some(cl) = b.cell(i) { cell_faces(b, i, cl, col, &mut m); continue; }
-        if let Some(p) = b.piece(i) { piece_faces(p, col, &mut m); continue; }
+        let v0 = m.v.len();
+        let col = match view { Some(v) if v.stress => View::tint(v.ratio.get(&i).copied().unwrap_or(0.0)), _ => colour(b, i) };
+        let cuts = view.map(|v| v.cuts(i));
+        // (a brick's vertices, once it is meshed: moved to where the structure puts them)
+        let finish = |m: &mut Mesh| { if let Some(v) = view { let mut o = v0; while o < m.v.len() { let q = v.moved(i, [m.v[o], m.v[o + 1], m.v[o + 2]]); m.v[o] = q[0]; m.v[o + 1] = q[1]; m.v[o + 2] = q[2]; o += 9; } } };
+        if let Some(cl) = b.cell(i) { cell_faces(b, i, cl, col, &mut m); finish(&mut m); continue; }
+        if let Some(p) = b.piece(i) { piece_faces(p, col, &mut m); finish(&mut m); continue; }
         // cracked joints of this brick (axis, plane, overlap box): drawn as dark seams where they meet its faces
         let mut cracks: Vec<(usize, i32, TBox)> = Vec::new();
         let mut j = b.jhead[i as usize];
@@ -95,6 +159,21 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
                 }
                 let plane = if side == 1 { tb.max[ax] } else { tb.min[ax] };
                 let mut n = [0.0f32; 3]; n[ax] = if side == 1 { 1.0 } else { -1.0 };
+                // (the view: a face is cut along the brick's cell boundaries, so that a slab drawn sagging bends)
+                if let Some((xs, zs)) = &cuts {
+                    for (d, lines) in [(0usize, xs), (2usize, zs)] {
+                        if d == ax { continue; }
+                        let along_u = d == u;
+                        for &c in lines.iter() {
+                            cut.clear();
+                            for &r in rects.iter() {
+                                let (lo, hi) = if along_u { (r[0], r[2]) } else { (r[1], r[3]) };
+                                if c > lo && c < hi { if along_u { cut.push([r[0], r[1], c, r[3]]); cut.push([c, r[1], r[2], r[3]]); } else { cut.push([r[0], r[1], r[2], c]); cut.push([r[0], c, r[2], r[3]]); } } else { cut.push(r); }
+                            }
+                            core::mem::swap(&mut rects, &mut cut);
+                        }
+                    }
+                }
                 for r in &rects {
                     let base = (m.v.len() / 9) as u32;
                     for (cu, cw) in [(r[0], r[1]), (r[2], r[1]), (r[2], r[3]), (r[0], r[3])] {
@@ -126,6 +205,7 @@ pub fn build_filtered(b: &Bricks, keep: impl Fn(&Bricks, u32) -> bool) -> Mesh {
                 }
             }
         }
+        finish(&mut m);
     }
     m
 }

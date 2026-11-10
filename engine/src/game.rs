@@ -18,6 +18,8 @@ use crate::tower;
 use alloc::vec;
 use alloc::vec::Vec;
 
+/// The longest dynamic step of the standing structure (s).
+pub const DYN_MAX_DT: f32 = 0.1;
 pub struct Game {
     pub b: Bricks,
     /// weight resting on the structure (rubble lying on floors), for the next structure_step: (x, y, z m, N)
@@ -82,6 +84,25 @@ pub struct Game {
     /// time since the last structure check (s): joints loaded near their strength wear for that long (see
     /// `wear_joints`); 0 = no wear (the tests' checks)
     pub struct_dt: f32,
+    /// the standing structure stepped as a dynamic model (structure::Dyn, docs/DYNAMIC.md): a structure step that
+    /// comes with the time since the last one (`struct_dt`) is a dynamic step of that long, `DYN_MAX_DT` at most
+    pub dynamic: bool,
+    /// each lot's displacements and velocities between dynamic steps (lot 0 where there are no lots)
+    pub dynst: crate::Map<usize, (structure::Warm, structure::Dyn)>,
+    /// after a structure step: is any lot still moving (another step is due), its fastest cell (m/s), the solver
+    /// iterations of the lot that took most, and the kinetic energy of the standing cells (J)
+    pub moving: bool,
+    pub dyn_speed: f32,
+    pub dyn_its: usize,
+    pub dyn_kinetic: f32,
+    /// the structure as the engineer sees it (mesh::View), in the page's copy of the engine
+    pub view: crate::mesh::View,
+    /// the engine's side of it: asked for (`view_want`), each structure step writes the analysed lots' bricks and
+    /// cells to `view_out`: [bricks n, (brick, load / strength) ..., cells n, (brick, corner x, z, far corner x, z
+    /// (ticks), centre x y z (m), displacement x y z (m), rotation x y z (rad)) ...]; `view_in` takes it in the page
+    pub view_want: bool,
+    pub view_out: Vec<f32>,
+    pub view_in: Vec<f32>,
     /// joints wearing at the last check (loaded above SUSTAINED of their strength)
     pub wearing: usize,
     /// a brick of each joint or face wearing in the last structure step
@@ -175,7 +196,7 @@ impl Game {
         let n = tiles.count();
         let start = if kind == 5 { let l = crate::city::layout(storeys); let x = if l.n % 2 == 1 { crate::city::PITCH_M / 2.0 } else { 0.0 }; v3(x, 0.26, 0.0) } else { v3(0.0, 0.26, -14.0) };
         let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, player: Player::new(start), tiles, active: vec![true; (tiles.n * tiles.n) as usize], tile_ratio: vec![0.0; (tiles.n * tiles.n) as usize], chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, wearing: 0, wearing_at: Vec::new(), worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
+                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, dynamic: false, dynst: Default::default(), moving: false, dyn_speed: 0.0, dyn_its: 0, dyn_kinetic: 0.0, view: Default::default(), view_want: false, view_out: Vec::new(), view_in: Vec::new(), wearing: 0, wearing_at: Vec::new(), worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
         for k in 0..n as i32 { g.remesh(k); }
         g.loose_pending = (0..g.b.len()).any(|i| g.b.flags[i] & crate::brick::F_LOOSE != 0);
         g
@@ -185,7 +206,7 @@ impl Game {
         if !self.mesh { return; }
         if k < 0 || k as usize >= self.chunks.len() { return; }
         let t = self.tiles;
-        self.chunks[k as usize] = mesh::build_filtered(&self.b, |b, i| t.holds(k, b.x[i as usize] as i32, b.y[i as usize] as i32, b.z[i as usize] as i32));
+        self.chunks[k as usize] = mesh::build_view(&self.b, |b, i| t.holds(k, b.x[i as usize] as i32, b.y[i as usize] as i32, b.z[i as usize] as i32), Some(&self.view));
     }
 
     /// A brick as [x, y, z, sx, sy, sz (ticks), material + 16 x paint + 512 x hull]. The hull is a library cell's
@@ -386,6 +407,37 @@ impl Game {
         } else { self.dirty = (0, -1); }
     }
 
+    /// The page's copy: take the view a structure step wrote (`view_in`, the format of `view_out`), draw it with
+    /// displacements `scale` times as large and, with `stress`, coloured by load, and remesh the chunks of the bricks
+    /// it names (`dirty`). Bricks it does not name keep what they had.
+    pub fn view_apply(&mut self, scale: f32, stress: bool) {
+        let d = core::mem::take(&mut self.view_in);
+        let was = self.view.on && self.view.scale == scale && self.view.stress == stress;
+        self.view.on = true; self.view.scale = scale; self.view.stress = stress;
+        let (mut klo, mut khi) = (i32::MAX, i32::MIN);
+        let mut o = 0usize;
+        let nb = if d.is_empty() { 0 } else { d[0] as usize }; o += 1;
+        let mut named: Vec<u32> = Vec::new();
+        for _ in 0..nb { if o + 1 >= d.len() { break; } let i = d[o] as u32; self.view.ratio.insert(i, d[o + 1]); self.view.cells.remove(&i); named.push(i); o += 2; }
+        let nc = if o < d.len() { d[o] as usize } else { 0 }; o += 1;
+        for _ in 0..nc {
+            if o + 13 >= d.len() { break; }
+            let i = d[o] as u32;
+            self.view.cells.entry(i).or_default().push(mesh::ViewCell { lo: [d[o + 1] as i32, d[o + 2] as i32], hi: [d[o + 3] as i32, d[o + 4] as i32], c: [d[o + 5], d[o + 6], d[o + 7]], u: [d[o + 8], d[o + 9], d[o + 10]], r: [d[o + 11], d[o + 12], d[o + 13]] });
+            o += 14;
+        }
+        if was {
+            for &i in &named { if (i as usize) < self.b.len() && self.b.alive(i) { let t = self.b.tbox(i); let k = self.tiles.chunk(t.min[0], t.min[1], t.min[2]); klo = klo.min(k); khi = khi.max(k); } }
+        } else { klo = 0; khi = self.chunks.len() as i32 - 1; }
+        if klo <= khi { for k in klo..=khi { self.remesh(k); } self.dirty = (klo.max(0), khi.min(self.chunks.len() as i32 - 1)); } else { self.dirty = (0, -1); }
+    }
+    /// The page's copy: the building as it is built again (all chunks remeshed).
+    pub fn view_off(&mut self) {
+        self.view = Default::default();
+        for k in 0..self.chunks.len() as i32 { self.remesh(k); }
+        self.dirty = (0, self.chunks.len() as i32 - 1);
+    }
+
     /// Detach everything no longer connected to the ground as pieces; returns their ids.
     fn detach(&mut self) -> Vec<u32> {
         // (a city: only its active lots, see `active`; rubble lying on a lot makes it active)
@@ -460,7 +512,35 @@ impl Game {
         }
         let _ = &mut load;
         let sink: Vec<bool> = set.iter().map(|&i| self.b.y[i as usize] <= 0).collect();
-        let a = if !lots { structure::analyse_warm(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0), Some(&mut self.warm)) } else {
+        // a dynamic step when the last step was a moment ago; after a longer gap the structure is solved at rest
+        // (the time since the last step, between a 120th of a second and `DYN_MAX_DT`: a structure at rest that is
+        // changed now moves from now, however long ago its last step was)
+        let h = if self.dynamic && self.struct_dt > 0.0 { (self.struct_dt as f64).clamp(1.0 / 120.0, DYN_MAX_DT as f64) } else { 0.0 };
+        self.moving = false; self.dyn_speed = 0.0; self.dyn_its = 0; self.dyn_kinetic = 0.0;
+        let a = if self.dynamic {
+            let mut by: crate::Map<usize, Vec<usize>> = Default::default();
+            for (k, &i) in set.iter().enumerate() { by.entry(if lots { tl.tile_of(self.b.x[i as usize] as i32, self.b.z[i as usize] as i32) as usize } else { 0 }).or_default().push(k); }
+            let mut keys: Vec<usize> = by.keys().copied().collect(); keys.sort_unstable();
+            let mut all: Option<structure::Analysis> = None;
+            for t in keys {
+                let ks = &by[&t];
+                let mut local = vec![NONE; set.len()]; for (n, &k) in ks.iter().enumerate() { local[k] = n as u32; }
+                let s2: Vec<u32> = ks.iter().map(|&k| set[k]).collect();
+                let l2: Vec<f32> = ks.iter().map(|&k| load[k]).collect();
+                let k2: Vec<bool> = ks.iter().map(|&k| sink[k]).collect();
+                let p2: Vec<(u32, f32, f32, f32)> = point.iter().filter(|p| local[p.0 as usize] != NONE).map(|p| (local[p.0 as usize], p.1, p.2, p.3)).collect();
+                let st = self.dynst.entry(t).or_default();
+                // (a lot not solved yet is solved at rest first: stepped from no displacement, its weight would land
+                // on it all at once)
+                st.1.h = if st.0.is_empty() { 0.0 } else { h };
+                st.1.want_cells = self.view_want;
+                let a = structure::analyse_dyn(&self.b, &s2, &l2, &p2, &k2, v3(0.0, -1.0, 0.0), Some(&mut st.0), Some(&mut st.1));
+                if st.1.moving() { self.moving = true; if lots && t < self.active.len() { self.active[t] = true; } }
+                self.dyn_speed = self.dyn_speed.max(st.1.speed as f32); self.dyn_its = self.dyn_its.max(st.1.its); self.dyn_kinetic += st.1.kinetic as f32;
+                all = Some(match all { None => a, Some(mut m) => { m.merge(a); m } });
+            }
+            all.unwrap_or_else(structure::Analysis::empty)
+        } else if !lots { structure::analyse_warm(&self.b, &set, &load, &point, &sink, v3(0.0, -1.0, 0.0), Some(&mut self.warm)) } else {
             // each lot on its own: nothing joins two lots, and the solver's accuracy is relative to what it solves
             // (all 25 lots of a 5 x 5 city at once, two complex buildings' arches came out as mechanisms, 2.25 and
             // 1.19 of strength, where on their own they stand at 0.66)
@@ -481,6 +561,20 @@ impl Game {
             all.unwrap_or_else(structure::Analysis::empty)
         };
         self.last_iterations = a.iterations;
+        // the view: every analysed brick's worst joint or section, and the cells as this step left them
+        self.view_out.clear();
+        if self.view_want {
+            let mut worst: crate::Map<u32, f32> = Default::default();
+            for &i in &set { worst.insert(i, 0.0); }
+            let mut up = |i: u32, r: f32| { if let Some(w) = worst.get_mut(&i) { if r > *w { *w = r; } } };
+            for &(j, r) in &a.ratios { let r = if r >= structure::DYN_CUT { 1.0 } else { r }; let (p, q) = (self.b.ja[j as usize], self.b.jb[j as usize]); if p != NONE { up(p, r); up(q, r); } }
+            for &(i, r) in &a.inner_all { up(i, r); }
+            for c in &a.cracks { up(c.brick, c.ratio.min(1.0)); }
+            self.view_out.push(worst.len() as f32);
+            for &i in &set { self.view_out.push(i as f32); self.view_out.push(worst[&i]); }
+            self.view_out.push(a.cells.len() as f32);
+            for (k, c, x) in &a.cells { self.view_out.extend_from_slice(&[k[0] as f32, k[1] as f32, k[2] as f32, k[3] as f32, k[4] as f32, c[0] as f32, c[1] as f32, c[2] as f32, x[0] as f32, x[1] as f32, x[2] as f32, x[3] as f32, x[4] as f32, x[5] as f32]); }
+        }
         // (the worst ratio with rubble on the floors: since the spring network, the building's worst)
         self.panel_ratio = a.max_ratio;
         self.max_ratio = a.max_ratio;
@@ -490,7 +584,7 @@ impl Game {
             // each analysed lot's worst ratio; a lot with joints wearing (or failing: they change it) stays active
             let tile_b = |b: &Bricks, i: u32| tl.tile_of(b.x[i as usize] as i32, b.z[i as usize] as i32) as usize;
             for (t, &on) in analysed.iter().enumerate() { if on { self.tile_ratio[t] = 0.0; } }
-            for &(j, r) in &a.ratios { let i = self.b.ja[j as usize]; if i == NONE { continue; } let t = tile_b(&self.b, i); self.tile_ratio[t] = self.tile_ratio[t].max(r); }
+            for &(j, r) in &a.ratios { let i = self.b.ja[j as usize]; if i == NONE || r >= structure::DYN_CUT { continue; } let t = tile_b(&self.b, i); self.tile_ratio[t] = self.tile_ratio[t].max(r); }
             for &(i, _, _, r) in &a.inner { let t = tile_b(&self.b, i); self.tile_ratio[t] = self.tile_ratio[t].max(r); }
             for &i in &self.wearing_at { let t = tile_b(&self.b, i); self.active[t] = true; }
             for &(j, _) in &a.failed { let i = self.b.ja[j as usize]; if i != NONE { let t = tile_b(&self.b, i); self.active[t] = true; } }

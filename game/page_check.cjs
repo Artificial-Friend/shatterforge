@@ -1,6 +1,7 @@
 // Checks of the page itself, as a player uses it (not the lab, which reads back every frame and so never rests):
 //   node game/page_check.cjs rest     the world at rest, then a click: the ball must fly and be read back
 //   node game/page_check.cjs debris   the player dropped onto a slab on the GPU (debris): it must stand on it
+//   node game/page_check.cjs view     the engineer's view (key V): the worker's structure step must send it, with cells
 // SF_NODE_MODULES: a node_modules folder with three (and Playwright installed), as for game/lab.cjs.
 //
 // rest: the complex building (kind 4) has furniture that falls asleep while the page still steps; the GPU then skips
@@ -24,6 +25,20 @@ const which = process.argv[2] || 'rest';
   await p.goto('file://' + html);
   for (let i = 0; i < 180; i++) { await new Promise(r => setTimeout(r, 1000)); if (await p.evaluate(() => !!gpu && !$('go').disabled)) break; }
   await p.evaluate(() => $('go').click());
+  if (which === 'view') {
+    // view: the engineer's view switched on with V. The worker must have the page's settings (the dynamic structure
+    // on: a line of the settings' start-up commented out by a comment added mid-line left every setting unapplied,
+    // the worker solved at rest and its view came with no cells: 370 bricks, 0 cells, sag 0), and the page must draw
+    // it. After: the view arrives with cells and the building's sag, and the page's copy of the engine holds it.
+    await p.evaluate(() => { const f0 = finishInner; window.__views = []; finishInner = (r) => { if (r.op === 'structure' && r.view) window.__views.push([r.view[0], r.view[1 + 2 * r.view[0]], r.sag]); return f0(r); }; });
+    await p.keyboard.press('KeyV');
+    let v = [];
+    for (let i = 0; i < 90; i++) { await new Promise(r => setTimeout(r, 1000)); v = await p.evaluate(() => window.__views); if (v.length) break; }
+    const shown = await p.evaluate(() => [viewShown, +setting.view, +setting.dynamic]);
+    const ok = !err && v.length > 0 && v[0][0] > 300 && v[0][1] > 300 && v[0][2] > 1e-5 && shown[0] && shown[1] === 1;
+    console.log(`${ok ? 'PASS' : 'FAIL'} view: ${v.length ? `${v[0][0]} bricks, ${v[0][1]} cells, sag ${(v[0][2] * 1000).toFixed(2)} mm` : 'no view came'}; shown ${shown[0]}, settings view ${shown[1]} dynamic ${shown[2]}${err ? '; page error: ' + err : ''}`);
+    await b.close(); process.exit(ok ? 0 : 1);
+  }
   if (which === 'debris') {
     // debris: a 3 x 0.3 x 3 m slab held 5 m up beside the building (a fixed body: debris that does not fall), the player
     // dropped onto it from 7 m. Before: the walker saw only the standing bricks and fell to the ground (feet at 0);

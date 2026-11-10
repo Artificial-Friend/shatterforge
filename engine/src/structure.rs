@@ -142,6 +142,7 @@ pub struct Crack { pub brick: u32, pub axis: usize, pub at: i32, pub ratio: f32 
 // ======================================================================================================
 
 pub const CELL: i32 = 16;
+#[cfg(test)] mod dyn_spike;
 
 pub struct Analysis {
     pub failed: Vec<(u32, f32)>,  // joints over strength, with their worst ratio
@@ -161,13 +162,19 @@ pub struct Analysis {
     /// the joints checked as stones' beds (`mortar_bed`): their ratio is where the thrust passes, which does not
     /// wear (an arch whose thrust runs at 0.7 of the way to the edge stands for centuries)
     pub beds: Vec<u32>,
+    /// with `Dyn::want_cells`: every face inside a brick, with its ratio (brick, load / strength)
+    pub inner_all: Vec<(u32, f32)>,
+    /// the free cells (`Dyn::want_cells`), see `Dyn::cells`
+    pub cells: Vec<([i32; 5], [f64; 3], [f64; 6])>,
+    /// a dynamic step: joints and faces cut because one side has left the structure (their ratio is `DYN_CUT`)
+    pub left_cut: usize,
 }
 impl Analysis {
-    pub fn empty() -> Analysis { Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: 0, nodes: 0, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new() } }
+    pub fn empty() -> Analysis { Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: 0, nodes: 0, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new(), cells: Vec::new(), inner_all: Vec::new(), left_cut: 0 } }
     /// add another part's analysis (a city's lots, each analysed on its own)
     pub fn merge(&mut self, o: Analysis) {
         self.failed.extend(o.failed); self.cracks.extend(o.cracks); self.ratios.extend(o.ratios); self.forces.extend(o.forces);
-        self.inner.extend(o.inner); self.beds.extend(o.beds);
+        self.inner.extend(o.inner); self.beds.extend(o.beds); self.cells.extend(o.cells); self.inner_all.extend(o.inner_all); self.left_cut += o.left_cut;
         self.max_ratio = self.max_ratio.max(o.max_ratio); self.iterations += o.iterations; self.nodes += o.nodes;
         if o.worst_in.0 > self.worst_in.0 { self.worst_in = o.worst_in; }
     }
@@ -235,12 +242,80 @@ pub fn analyse_at(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32
 pub struct Warm(crate::Map<(u32, i32, i32), [f64; 6]>);
 impl Warm {
     /// the largest displacement of any cell (m)
+    pub fn is_empty(&self) -> bool { self.0.is_empty() }
     pub fn max_disp(&self) -> f64 { self.0.values().map(|x| sqrt64(x[0] * x[0] + x[1] * x[1] + x[2] * x[2])).fold(0.0, f64::max) }
     /// a cell's displacement and rotation (brick, cell corner x, z ticks)
     pub fn get(&self, k: &(u32, i32, i32)) -> Option<&[f64; 6]> { self.0.get(k) }
 }
 /// As `analyse_at`, starting from (and keeping) the last solution in `warm`.
-pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32, f32)], sink: &[bool], dir: V3, warm: Option<&mut Warm>) -> Analysis {
+pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32, f32)], sink: &[bool], dir: V3, warm: Option<&mut Warm>) -> Analysis { analyse_dyn(b, set, load, point, sink, dir, warm, None) }
+
+/// The standing structure as a dynamic model (docs/DYNAMIC.md): its cells' velocities between steps, and the step.
+/// A step of `h` seconds is implicit Euler on the spring network,
+///     (K + M / h^2) x' = f + (M / h^2) (x + h v),   v' = (x' - x) / h,
+/// and M / h^2 is one more spring a cell, from its centre to the ground (translation m / h^2, rotation I / h^2): the
+/// dynamic step is the static network with those springs, solved by the same multigrid from x + h v, in at most
+/// `max_it` iterations. What follows:
+///   - a change (a column gone, a hit) is answered in the step it happens, at a bounded cost, and the forces rise
+///     over the frames the building takes to move (`structure::dyn_spike`: 4 iterations a step are within 5-7% of
+///     the step solved exactly from the first frame, on the 12-storey tower);
+///   - a mechanism is no longer a singular solve (a building on one column took 340 iterations): its part starts to
+///     move at the speed its weight gives it, and its joints fail as they stretch;
+///   - at rest nothing is solved: the step from a resting solution needs no iteration, and the cells stay where
+///     they are.
+#[derive(Default)]
+pub struct Dyn {
+    /// the step (s); 0 solves statically, as `analyse_warm`
+    pub h: f64,
+    /// iterations a step at most (0: `DYN_IT`)
+    pub max_it: usize,
+    /// each cell's velocity and spin (brick, cell corner x, z ticks), m/s and rad/s
+    pub vel: crate::Map<(u32, i32, i32), [f64; 6]>,
+    /// after a step: the fastest cell (m/s), the iterations it took, and whether it stopped at `max_it`
+    pub speed: f64,
+    pub its: usize,
+    pub capped: bool,
+    /// after a step: the cells' kinetic energy (J)
+    pub kinetic: f64,
+    /// after a step: the cells that left the structure (`DYN_TURN`, `DYN_MOVE`) and the joints cut for it
+    pub left: usize,
+    pub cut: usize,
+    /// asked for (`want_cells`): the free cells after the last step, for the page's view of the structure:
+    /// (brick, corner x, z; far corner x, z (ticks); centre (m); displacement (m) and rotation (rad))
+    pub want_cells: bool,
+    pub cells: Vec<([i32; 5], [f64; 3], [f64; 6])>,
+    /// where each cell last rested (displacement and rotation): `DYN_TURN` and `DYN_MOVE` are measured from there
+    pub rest: crate::Map<(u32, i32, i32), [f64; 6]>,
+    /// the stones' beds open (1) or hinged (2) after the last step: (joint, its two cells)
+    pub beds: crate::Map<(u32, (u32, i32, i32), (u32, i32, i32)), u8>,
+}
+pub const DYN_IT: usize = 16;
+/// Below this speed (m/s, its fastest cell) a structure whose step converged is at rest: its cells' velocities
+/// are dropped. A part let go from rest moves 163 mm/s after its first 60th of a second (g h).
+/// Without it the complex building, a corner column shot out, crept at 0.1-0.3 mm/s for the 8 s tried (the slow
+/// modes of stones on open and hinged beds, which implicit Euler hardly damps), a step and an iteration each time.
+pub const DYN_REST: f64 = 0.5e-3;
+/// Damping in proportion to mass (1/s): a mode of frequency f is damped at DYN_DAMP / (4 pi f) of critical (1 Hz,
+/// a tall building's sway: 8%; real buildings 2-5%, cracked and opening joints more), and a part in free fall
+/// loses DYN_DAMP h of its speed a step (2% at 60 Hz) for the tenth of a second before it leaves the structure.
+pub const DYN_DAMP: f64 = 1.0;
+/// A cell that has turned or moved this far (rad, m) from where it last rested has left the standing structure: the network is linear (small
+/// displacements), and a part turned by t stretches by t^2 / 2 of its length for nothing (0.005 rad: 1.25e-5,
+/// an eighth of the strain concrete cracks at; at 0.01 rad the 4-storey frame left on one column broke into
+/// pieces of 1,242 bricks at most, 1,171 joints failed, against 1,845 and 843: dyn_tests). What moves that far is cut loose where it meets what does not, and
+/// falls as a body; its own joints are not checked on the way (their strains are the turn's, not load).
+pub const DYN_TURN: f64 = 0.005;
+pub const DYN_MOVE: f64 = 0.05;
+/// the ratio given to a joint cut because one side has left the structure (so that it goes first)
+pub const DYN_CUT: f32 = 1.0e3;
+impl Dyn {
+    /// is the structure moving (so that another step is due)?
+    pub fn moving(&self) -> bool { self.h > 0.0 && self.its > 0 && (self.capped || self.speed > DYN_REST) }
+    /// a cell's velocity and spin
+    pub fn get(&self, k: &(u32, i32, i32)) -> Option<&[f64; 6]> { self.vel.get(k) }
+}
+/// As `analyse_warm`; with `dy` (and `warm`, which holds the cells' displacements between steps), a dynamic step.
+pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32, f32)], sink: &[bool], dir: V3, warm: Option<&mut Warm>, dy: Option<&mut Dyn>) -> Analysis {
     let gravity = fabs(dir.y) > 0.99;
     let mut nodes: Vec<Node> = Vec::new();
     let mut first = vec![NONE; b.len()];     // brick -> first node
@@ -419,21 +494,65 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
     let fixed: Vec<bool> = (0..n).map(|k| nodes[k].sink || !live[k]).collect();
     let mut f = vec![[0.0f64; 6]; n];
     for k in 0..n { let w = nodes[k].load as f64; f[k][0] = w * dir.x as f64; f[k][1] = w * dir.y as f64; f[k][2] = w * dir.z as f64; }
-    let ends: Vec<(u32, u32)> = links.iter().map(|l| (l.a, l.b)).collect();
+    let mut ends: Vec<(u32, u32)> = links.iter().map(|l| (l.a, l.b)).collect();
     let tk = TICK as f64;
-    let _ = tk;
-    let pos: Vec<[f64; 3]> = nodes.iter().map(|nd| nd.c).collect();
+    let mut pos: Vec<[f64; 3]> = nodes.iter().map(|nd| nd.c).collect();
     let key = |k: usize| (nodes[k].brick, nodes[k].lo[0], nodes[k].lo[2]);
-    let x0: Option<Vec<[f64; 6]>> = warm.as_ref().map(|w| (0..n).map(|k| if fixed[k] { [0.0; 6] } else { w.0.get(&key(k)).copied().unwrap_or([0.0; 6]) }).collect());
-    let (mut x, mut it) = solve_network(&springs, &ends, &fixed, &pos, &f, x0);
+    let mut x0: Option<Vec<[f64; 6]>> = warm.as_ref().map(|w| (0..n).map(|k| if fixed[k] { [0.0; 6] } else { w.0.get(&key(k)).copied().unwrap_or([0.0; 6]) }).collect());
+    // a dynamic step: each cell's inertia as a spring to an anchor (one more cell, fixed), and M / h^2 (x + h v)
+    // on the right-hand side. `xn` keeps where the cells were.
+    let dynamic = dy.as_ref().map_or(false, |d| d.h > 0.0) && warm.is_some() && gravity;
+    let want_cells = dy.as_ref().map_or(false, |d| d.want_cells);
+    let mut fixed = fixed;
+    let mut xn: Vec<[f64; 6]> = Vec::new();
+    let mut cap = MAX_IT;
+    if dynamic {
+        let d = dy.as_ref().unwrap();
+        let h = d.h;
+        cap = if d.max_it > 0 { d.max_it } else { DYN_IT };
+        xn = x0.take().unwrap();
+        let mut y = xn.clone();
+        for k in 0..n {
+            if fixed[k] { continue; }
+            let nd = &nodes[k];
+            let m = nd.load as f64 / 9.81;
+            let (ex, ey, ez) = ((nd.hi[0] - nd.lo[0]) as f64 * tk, (nd.hi[1] - nd.lo[1]) as f64 * tk, (nd.hi[2] - nd.lo[2]) as f64 * tk);
+            let (kt, kr) = (m / (h * h), [m * (ey * ey + ez * ez) / 12.0 / (h * h), m * (ex * ex + ez * ez) / 12.0 / (h * h), m * (ex * ex + ey * ey) / 12.0 / (h * h)]);
+            if let Some(v) = d.vel.get(&key(k)) { let c = h / (1.0 + DYN_DAMP * h); for i in 0..6 { y[k][i] += c * v[i]; } }
+            for i in 0..3 { f[k][i] += kt * y[k][i]; f[k][3 + i] += kr[i] * y[k][3 + i]; }
+            springs.push(Spring { c: nd.c, ra: [0.0; 3], rb: [0.0; 3], k: [kt; 3], kr, fr: None, frr: None });
+            ends.push((n as u32, k as u32));
+        }
+        fixed.push(true); pos.push([0.0, -100.0, 0.0]); f.push([0.0; 6]); y.push([0.0; 6]); xn.push([0.0; 6]);
+        x0 = Some(y);
+    }
+    let bed_of: Vec<bool> = links.iter().map(|l| l.joint != NONE && l.geo.is_some() && mortar_bed(b, l.joint, [0.0; 3])).collect();
+    let mut bed_state = vec![0u8; links.len()];    // 1 open, 2 hinged
+    let mut bed_changes = 0usize;
+    // a dynamic step starts from the beds as the last step left them (open, hinged): started closed each time, a
+    // building with open beds never came to rest (lab complexcol: 70 steps in 280 frames, each re-opening them)
+    let bed_key = |l: usize| (links[l].joint, key(links[l].a as usize), key(links[l].b as usize));
+    if dynamic {
+        let d = dy.as_ref().unwrap();
+        for l in 0..links.len() {
+            if !bed_of[l] { continue; }
+            match d.beds.get(&bed_key(l)) {
+                Some(1) => { bed_state[l] = 1; let sp = &mut springs[l]; for k in 0..3 { sp.k[k] *= 1e-6; sp.kr[k] *= 1e-6; } }
+                Some(2) => { bed_state[l] = 2; let sp = &mut springs[l]; for k in 0..3 { sp.kr[k] *= 1e-6; } }
+                _ => {}
+            }
+        }
+    }
+    // (the dynamic-model spike reads the network a test analyses: structure/dyn_spike.rs)
+    #[cfg(test)] dyn_spike::capture(&springs, &ends, &fixed, &pos, &f, &nodes.iter().map(|nd| { let tk = TICK as f64; [(nd.hi[0] - nd.lo[0]) as f64 * tk, (nd.hi[1] - nd.lo[1]) as f64 * tk, (nd.hi[2] - nd.lo[2]) as f64 * tk, nd.load as f64] }).collect::<Vec<_>>());
+    let (mut x, mut it) = solve_network(&springs, &ends, &fixed, &pos, &f, x0, cap);
+    let mut capped = dynamic && it >= cap;
     // Stones' beds carry no tension, and where the thrust leaves a bed's face a hinge opens through it (Heyman): a bed
     // the solution pulls apart opens (its springs all but go), one whose thrust passes outside its face hinges (it
     // carries force, no moment), and the network is solved again, until nothing more opens or hinges (8 rounds at
     // most). A hinge is not a failure: a mechanism is, and then the solution runs away (`mech`, below). Checked on the
     // elastic solution alone, the keystones of an arcade carrying a stiff floor hung from it, their beds at 10 times
     // what mortar holds, and a stone beam's butt joint over a keystone failed in hogging (complex::tests).
-    let bed_of: Vec<bool> = links.iter().map(|l| l.joint != NONE && l.geo.is_some() && mortar_bed(b, l.joint, [0.0; 3])).collect();
-    let mut bed_state = vec![0u8; links.len()];    // 1 open, 2 hinged
     // the beds' joints, each with its links, face centre and frame: a joint hinges as a whole, when the thrust summed
     // over its links leaves its face. (Tested link by link, a stone's bed under a stone beam had each link's thrust
     // inside its own part of the face and the joint's outside it, 1.04: checked as one section it failed, where a
@@ -470,12 +589,21 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
     if !bed_joints.is_empty() {
         for _ in 0..8 {
             let mut changed = false;
+            // (a dynamic step: an open bed pressed together again closes)
+            if dynamic {
+                for (l, lk) in links.iter().enumerate() {
+                    if !bed_of[l] || bed_state[l] != 1 { continue; }
+                    let g = lk.geo.as_ref().unwrap();
+                    let (d, _) = springs[l].strain(&x[lk.a as usize], &x[lk.b as usize]);
+                    if rot(&g.fr, d)[0] < -1e-6 { bed_state[l] = 0; springs[l] = spring(b, &nodes, lk); changed = true; bed_changes += 1; }
+                }
+            }
             for (l, lk) in links.iter().enumerate() {
                 if !bed_of[l] || bed_state[l] == 1 { continue; }
                 let g = lk.geo.as_ref().unwrap();
                 let (d, r) = springs[l].strain(&x[lk.a as usize], &x[lk.b as usize]);
                 let (fo, _) = springs[l].force(d, r);
-                if rot(&g.fr, fo)[0] > 1.0 { bed_state[l] = 1; let sp = &mut springs[l]; for k in 0..3 { sp.k[k] *= 1e-6; sp.kr[k] *= 1e-6; } changed = true; }
+                if rot(&g.fr, fo)[0] > 1.0 { bed_state[l] = 1; let sp = &mut springs[l]; for k in 0..3 { sp.k[k] *= 1e-6; sp.kr[k] *= 1e-6; } changed = true; bed_changes += 1; }
             }
             for (ls, g) in bed_joints.iter() {
                 if ls.iter().any(|&l| bed_state[l] != 0) { continue; }
@@ -483,20 +611,63 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
                 let nn = -fl[0];
                 if nn > 0.0 && (fabs64s(ml[1]) / nn / g.s.zu.max(1e-6) + fabs64s(ml[2]) / nn / g.s.zw.max(1e-6)) > 1.0 {
                     for &l in ls { bed_state[l] = 2; let sp = &mut springs[l]; for k in 0..3 { sp.kr[k] *= 1e-6; } }
-                    changed = true;
+                    changed = true; bed_changes += 1;
                 }
             }
             if !changed { break; }
-            let (x2, it2) = solve_network(&springs, &ends, &fixed, &pos, &f, Some(x.clone()));
-            x = x2; it += it2;
+            let (x2, it2) = solve_network(&springs, &ends, &fixed, &pos, &f, Some(x.clone()), cap);
+            x = x2; it += it2; if dynamic && it2 >= cap { capped = true; }
         }
     }
     // a mechanism: the network with its open and hinged beds no longer holds, and moves without bound (stone moves
     // fractions of a millimetre): a node by an open or hinged bed displaced over 5 cm
     let disp = |k: usize| sqrt64(x[k][0] * x[k][0] + x[k][1] * x[k][1] + x[k][2] * x[k][2]);
     let mech_link: Vec<bool> = links.iter().enumerate().map(|(l, lk)| bed_state[l] != 0 && (disp(lk.a as usize) > 0.05 || disp(lk.b as usize) > 0.05)).collect();
+    // a dynamic step: the cells that have left the linear range (`DYN_TURN`, `DYN_MOVE`)
+    // (measured from where the cell last rested: a timber floor at rest has turned 0.005 rad at its bearings under
+    // its own weight, and the city's first dynamic step cut it loose. A cell with no resting place yet, cut from a
+    // brick since, counts from where it is.)
+    let gone: Vec<bool> = if dynamic {
+        let d = dy.as_ref().unwrap();
+        (0..n).map(|k| {
+            if fixed[k] { return false; }
+            let Some(r) = d.rest.get(&key(k)) else { return false };
+            let (t, u) = ([x[k][3] - r[3], x[k][4] - r[4], x[k][5] - r[5]], [x[k][0] - r[0], x[k][1] - r[1], x[k][2] - r[2]]);
+            t[0] * t[0] + t[1] * t[1] + t[2] * t[2] > DYN_TURN * DYN_TURN || u[0] * u[0] + u[1] * u[1] + u[2] * u[2] > DYN_MOVE * DYN_MOVE
+        }).collect()
+    } else { Vec::new() };
+    let left = gone.iter().filter(|g| **g).count();
+    if dynamic {
+        // the cells' new velocities. A step that needed no iteration found the cells at rest: they stay where they
+        // were (carried on at their last velocity, nothing would ever damp the solver's last small error).
+        let d = dy.unwrap();
+        let h = d.h;
+        if it == 0 { x = xn.clone(); }
+        d.vel.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = capped; d.left = left; d.cut = bed_changes;
+        d.beds.clear(); for l in 0..links.len() { if bed_state[l] != 0 { d.beds.insert(bed_key(l), bed_state[l]); } }
+        for k in 0..n {
+            if fixed[k] { continue; }
+            let mut v = [0.0; 6];
+            for i in 0..6 { v[i] = (x[k][i] - xn[k][i]) / h; }
+            let s2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+            if s2 > d.speed * d.speed { d.speed = sqrt64(s2); }
+            d.kinetic += 0.5 * nodes[k].load as f64 / 9.81 * s2;
+            if it > 0 { d.vel.insert(key(k), v); }
+        }
+        if !(capped || d.speed > DYN_REST) { d.vel.clear(); }
+        // where the cells rest: all of them when the structure does, and a new cell where it is now
+        let at_rest = d.vel.is_empty();
+        if at_rest { d.rest.clear(); }
+        for k in 0..n { if !fixed[k] && (at_rest || !d.rest.contains_key(&key(k))) { d.rest.insert(key(k), x[k]); } }
+    } else if let Some(d) = dy {
+        // (solved at rest: the beds as this solve left them are where the next dynamic step starts)
+        d.vel.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = false; d.left = 0; d.cut = 0;
+        d.rest.clear(); for k in 0..n { if !fixed[k] { d.rest.insert(key(k), x[k]); } }
+        d.beds.clear(); for l in 0..links.len() { if bed_state[l] != 0 { d.beds.insert((links[l].joint, key(links[l].a as usize), key(links[l].b as usize)), bed_state[l]); } }
+    }
     if let Some(w) = warm { w.0.clear(); for k in 0..n { if !fixed[k] { w.0.insert(key(k), x[k]); } } }
-    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new() };
+    let cells_out: Vec<([i32; 5], [f64; 3], [f64; 6])> = if want_cells { (0..n).filter(|&k| !fixed[k]).map(|k| ([nodes[k].brick as i32, nodes[k].lo[0], nodes[k].lo[2], nodes[k].hi[0], nodes[k].hi[2]], nodes[k].c, x[k])).collect() } else { Vec::new() };
+    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new(), cells: Vec::new(), inner_all: Vec::new(), left_cut: 0 };
     // forces on each face (on the max side's cell, from the min side's): force and moment about the face centre
     let face_load = |l: usize| -> ([f64; 3], [f64; 3]) {
         let sp = &springs[l];
@@ -561,9 +732,15 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
             else if opened && !ls.is_empty() { 0.0 }
             else if hinged_bed { let n = (-fl[0]).max(0.0); let v = sqrt64(fl[1] * fl[1] + fl[2] * fl[2]); (v / (0.2 * sa[2].min(sb[2]) as f64 * sect.area + 0.4 * n)) as f32 }
             else { bed_ratio(&sect, fl, ml, [sa[0].min(sb[0]), 0.0, 0.2 * sa[2].min(sb[2])]) };
+        // (a dynamic step: a joint between a cell that has left and one that has not is cut; one between two that
+        // have left goes with them unchecked)
+        let (mut g_any, mut g_all, mut g_cross) = (false, true, false);
+        if left > 0 { for &l in ls.iter() { let (ga, gb) = (gone[links[l].a as usize], gone[links[l].b as usize]); if ga || gb { g_any = true; } if !(ga && gb) { g_all = false; } if ga != gb { g_cross = true; } } }
+        let ratio = if left == 0 || !g_any { ratio } else if g_cross { DYN_CUT } else if g_all { 0.0 } else { ratio };
         out.ratios.push((j, ratio));
-        if ratio > out.max_ratio { out.max_ratio = ratio; }
+        if ratio > out.max_ratio && ratio < DYN_CUT { out.max_ratio = ratio; }
         if ratio > 1.0 { out.failed.push((j, ratio)); }
+        if ratio >= DYN_CUT { out.left_cut += 1; }
     }
     // faces inside bricks: the brick's own section; over strength it cracks there
     for (l, k) in links.iter().enumerate() {
@@ -575,12 +752,15 @@ pub fn analyse_warm(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f
         let (eu, ew) = ((k.face_hi[u] - k.face_lo[u]) as f64 * tk, (k.face_hi[w] - k.face_lo[w]) as f64 * tk);
         let (fo, mo) = face_load(l);
         let ratio = section_ratio(&Sect::rect(eu, ew, eu * ew), local(k.axis, &None, fo), local(k.axis, &None, mo), strength(m), flexural_of(b, i as usize));
+        let ratio = if left == 0 { ratio } else { let (ga, gb) = (gone[k.a as usize], gone[k.b as usize]); if ga != gb { out.left_cut += 1; DYN_CUT } else if ga { 0.0 } else { ratio } };
+        if want_cells { out.inner_all.push((i, ratio.min(1.0))); }
         if ratio > out.worst_in.0 { out.worst_in = (ratio, i, k.axis, fo[k.axis] as f32, (mo[u] * mo[u] + mo[w] * mo[w]) as f32, 0.0); }
-        if ratio > out.max_ratio { out.max_ratio = ratio; }
+        if ratio > out.max_ratio && ratio < DYN_CUT { out.max_ratio = ratio; }
         if ratio > 1.0 { out.cracks.push(Crack { brick: i, axis: k.axis, at: k.face_lo[k.axis], ratio }); }
         else if ratio > 0.7 { out.inner.push((i, k.axis, k.face_lo[k.axis], ratio)); }
     }
     let _ = gravity;
+    out.cells = cells_out;
     out
 }
 
@@ -761,7 +941,7 @@ fn section_ratio(s: &Sect, f: [f64; 3], m: [f64; 3], cap: [f32; 3], flex: f32) -
 /// drop out. Damped block-Jacobi smoothing (each cell's 6 x 6 block inverted) on every level.
 /// With block Jacobi alone the 12-storey tower took 1,552 iterations and 1.2 s (the long, slow bending modes of a
 /// tall building converge slowly).
-fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64; 3]], f: &[[f64; 6]], x0: Option<Vec<[f64; 6]>>) -> (Vec<[f64; 6]>, usize) {
+fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64; 3]], f: &[[f64; 6]], x0: Option<Vec<[f64; 6]>>, cap: usize) -> (Vec<[f64; 6]>, usize) {
     let n = fixed.len();
     #[cfg(test)] let t0 = { extern crate std; std::time::Instant::now() };
     let mut levels = vec![Level::from_springs(sp, ends, fixed.to_vec(), pos.to_vec())];
@@ -789,7 +969,7 @@ fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64
     let mut rz = dot(&r, &z);
     if rz < TOL * r0 { return (x, 0); }
     let mut it = 0;
-    while it < MAX_IT {
+    while it < cap {
         levels[0].apply(&p, &mut ap);
         let pap = dot(&p, &ap); if pap <= 0.0 { break; }
         let alpha = rz / pap;

@@ -31,6 +31,8 @@ const names = args.length ? args.flatMap(a => a.startsWith('=') ? [a.slice(1)] :
     await p.addInitScript((nf) => { if (nf) window.__noFracCells = true; }, !!process.env.SF_NO_FRAC_CELLS);
     await p.addInitScript((ns) => { if (ns) window.__noSnap = true; }, !!process.env.SF_NO_SNAP);
     await p.addInitScript((d) => { if (d) window.__detDump = true; }, !!process.env.SF_DET_DUMP);
+    // (SF_STATIC: the standing structure solved at rest after each change, as before docs/DYNAMIC.md)
+    await p.addInitScript((d) => { if (d) window.__static = true; }, !!process.env.SF_STATIC);
     await p.addInitScript((d) => { if (d) window.__detAt = d; }, +(process.env.SF_DET_AT || 0));
     await p.addInitScript((d) => { if (d) window.__colR = d; }, process.env.SF_COLR || '');
     await p.addInitScript((d) => { if (d) window.__colCheck = true; }, !!process.env.SF_COLCHECK);

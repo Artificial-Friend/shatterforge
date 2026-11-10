@@ -55,6 +55,9 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Quality <select id="s-preset"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">sets the debris budgets, physics sub-steps, solver colours and shadows; the sliders below fine-tune</span></label>
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
+  <label>Engineer's view (V) <b id="v-view"></b><input type="range" id="s-view" min="0" max="1" step="1"><span class="hint">on: every brick is coloured by how near its worst joint is to its strength (blue unloaded, green a third, yellow 70%, red at strength), and the building is drawn where the structure's solution puts it</span></label>
+  <label>Displacements drawn <b id="v-viewScale"></b><input type="range" id="s-viewScale" min="0" max="4" step="1"><span class="hint">in the engineer's view: a building sags millimetres, so its displacements are drawn this many times as large</span></label>
+  <label>Dynamic structure <b id="v-dynamic"></b><input type="range" id="s-dynamic" min="0" max="1" step="1"><span class="hint">on: the standing building is stepped as a moving structure (it sags and sways, and answers a change in the step it happens, at a bounded cost); off: it is solved at rest after each change</span></label>
   <label>Rubble weighs on floors <b id="v-restLoads"></b><input type="range" id="s-restLoads" min="0" max="1" step="1"><span class="hint">on: once a second the weight of the debris lying on the building is sent to the structure check, and a floor heaped too high gives way</span></label>
   <label>Irregular chunks <b id="v-chunks"></b><input type="range" id="s-chunks" min="0" max="1" step="1"><span class="hint">on: loose bricks too big for particles break into convex chunks (real shapes, they tumble and pile); off: they stay boxes</span></label>
   <label>Crumbs as particles <b id="v-particles"></b><input type="range" id="s-particles" min="0" max="1" step="1"><span class="hint">on: loose bricks up to 0.5 m are granular particles (pile and slide, much cheaper; they do not push larger pieces); off: every crumb is a rigid body</span></label>
@@ -91,6 +94,7 @@ button:disabled { opacity: .5; cursor: default; }
       <dt>Mouse</dt><dd>look (click the view first)</dd>
       <dt>W A S D</dt><dd>walk · Shift to run · Space to jump</dd>
       <dt>F</dt><dd>fly mode on/off · Q / E down / up while flying</dd>
+      <dt>V</dt><dd>engineer's view: load against strength as colour, and the building's sag drawn larger</dd>
       <dt>Click</dt><dd>blast at the crosshair</dd>
       <dt>1 2 3</dt><dd>blast radius 0.4 / 0.7 / 1.2 m</dd>
       <dt>4</dt><dd>fire a steel ball instead (it hits the walls for real)</dd>
@@ -671,6 +675,9 @@ function remeshDirty() {
   if (gpu) { for (const k of dirty) pendingChunks.push({ k, need: readSeq + 1 }); } else dirty.forEach(chunkMesh);
 }
 let lastBlast = '', structPending = false, structRounds = 0, failedJoints = 0, breaks = 0, structRatio = 0;
+// the dynamic structure (docs/DYNAMIC.md): still moving after its last step (another is due), its fastest cell
+// (m/s), its largest displacement (m), the solver's iterations, and the steps it has moved in
+let structMoving = false, structSpeed = 0, structSag = 0, structIts = 0, dynSteps = 0;
 let dustBricks = 0, impactMs = 0, dropped = 0, workerMs = 0, spillLost = 0; const partsBy = {};   // (spillLost: tick^3 of spill with no particle room)
 // each engine job's time in the engine (ms), for the lab
 const engineMsLog = [];
@@ -702,7 +709,7 @@ onmessage = async (m) => {
   // (a structure step that failed nothing may still send pieces off: loose room contents, at the first one)
   const detached = d.op === 'structure' && E.last_detached ? E.last_detached() : 0;
   if (n > 0 || detached > 0) { const len = E.snap_save(); snap = new Uint8Array(E.memory.buffer, E.snap_ptr(), len).slice(); }
-  const r = { op: d.op, n, detached, out, snap, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans, ms: performance.now() - t0 };
+  const r = { op: d.op, n, detached, out, snap, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans, ms: performance.now() - t0, moving: E.structure_dyn ? E.structure_dyn(0) > 0 : false, dynSpeed: E.structure_dyn ? E.structure_dyn(1) : 0, dynIts: E.structure_dyn ? E.structure_dyn(2) : 0, sag: E.structure_dyn ? E.structure_dyn(4) : 0, view: (d.op === 'structure' && E.view_len && E.view_len()) ? new Float32Array(E.memory.buffer, E.view_ptr(), E.view_len()).slice() : null };
   postMessage(r, snap ? [out.buffer, snap.buffer, plans.buffer] : [out.buffer, plans.buffer]);
 };`;
 let worker = null, busy = null;
@@ -727,7 +734,7 @@ function runInline(job) {
   else if (job.op === 'pblast') n = E.piece_blast(job.piece, job.x, job.y, job.z, job.r);
   else if (job.op === 'snap') { const o = []; for (const pc of job.pieces) { n += E.piece_snap(pc); o.push(...new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len())); } job.outs = o; }
   else { const p = E.impacts_in(job.recs.length / 11); new Float32Array(E.memory.buffer, p, job.recs.length).set(job.recs); n = E.impacts(job.dt); }
-  return { op: job.op, n, detached: job.op === 'structure' && E.last_detached ? E.last_detached() : 0, out: job.op === 'snap' ? Float32Array.from(job.outs) : new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans: new Float32Array(E.memory.buffer, E.plan_ptr(), E.plan_len()).slice(), ms: performance.now() - t0, inline: true };
+  return { op: job.op, n, detached: job.op === 'structure' && E.last_detached ? E.last_detached() : 0, out: job.op === 'snap' ? Float32Array.from(job.outs) : new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), moving: E.structure_dyn ? E.structure_dyn(0) > 0 : false, dynSpeed: E.structure_dyn ? E.structure_dyn(1) : 0, dynIts: E.structure_dyn ? E.structure_dyn(2) : 0, sag: E.structure_dyn ? E.structure_dyn(4) : 0, view: (job.op === 'structure' && E.view_len && E.view_len()) ? new Float32Array(E.memory.buffer, E.view_ptr(), E.view_len()).slice() : null, plans: new Float32Array(E.memory.buffer, E.plan_ptr(), E.plan_len()).slice(), ms: performance.now() - t0, inline: true };
 }
 // Rubble lying on the building weighs on it: once a second the weight of the debris at rest (bodies slower than
 // 0.5 m/s and particles asleep) goes to the engine with a structure check, binned in 0.5 m cells; the engine
@@ -793,6 +800,7 @@ function finish(r) {
 function finishInner(r) {
   const job = busy; busy = null;
   workerMs = r.ms; dustBricks = r.dust; structRatio = r.ratio;
+  if (r.op === 'structure') { structMoving = !!r.moving; structSpeed = r.dynSpeed || 0; structSag = r.sag || 0; structIts = r.dynIts || 0; if (structMoving) dynSteps++; }
   engineMsLog.push(r.ms); if (engineMsLog.length > 5000) engineMsLog.shift();
   if (r.cracked !== undefined) crackedJoints = r.cracked;
   if (r.op === 'structure' && job && job.rest) restOnFloors = r.restOn || 0;
@@ -804,7 +812,30 @@ function finishInner(r) {
   else if (r.op === 'pblast') onImpacts(job, r);
   else if (r.op === 'structure') onStructure(r);
   else onImpacts(job, r);
+  if (r.view && +setting.view) showView(r.view);
 }
+// ---- the structure as the engineer sees it (key V; docs/DYNAMIC.md): each brick coloured by how near its worst joint
+// or section is to its strength, and the building drawn where the structure's solution puts it, its displacements
+// VIEW_SCALE[setting.viewScale] times as large. The engine writes it with each structure step (set_param 8); the
+// page's copy of the engine draws it (view_apply) into the chunks' meshes.
+const VIEW_SCALE = [0, 1, 10, 100, 1000];
+function showView(v) {
+  if (!E.view_in) return;
+  const p = E.view_in(v.length); new Float32Array(E.memory.buffer, p, v.length).set(v);
+  E.view_apply(VIEW_SCALE[setting.viewScale] || 0, 1);
+  // (drawn at once: remeshDirty waits for the read-back that shows the debris of a change, and a building at rest
+  // has none coming)
+  for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) chunkMesh(k);
+}
+let viewShown = false;
+function applyView() {
+  if (!E || !E.view_off || (!+setting.view && !viewShown)) return;
+  viewShown = !!+setting.view;
+  if (worker) worker.postMessage({ op: 'param', id: 8, v: +setting.view }); else E.set_param(8, +setting.view);
+  if (+setting.view) { jobs.structure = true; pump(); }
+  else { E.view_off(); for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k); }
+}
+
 // ---- breaking on the GPU in the step of a hit (GpuWorld.setSnap). The engine sends with each new falling piece its
 // break plan: the impulse in one step that breaks it, and the bricks of the part that comes away. The GPU breaks it
 // in the step of the hit; the page then tells the engine (a 'snap' job, first in line), which cuts the plan's joints
@@ -982,6 +1013,8 @@ function onStructure(r) {
   structRounds++;
   if (r.wearing > 0) wearNext = clock() + WEAR_EVERY;
   structWearing = r.wearing || 0; wornJoints = r.worn || 0;
+  // (a structure still moving is stepped again)
+  if (r.moving) jobs.structure = true;
   if (r.n === 0 && !r.detached) return;
   // (another round only after failures: pieces sent off with none, loose contents, need none)
   if (r.n > 0) jobs.structure = true;
@@ -1197,6 +1230,7 @@ addEventListener('mousemove', (e) => {
 addEventListener('keydown', (e) => {
   keys.add(e.code);
   if (e.code === 'KeyF') fly = !fly;
+  if (e.code === 'KeyV') { const el = $('s-view'); el.value = +setting.view ? 0 : 1; el.dispatchEvent(new Event('input')); }
   if (e.code === 'Digit1') setRadius(0.4); if (e.code === 'Digit2') setRadius(0.7); if (e.code === 'Digit3') setRadius(1.2); if (e.code === 'Digit4') setRadius('ball');
   if (e.code === 'KeyB' && !locked) { if (radius === 'ball') fireBall(); else doBlast(); }
   if (e.code === 'KeyK') { try { localStorage.setItem('sf-bench', '1'); } catch (err) {} location.reload(); }
@@ -1211,6 +1245,11 @@ const SETTINGS = {
   realtime: { el: 's-realtime', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
   adaptive: { el: 's-adaptive', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: v => { if (gpu && !+v) gpu.substeps = setting.substeps || 12; } },
   restLoads: { el: 's-restLoads', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
+  // (the engineer's view: load / strength as colour, and the displacements drawn larger; key V)
+  view: { el: 's-view', def: 0, fmt: v => (+v ? 'on' : 'off'), apply: () => applyView() },
+  viewScale: { el: 's-viewScale', def: 3, fmt: v => (VIEW_SCALE[+v] ? `× ${VIEW_SCALE[+v]}` : 'not drawn'), apply: () => { if (+setting.view) applyView(); } },
+  // (the standing structure stepped as a dynamic model, docs/DYNAMIC.md)
+  dynamic: { el: 's-dynamic', def: window.__static ? 0 : 1, fmt: v => (+v ? 'on' : 'off'), apply: v => setParam(7, +v) },
   // (chunks: loose bricks break into convex chunks, and the engine splits bricks on a fracture surface into
   // convex cells, at most 1,500 standing bricks)
   chunks: { el: 's-chunks', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: v => setParam(3, +v && !window.__noFracCells ? 1500 : 0) },
@@ -1250,7 +1289,8 @@ function initSettings() {
   ks.addEventListener('change', () => { setting.kind = +ks.value; try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} location.reload(); });
   setting.kind = KIND;
   for (const [k, d] of Object.entries(SETTINGS)) {
-    const el = $(d.el); el.value = saved[k] ?? d.def; setting[k] = +el.value; $('v-' + k).textContent = d.fmt(el.value); d.apply(setting[k]);
+    // (the view starts off: it is a look, not a setting)
+    const el = $(d.el); el.value = k === 'view' ? 0 : (saved[k] ?? d.def); setting[k] = +el.value; $('v-' + k).textContent = d.fmt(el.value); d.apply(setting[k]);
     el.addEventListener('input', () => { setting[k] = +el.value; $('v-' + k).textContent = d.fmt(el.value); d.apply(setting[k]); try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} });
   }
 }
@@ -1501,7 +1541,7 @@ function hud() {
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'} · ${gpu.substeps} sub-steps${gpu.skipped ? ` · ${gpu.skipped.toLocaleString()} steps skipped at rest` : ''}` : '',
     gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s${rate.sim && physicsBusy() ? ` (${rate.sim < 0.95 ? '<b>' : ''}time ×${rate.sim.toFixed(2)}${rate.sim < 0.95 ? '</b>' : ''})` : ''} · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">flicker check</span> ${flick.vanished} vanished, ${flick.jumps} jumps · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
-    `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${failedJoints} failed · ${crackedJoints} cracked and holding · rubble on its floors ${(restOnFloors / 9810).toFixed(0)} t · ${breaks} pieces broke on impact · ${crushedBodies} crushed · ${dustBricks} bricks to dust${spillLost ? ` · ${(spillLost * TICK ** 3).toFixed(1)} m³ of rubble lost (particles full)` : ''} · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
+    `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${+setting.dynamic ? `sag ${(structSag * 1000).toFixed(1)} mm${structMoving ? `, moving ${(structSpeed * 1000).toFixed(0)} mm/s` : ''}` : 'solved at rest'} · ${failedJoints} failed · ${crackedJoints} cracked and holding · rubble on its floors ${(restOnFloors / 9810).toFixed(0)} t · ${breaks} pieces broke on impact · ${crushedBodies} crushed · ${dustBricks} bricks to dust${spillLost ? ` · ${(spillLost * TICK ** 3).toFixed(1)} m³ of rubble lost (particles full)` : ''} · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
     lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,
   ].filter(Boolean).join('<br>');
 }
