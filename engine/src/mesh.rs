@@ -96,7 +96,8 @@ impl View {
     /// brick i's cell boundaries along x and z (ticks), for cutting its faces where it bends
     fn cuts(&self, i: u32) -> (Vec<i32>, Vec<i32>) {
         let (mut xs, mut zs) = (Vec::new(), Vec::new());
-        if self.scale != 0.0 { if let Some(cs) = self.cells.get(&i) { for c in cs { xs.push(c.lo[0]); xs.push(c.hi[0]); zs.push(c.lo[1]); zs.push(c.hi[1]); } } }
+        // (at 1 and below the displacements are millimetres: a face left whole shows the same)
+        if self.scale > 1.0 { if let Some(cs) = self.cells.get(&i) { for c in cs { xs.push(c.lo[0]); xs.push(c.hi[0]); zs.push(c.lo[1]); zs.push(c.hi[1]); } } }
         xs.sort_unstable(); xs.dedup(); zs.sort_unstable(); zs.dedup();
         (xs, zs)
     }

@@ -192,3 +192,39 @@ fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
     println!("  a column shot out on lot 0: at rest again after {steps} steps, at most {moved_lots} lot moving at once, slowest step {worst_ms:.0} ms, worst {:.3}, {} joints failed", g.max_ratio, g.failed_total);
     assert!(steps < 240 && moved_lots == 1);
 }
+
+#[test] fn the_view_of_a_city_at_rest_is_written_once() {
+    // the 8 x 8 city with the view on. Reported: 3 frames a second, where the city plays without the view. Every
+    // structure step wrote every analysed lot, and the lots with furniture or rubble on their floors are analysed
+    // every second: 279,622 numbers each time, and the page remeshed the range from the first chunk named to the
+    // last, most of the city's 960 (672 ms of meshing, native). Now a lot at rest is written once, and only the
+    // chunks of the bricks named are remeshed: a step at rest writes nothing, and a column shot out on one lot
+    // remeshes that lot's chunks.
+    let mut g = Game::new_kind(8, 5);
+    g.dynamic = true;
+    g.structure_step(48);
+    g.view_want = true; for a in g.active.iter_mut() { *a = true; } for st in g.dynst.values_mut() { st.1.viewed = false; }
+    g.struct_dt = DT;
+    let t = Instant::now(); g.structure_step(48); let step = t.elapsed().as_secs_f64() * 1e3;
+    let first = g.view_out.len();
+    g.view_in = g.view_out.clone();
+    let t = Instant::now(); g.view_apply(100.0, true); let apply = t.elapsed().as_secs_f64() * 1e3;
+    let all = g.view_chunks.len();
+    let mut seq = Vec::new();
+    for _ in 0..8 { g.struct_dt = 1.0; g.structure_step(48); seq.push((g.view_out.len(), g.dyn_its, g.moving)); }
+    println!("  steps at rest (numbers written, iterations, moving): {seq:?}");
+    let rest = seq[4..].iter().map(|s| s.0).max().unwrap();
+    // a column of lot 0's building shot out
+    let l0 = crate::city::layout(8).lots[0].off;
+    let (ox, oz) = (l0[0] as f32 * crate::brick::TICK, l0[2] as f32 * crate::brick::TICK);
+    let (o, d) = (v3(ox + 16.0, 1.5, oz + 6.0), v3(-1.0, 0.0, 0.0));
+    let tt = g.raycast(o, d, 12.0); assert!(tt < 12.0); g.blast(o + d * tt, 0.7);
+    g.struct_dt = DT; g.structure_step(48);
+    let changed = g.view_out.len();
+    g.view_in = g.view_out.clone();
+    let t = Instant::now(); g.view_apply(100.0, true); let apply1 = t.elapsed().as_secs_f64() * 1e3;
+    println!("city 8 x 8, view on: first step {step:.0} ms writes {first} numbers, drawn in {apply:.0} ms ({all} chunks); steps at rest write {rest} at most once settled; a column shot out on lot 0 writes {changed}, drawn in {apply1:.1} ms ({} chunks)", g.view_chunks.len());
+    assert!(first > 1_000_000 && all == g.chunks.len(), "every lot written once");
+    assert!(rest <= 2, "nothing written at rest: {rest}");
+    assert!(changed > 2 && changed < first / 20 && g.view_chunks.len() <= g.chunks.len() / 64 + 1, "one lot written and remeshed: {} chunks", g.view_chunks.len());
+}

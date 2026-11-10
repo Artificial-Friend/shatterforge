@@ -83,7 +83,7 @@ static mut SNAP: Vec<u8> = Vec::new();
     let g = game();
     match id { 0 => g.crumb_keep = (v.max(0.0) as usize).max(2), 1 => g.rubble_keep = v.max(0.0) as usize, 2 => g.crush_depth = v.max(0.0), 3 => g.frac_max = v.max(0.0) as usize, 4 => g.struct_dt = v.max(0.0), 5 => g.spill_on = v > 0.5, 6 => g.masonry_parts = v > 0.5, 7 => g.dynamic = v > 0.5,
         // (the view asked for: the next structure step analyses every lot, so that all of them are drawn)
-        8 => { g.view_want = v > 0.5; if g.view_want { for a in g.active.iter_mut() { *a = true; } } }
+        8 => { g.view_want = v > 0.5; if g.view_want { for a in g.active.iter_mut() { *a = true; } for st in g.dynst.values_mut() { st.1.viewed = false; } } }
         _ => {} }
 }
 #[no_mangle] pub extern "C" fn game_mesh(on: u32) { game().mesh = on != 0; }
@@ -145,6 +145,9 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn view_in(n: u32) -> *mut f32 { let g = game(); g.view_in.clear(); g.view_in.resize(n as usize, 0.0); g.view_in.as_mut_ptr() }
 #[no_mangle] pub extern "C" fn view_apply(scale: f32, stress: u32) { game().view_apply(scale, stress != 0); }
 #[no_mangle] pub extern "C" fn view_off() { game().view_off(); }
+/// The chunks the last view_apply or view_off remeshed.
+#[no_mangle] pub extern "C" fn view_chunk_count() -> u32 { game().view_chunks.len() as u32 }
+#[no_mangle] pub extern "C" fn view_chunk(i: u32) -> i32 { game().view_chunks.get(i as usize).copied().unwrap_or(-1) }
 /// The dynamic structure after the last step: f 0 still moving (another step is due), 1 its fastest cell (m/s),
 /// 2 the solver's iterations (the lot that took most), 3 the cells' kinetic energy (J), 4 the largest displacement (m),
 /// 5 the cells that left the structure in the step, 6 the joints and faces cut for it, 7 a solve stopped at its cap

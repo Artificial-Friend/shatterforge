@@ -283,6 +283,9 @@ pub struct Dyn {
     /// asked for (`want_cells`): the free cells after the last step, for the page's view of the structure:
     /// (brick, corner x, z; far corner x, z (ticks); centre (m); displacement (m) and rotation (rad))
     pub want_cells: bool,
+    /// the view of this lot has been written since it was last asked for (`Game::view_out`): a lot at rest is
+    /// not written again
+    pub viewed: bool,
     pub cells: Vec<([i32; 5], [f64; 3], [f64; 6])>,
     /// where each cell last rested (displacement and rotation): `DYN_TURN` and `DYN_MOVE` are measured from there
     /// the cells beyond that range and watched: (how long for (s), how far out when they crossed (ranges))

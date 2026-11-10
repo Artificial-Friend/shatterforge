@@ -60,6 +60,9 @@ Every brick is coloured by how near its worst joint or section is to its strengt
 - The engine writes it with each structure step when asked (`set_param(8, on)`; `Game::view_out`): each analysed brick's ratio, and every free cell with its centre, displacement and rotation. Switching it on has every lot analysed once.
 - The page's copy of the engine takes it (`view_in`, `view_apply`) and remeshes the chunks of the bricks it names (`mesh::build_view`): faces are cut along a brick's cells, so that a slab drawn sagging bends, and each vertex moves by the mean of the cells that hold it.
 - It needs the dynamic structure for the displacements; with it off the colours alone are drawn.
+- A lot is written when the view is first asked for and when its step changed something; the page remeshes only the chunks of the bricks named. Before (reported from a real machine: the 8 × 8 city at 3 frames a second with the view on): every analysed lot was written at every step, the lots with furniture or rubble on their floors every second, and the page remeshed from the first chunk named to the last. Test `the_view_of_a_city_at_rest_is_written_once` (native): the first step writes 3,240,610 numbers, drawn in 640 ms (960 chunks); a step at rest writes nothing; a column shot out on one lot writes 13,674, drawn in 2–3 ms (3 chunks).
+- Displacements are drawn at their true size by default (× 1): the world then differs from the plain one in colour only. Faces are cut along the cells only above × 1.
+- Falling pieces and rubble are not part of the view: they are drawn as always, so a building brought down leaves it.
 - 3 × 3 city: 7,539 bricks and 32,819 cells, 475 kB a full view. The 4-storey frame: 3,420 quads as built, 8,633 in the view.
 
 ## The spike (`engine/src/structure/dyn_spike.rs`)

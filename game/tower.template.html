@@ -820,12 +820,12 @@ function finishInner(r) {
 // page's copy of the engine draws it (view_apply) into the chunks' meshes.
 const VIEW_SCALE = [0, 1, 10, 100, 1000];
 function showView(v) {
-  if (!E.view_in) return;
+  if (!E.view_in || (v[0] === 0 && v[1] === 0)) return;   // (nothing changed in the step)
   const p = E.view_in(v.length); new Float32Array(E.memory.buffer, p, v.length).set(v);
   E.view_apply(VIEW_SCALE[setting.viewScale] || 0, 1);
   // (drawn at once: remeshDirty waits for the read-back that shows the debris of a change, and a building at rest
   // has none coming)
-  for (let k = E.dirty_lo(); k <= E.dirty_hi(); k++) chunkMesh(k);
+  for (let i = 0, n = E.view_chunk_count(); i < n; i++) chunkMesh(E.view_chunk(i));
 }
 let viewShown = false;
 function applyView() {
@@ -1247,7 +1247,7 @@ const SETTINGS = {
   restLoads: { el: 's-restLoads', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
   // (the engineer's view: load / strength as colour, and the displacements drawn larger; key V)
   view: { el: 's-view', def: 0, fmt: v => (+v ? 'on' : 'off'), apply: () => applyView() },
-  viewScale: { el: 's-viewScale', def: 3, fmt: v => (VIEW_SCALE[+v] ? `× ${VIEW_SCALE[+v]}` : 'not drawn'), apply: () => { if (+setting.view) applyView(); } },
+  viewScale: { el: 's-viewScale', def: 1, fmt: v => (VIEW_SCALE[+v] ? `× ${VIEW_SCALE[+v]}` : 'not drawn'), apply: () => { if (+setting.view) applyView(); } },
   // (the standing structure stepped as a dynamic model, docs/DYNAMIC.md)
   dynamic: { el: 's-dynamic', def: window.__static ? 0 : 1, fmt: v => (+v ? 'on' : 'off'), apply: v => setParam(7, +v) },
   // (chunks: loose bricks break into convex chunks, and the engine splits bricks on a fracture surface into
@@ -1541,7 +1541,7 @@ function hud() {
     gpu ? `<span class="k">contacts</span> ${gpu.stats.manifolds.toLocaleString()} · <span class="k">GPU</span> ${g == null ? '—' : g.toFixed(2) + ' ms'} · ${gpu.substeps} sub-steps${gpu.skipped ? ` · ${gpu.skipped.toLocaleString()} steps skipped at rest` : ''}` : '',
     gpu ? `<span class="k">physics</span> ${rate.steps.toFixed(0)} steps/s${rate.sim && physicsBusy() ? ` (${rate.sim < 0.95 ? '<b>' : ''}time ×${rate.sim.toFixed(2)}${rate.sim < 0.95 ? '</b>' : ''})` : ''} · ${rate.reads.toFixed(0)} read-backs/s · <span class="k">flicker check</span> ${flick.vanished} vanished, ${flick.jumps} jumps · <span class="k">long tasks</span> ${longTasks.n} (${longTasks.ms.toFixed(0)} ms total${longTasks.last ? ', last ' + longTasks.last : ''})` : '',
     `<span class="k">main thread ms</span> ${Object.entries(perf).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}${gpu && gpu.gpuMs ? ` · <span class="k">GPU</span> ${Object.entries(gpu.gpuMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ')}` : ''}`,
-    `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${+setting.dynamic ? `sag ${(structSag * 1000).toFixed(1)} mm${structMoving ? `, moving ${(structSpeed * 1000).toFixed(0)} mm/s` : ''}` : 'solved at rest'} · ${failedJoints} failed · ${crackedJoints} cracked and holding · rubble on its floors ${(restOnFloors / 9810).toFixed(0)} t · ${breaks} pieces broke on impact · ${crushedBodies} crushed · ${dustBricks} bricks to dust${spillLost ? ` · ${(spillLost * TICK ** 3).toFixed(1)} m³ of rubble lost (particles full)` : ''} · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
+    `<span class="k">structure</span> ${(structRatio * 100).toFixed(0)}% of strength at the worst joint · ${+setting.view ? `engineer's view, displacements × ${VIEW_SCALE[setting.viewScale] || 0} · ` : ''}${+setting.dynamic ? `sag ${(structSag * 1000).toFixed(1)} mm${structMoving ? `, moving ${(structSpeed * 1000).toFixed(0)} mm/s` : ''}` : 'solved at rest'} · ${failedJoints} failed · ${crackedJoints} cracked and holding · rubble on its floors ${(restOnFloors / 9810).toFixed(0)} t · ${breaks} pieces broke on impact · ${crushedBodies} crushed · ${dustBricks} bricks to dust${spillLost ? ` · ${(spillLost * TICK ** 3).toFixed(1)} m³ of rubble lost (particles full)` : ''} · impacts ${impactMs.toFixed(0)} ms · engine ${worker ? 'in a worker' : 'inline'}${dropped ? ` · ${dropped} bodies over capacity` : ''}${gpu && gpu.rejected ? ` · ${gpu.rejected} invalid inputs refused` : ''}`,
     lastBlast ? `<span class="k">last</span> ${lastBlast}` : `<span class="k">click to ${radius === 'ball' ? 'fire the steel ball' : `blast · radius ${radius} m`}</span>`,
   ].filter(Boolean).join('<br>');
 }
