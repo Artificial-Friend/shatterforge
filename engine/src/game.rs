@@ -95,6 +95,11 @@ pub struct Game {
     pub dyn_speed: f32,
     pub dyn_its: usize,
     pub dyn_kinetic: f32,
+    /// after a structure step: the cells that left the structure (structure::DYN_TURN, DYN_MOVE), the joints and
+    /// faces cut for it, and whether a lot's solve stopped at its iteration cap
+    pub dyn_left: usize,
+    pub dyn_cut: usize,
+    pub dyn_capped: bool,
     /// the structure as the engineer sees it (mesh::View), in the page's copy of the engine
     pub view: crate::mesh::View,
     /// the engine's side of it: asked for (`view_want`), each structure step writes the analysed lots' bricks and
@@ -196,7 +201,7 @@ impl Game {
         let n = tiles.count();
         let start = if kind == 5 { let l = crate::city::layout(storeys); let x = if l.n % 2 == 1 { crate::city::PITCH_M / 2.0 } else { 0.0 }; v3(x, 0.26, 0.0) } else { v3(0.0, 0.26, -14.0) };
         let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, player: Player::new(start), tiles, active: vec![true; (tiles.n * tiles.n) as usize], tile_ratio: vec![0.0; (tiles.n * tiles.n) as usize], chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, dynamic: false, dynst: Default::default(), moving: false, dyn_speed: 0.0, dyn_its: 0, dyn_kinetic: 0.0, view: Default::default(), view_want: false, view_out: Vec::new(), view_in: Vec::new(), wearing: 0, wearing_at: Vec::new(), worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
+                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, dynamic: false, dynst: Default::default(), moving: false, dyn_speed: 0.0, dyn_its: 0, dyn_kinetic: 0.0, dyn_left: 0, dyn_cut: 0, dyn_capped: false, view: Default::default(), view_want: false, view_out: Vec::new(), view_in: Vec::new(), wearing: 0, wearing_at: Vec::new(), worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
         for k in 0..n as i32 { g.remesh(k); }
         g.loose_pending = (0..g.b.len()).any(|i| g.b.flags[i] & crate::brick::F_LOOSE != 0);
         g
@@ -516,7 +521,7 @@ impl Game {
         // (the time since the last step, between a 120th of a second and `DYN_MAX_DT`: a structure at rest that is
         // changed now moves from now, however long ago its last step was)
         let h = if self.dynamic && self.struct_dt > 0.0 { (self.struct_dt as f64).clamp(1.0 / 120.0, DYN_MAX_DT as f64) } else { 0.0 };
-        self.moving = false; self.dyn_speed = 0.0; self.dyn_its = 0; self.dyn_kinetic = 0.0;
+        self.moving = false; self.dyn_speed = 0.0; self.dyn_its = 0; self.dyn_kinetic = 0.0; self.dyn_left = 0; self.dyn_cut = 0; self.dyn_capped = false;
         let a = if self.dynamic {
             let mut by: crate::Map<usize, Vec<usize>> = Default::default();
             for (k, &i) in set.iter().enumerate() { by.entry(if lots { tl.tile_of(self.b.x[i as usize] as i32, self.b.z[i as usize] as i32) as usize } else { 0 }).or_default().push(k); }
@@ -537,6 +542,7 @@ impl Game {
                 let a = structure::analyse_dyn(&self.b, &s2, &l2, &p2, &k2, v3(0.0, -1.0, 0.0), Some(&mut st.0), Some(&mut st.1));
                 if st.1.moving() { self.moving = true; if lots && t < self.active.len() { self.active[t] = true; } }
                 self.dyn_speed = self.dyn_speed.max(st.1.speed as f32); self.dyn_its = self.dyn_its.max(st.1.its); self.dyn_kinetic += st.1.kinetic as f32;
+                self.dyn_left += st.1.left; self.dyn_cut += a.left_cut; self.dyn_capped |= st.1.capped;
                 all = Some(match all { None => a, Some(mut m) => { m.merge(a); m } });
             }
             all.unwrap_or_else(structure::Analysis::empty)

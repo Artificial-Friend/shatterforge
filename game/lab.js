@@ -408,7 +408,7 @@ async function labRun() {
       { const lost = T0 - L.T; if (lost < -1 && (L.gains = L.gains || []).length < 20) L.gains.push({ f: L.f, op: j.job.op, gain: +(-lost).toFixed(2), static: +(L.staticT - S0).toFixed(2), gpu: +(L.gpuVol - G0).toFixed(2), bodies_added: +L.jobVol.bodiesIn.toFixed(2), bodies_removed: +L.jobVol.bodiesOut.toFixed(2), particles: partsMade - pm0, dup_bricks: E.dup_bricks() });
         if (Math.abs(lost) > 1e-6) { const k = (j.job.op === 'blast' || j.job.op === 'pblast') ? 'tool' : j.job.op; L.lostBy[k] = (L.lostBy[k] || 0) + lost; } }   // (signed: a job can add what another takes away)
       // what the engine did, frame by frame (to explain an event)
-      if (L.timeline.length < 400) L.timeline.push({ f: L.f, op: j.job.op, n: r.n, sent: j.due - L.jobLag, new_bodies: gpu.n - nb0, breaks: breaks - b0, static_updates: r.out && r.out.length ? r.out[0] : 0 });
+      if (L.timeline.length < 400) L.timeline.push({ f: L.f, op: j.job.op, n: r.n, dyn: j.job.op === 'structure' && r.dynIts !== undefined ? { its: r.dynIts, moving: !!r.moving, left: r.dynLeft, cut: r.dynCut, capped: r.dynCapped, mm_s: +(1000 * (r.dynSpeed || 0)).toFixed(1) } : undefined, sent: j.due - L.jobLag, new_bodies: gpu.n - nb0, breaks: breaks - b0, static_updates: r.out && r.out.length ? r.out[0] : 0 });
     }
     // read-backs that are due
     while (L.gates.length && L.gates[0].due <= L.f) { const g = L.gates.shift(); g.res(await g.p); await new Promise(r => setTimeout(r, 0)); }

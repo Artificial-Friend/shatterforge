@@ -146,10 +146,11 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn view_apply(scale: f32, stress: u32) { game().view_apply(scale, stress != 0); }
 #[no_mangle] pub extern "C" fn view_off() { game().view_off(); }
 /// The dynamic structure after the last step: f 0 still moving (another step is due), 1 its fastest cell (m/s),
-/// 2 the solver's iterations (the lot that took most), 3 the cells' kinetic energy (J), 4 the largest displacement (m)
+/// 2 the solver's iterations (the lot that took most), 3 the cells' kinetic energy (J), 4 the largest displacement (m),
+/// 5 the cells that left the structure in the step, 6 the joints and faces cut for it, 7 a solve stopped at its cap
 #[no_mangle] pub extern "C" fn structure_dyn(f: u32) -> f32 {
     let g = game();
-    match f { 0 => g.moving as u32 as f32, 1 => g.dyn_speed, 2 => g.dyn_its as f32, 3 => g.dyn_kinetic, 4 => g.dynst.values().map(|s| s.0.max_disp()).fold(0.0, f64::max) as f32, _ => 0.0 }
+    match f { 0 => g.moving as u32 as f32, 1 => g.dyn_speed, 2 => g.dyn_its as f32, 3 => g.dyn_kinetic, 4 => g.dynst.values().map(|s| s.0.max_disp()).fold(0.0, f64::max) as f32, 5 => g.dyn_left as f32, 6 => g.dyn_cut as f32, 7 => g.dyn_capped as u32 as f32, _ => 0.0 }
 }
 #[no_mangle] pub extern "C" fn structure_wearing() -> u32 { game().wearing as u32 }
 #[no_mangle] pub extern "C" fn worn_total() -> u32 { game().worn_total as u32 }

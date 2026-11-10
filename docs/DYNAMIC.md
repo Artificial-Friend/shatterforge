@@ -34,9 +34,13 @@ What follows from it:
 
 - **Rest.** A step that needs no iteration found the structure at rest: the cells stay where they were. A step that converged with its fastest cell under `DYN_REST` = 0.5 mm/s ends the motion: velocities are dropped. (Without it the complex building, a corner column shot out, crept at 0.1–0.3 mm/s for the 8 s tried: the slow modes of stones on open and hinged beds, which implicit Euler hardly damps.)
 - **Damping.** In proportion to mass, `DYN_DAMP` = 1 /s: a 1 Hz sway is damped at 8% of critical. A part in free fall loses 2% of its speed a step at 60 Hz for the tenth of a second before it leaves the structure.
-- **Leaving the structure.** The network is linear (small displacements). A cell that has turned `DYN_TURN` = 0.005 rad or moved `DYN_MOVE` = 5 cm from where it last rested has left it: the joints between it and what has not left are cut (ratio `DYN_CUT`), its own joints are no longer checked, and the game detaches it as a falling piece. A part turned by t stretches by t² / 2 of its length for nothing, 1.25 × 10⁻⁵ at 0.005 rad.
-  - Measured from zero, the city's first dynamic step cut a timber floor loose: at rest it has turned 0.005 rad at its bearings under its own weight.
-  - At 0.01 rad the 4-storey frame left on one column broke into pieces of 1,242 bricks at most (1,171 joints failed), against 1,800 bricks (910 joints) at 0.005.
+- **Leaving the structure.** The network is linear (small displacements): a part turned by t stretches by t² / 2 of its length for nothing, 1.25 × 10⁻⁵ at 0.005 rad. A cell that has turned `DYN_TURN` = 0.005 rad or moved `DYN_MOVE` = 5 cm from where it last rested is beyond that range, and is watched:
+  - after `DYN_WATCH` = 0.15 s, a cell a whole range further out than when it crossed has left (from rest a part falls 5 cm in 0.1 s and 31 cm by 0.25 s). The joints between it and what stands are cut (ratio `DYN_CUT`), and the game detaches it as a falling piece;
+  - one that after twice as long has not gone a quarter of a range further has found a new resting place, and rests there;
+  - joints between two cells beyond the range, watched or gone, are not checked: what they show is the turning.
+  - Measured from zero instead of from rest, the city's first dynamic step cut a timber floor loose: at rest it has turned 0.005 rad at its bearings under its own weight.
+  - Taken to have left at once, the lab's `ball` failed (see "Lab"): cracked pieces by the holes, hanging by their softened joints, sag past the range and stay.
+  - At 0.01 rad and no watch the 4-storey frame left on one column broke into pieces of 1,242 bricks at most (1,171 joints failed), against 1,800 bricks (910 joints) at 0.005.
 - **Beds keep their state.** A stone's bed that opened or hinged stays so into the next step, and an open bed pressed together again closes. Started closed at every step, the complex building never came to rest (lab `complexcol`: 70 steps in 280 frames, each re-opening them).
 - **A lot not solved yet is solved at rest first.** Stepped from no displacement, its weight would land on it all at once.
 - **The step.** The time since the last structure step, between 1/120 s and `DYN_MAX_DT` = 0.1 s. A structure at rest that is changed now moves from now, however long ago its last step was.
@@ -109,22 +113,22 @@ Native, release, the build machine.
 | `a_column_gone_is_answered_within_the_steps_it_takes_to_move` | 4-storey frame, a corner column blasted out. At rest: 1 round, 29 iterations, worst joint left 0.332. Dynamic: at rest after 37 steps, worst 0.330; first steps 0.335, 0.332, 0.332, 0.334 with 16, 16, 14, 13 iterations |
 | `a_tower_on_one_column_comes_down_in_bounded_steps` | see the table below |
 | `the_complex_building_comes_to_rest_after_a_column_is_shot_out` | the lab's `complexcol`, a step every 4 frames. At rest: worst 0.917 → 0.855. Dynamic: 0.917 → 0.817, moving for 13 steps (0.9 s), 0 joints failed either way |
-| `a_city_is_stepped_lot_by_lot` | 3 × 3 city: first step 704–990 ms (9 lots at rest), then 0.2 ms a step at rest. A column shot out on lot 0: only that lot moves, at rest after 87 steps, slowest step 28 ms |
+| `a_city_is_stepped_lot_by_lot` | 3 × 3 city: first step 704–990 ms (9 lots at rest), then 0.2 ms a step at rest. A column shot out on lot 0: only that lot moves, at rest after 95 steps, slowest step 31 ms |
 | `the_view_draws_the_structure_where_its_solution_puts_it` | see "The engineer's view" |
 
 The ground storey blasted away but one column:
 
 | Building | | Joints failed | Steps | Biggest falling piece (bricks) | Most iterations in a step | Slowest step (ms) | In all (ms) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 4-storey concrete | at rest | 69 | 3 | 2,032 | 670 | 1,557 | 3,000 |
-| | dynamic | 910 | 28 | 1,800 | 16 | 85 | 1,127 |
-| 4-storey masonry | at rest | 128 | 3 | 2,011 | 457 | 978 | 1,650 |
-| | dynamic | 1,236 | 42 | 1,085 | 16 | 63 | 1,063 |
-| 12-storey concrete | at rest | 130 | 5 | 3,562 | 362 | 1,432 | 2,724 |
-| | dynamic | 134 | 8 | 3,569 | 16 | 135 | 343 |
+| 4-storey concrete | at rest | 69 | 3 | 2,032 | 670 | 1,147 | 2,269 |
+| | dynamic | 516 | 114 | 1,317 | 16 | 61 | 1,846 |
+| 4-storey masonry | at rest | 128 | 3 | 2,011 | 457 | 1,026 | 1,673 |
+| | dynamic | 575 | 116 | 800 | 16 | 74 | 1,325 |
+| 12-storey concrete | at rest | 130 | 5 | 3,562 | 362 | 1,554 | 2,828 |
+| | dynamic | 131 | 22 | 3,569 | 16 | 140 | 486 |
 
-- The 12-storey tower comes down as at rest (134 joints against 130, the same piece), in an eighth of the time, and no step is longer than 135 ms where one took 1.4 s.
-- The 4-storey buildings break up more: 910 and 1,236 joints against 69 and 128. At rest, 64 joints fail a round, the worst first, and the column's go in the first rounds; stepped, the floors hang from one column for 28–42 steps before they have turned 0.005 rad, and crack meanwhile. Which is nearer the truth is not validated.
+- The 12-storey tower comes down as at rest (131 joints against 130, the same piece), in a sixth of the time, and no step is longer than 140 ms where one took 1.6 s.
+- The 4-storey buildings break up more: 516 and 575 joints against 69 and 128, in 1.9 s of steps. At rest, 64 joints fail a round, the worst first, and the column's go in the first rounds; stepped, the floors hang from one column until they are seen to fall, and crack meanwhile. Which is nearer the truth is not validated.
 
 ## Lab (software GPU)
 
@@ -132,6 +136,18 @@ The ground storey blasted away but one column:
 | --- | --- | --- | --- |
 | `complexcol` | 300 | pass; 16 engine jobs, median 10.1 ms, max 52.4 ms | passes on phase 2 (docs/STATUS.md there) |
 | `collapse` | 150 | fails: 2 frames drawn below what exists, 7 pieces moving too far, 2 rebounds, not settled; 57 engine jobs, median 6.1 ms, p95 299 ms, max 1,214 ms | the same four, the same counts; 54 jobs, median 5.7 ms, p95 323 ms, max 1,168 ms |
+
+`ball` with the dynamic structure:
+
+| | Checks | Joints failed | Pieces sent off | Structure jobs (of them at the cap) |
+| --- | --- | --- | --- | --- |
+| At rest | pass | 2 | 0 | 25 engine jobs in all |
+| Dynamic, a cell beyond the range gone at once | fails: 1 piece moving further than its speed allows | 17 (14 of them cut) | 3 | 69 engine jobs in all |
+| Dynamic, watched (`DYN_WATCH`) | pass | 15 (9 cut) | 4 | 66 (31) |
+| The same with `DYN_IT` = 64 | pass | 17 (9 cut) | 5 | 83 (13) |
+
+- Stepped, more comes away round the balls' holes than solved at rest. The count hardly changes with four times the iterations, so it is the model and not the cap: a piece let go by a hit drops onto its cracked, softened joints, and their forces pass what they carry at rest. Not validated.
+- Half the structure's steps here stop at the cap (31 of 66): cracked joints are soft beside sound ones, and the multigrid converges slowly across them.
 
 In `collapse` the building is cut from the ground at once and falls as bodies: the standing structure has little to answer, and the long engine jobs are the impacts on the falling pieces. The quick suite and the page checks are in docs/STATUS.md.
 
@@ -142,6 +158,8 @@ In `collapse` the building is cut from the ground at once and falls as bodies: t
 - **Cost while moving.** Every step builds the network and its multigrid again: 31–36 ms for the 12-storey tower before the first iteration, 2.7 ms an iteration. Keeping them between steps that change nothing is not done.
 - **A hinged bed stays hinged** until the lot is next solved at rest; only open beds close again.
 - **Detached parts start from rest.** The cells' velocities are known when a part leaves, and are not yet given to the body on the GPU.
+- **Steps that stop at the cap.** In a damaged building (cracked joints, fracture cells) half the steps of the lab's `ball` did not reach the solver's tolerance in 16 iterations, and 13 of 83 not in 64. Their forces are approximate, and a structure step reports it (`structure_dyn(7)`; the lab's timeline, `dyn.capped`).
+- **More fails than at rest** round damage (the lab's `ball`: 15 joints against 2) and in a building left on one column. Not validated against anything.
 - **The complex building rests 4% lower** than at rest (0.817 against 0.855 at its worst joint) after the column shot: it stops under `DYN_REST`, and its beds keep the state they took on the way.
 - **Not on a real GPU yet.** Every timing here is native or the software GPU.
 

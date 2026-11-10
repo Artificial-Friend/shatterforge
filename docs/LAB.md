@@ -457,3 +457,37 @@ Software GPU, 300 frames each (`node game/lab.cjs complex --frames 300`, `node g
 - `ball` passes.
 - Deterministic over 150 frames.
 - Page checks `rest` and `debris` pass.
+
+## 10 November: the dynamic structure (branch `test`, docs/DYNAMIC.md)
+
+Software GPU. `tools/check.sh lab` (collapse 600 frames, ball, the page checks, collapse twice), then `node game/lab.cjs complex --frames 300`, `node game/lab.cjs city --frames 300` and `node game/lab.cjs far`, all on the build with the dynamic structure on. `SF_STATIC=1` runs a scenario with it off. `mixed` and `nibble` were not run on this build.
+
+**What the lab now records.** Each structure job in a report's timeline carries `dyn`: the solver's iterations, whether the structure is still moving, the cells that left it and the joints cut for them, whether the solve stopped at its cap, and the fastest cell (mm/s).
+
+**Scenarios where the building is cut from the ground: unchanged**
+
+| Scenario | Frames | Failed checks, dynamic | Before (phase 2, docs/STATUS.md there) | Structure jobs (failures) |
+| --- | --- | --- | --- | --- |
+| `collapse` | 600 | 2 drawn below, 8 jumps, 2 rebounds, 7 energy gains, not settled | 2, 7, 3, 21, not settled | 28 (0) of 87 engine jobs |
+| `complex` | 300 | 2 below, 13 above, 2 jumps, crumbled share 0.73, 17 rebounds, 2 thrown up, not settled | 4, 11, 3, 0.71, 15, 2, not settled | 14 (10) of 91 |
+| `city` | 300 | 13 below, 10 above, 3 jumps, 0.58, 12 rebounds, 1 thrown up, not settled | the same seven, the same counts | 8 (0) of 133 |
+
+- With it on and off, `collapse` at 150 frames fails the same four checks with the same counts (2 below, 7 jumps, 2 rebounds, not settled).
+- In these the standing structure has little to answer once the cut is made: its steps fail nothing in `collapse` and `city`. The engine's long jobs (up to 1.7 s) are the impacts on the falling pieces, and the failed checks are theirs and the rubble's.
+
+**Scenarios where the building stands and answers**
+
+| Scenario | Result | Notes |
+| --- | --- | --- |
+| `ball` | pass | 15 joints fail and 4 pieces come away, against 2 and 0 solved at rest (docs/DYNAMIC.md, Lab). 31 of its 66 structure steps stop at the solver's cap |
+| `far` | pass | |
+| `complexstand`, `citystand` | pass | `citystand`: 5 engine jobs, the first 805 ms (9 lots at rest), 87 of 121 steps skipped at rest |
+| `complexcol` | pass | settled at 4.75 s; 12 structure steps, 6 at the cap, 0 failures |
+| `complexroom` | pass | settled at 4.3 s |
+| `keystone` | pass | settled at 4.87 s (limit 5), 1 joint failed. On phase 2 it failed this check: 3 crumbs in the notch never slept. Why it passes now is not looked into; at 0.13 s inside the limit it may not pass every time |
+
+**Found on the way**
+- `ball` failed one check (a particle moving 0.255 m between frames, limit 0.25) when a cell beyond the linear range was taken to have left at once: 14 joints were cut and 3 pieces sent off round the holes. Cells beyond the range are now watched for 0.15 s first (`DYN_WATCH`). The ball scenario is the check.
+- A comment added in the middle of a line of the page's settings left every setting unapplied at start, so the worker never had them (the dynamic structure off, the view without cells). Page check `view` covers it: before, 370 bricks, 0 cells, sag 0; after, 838 cells, sag 0.65 mm.
+
+**Also on this build:** deterministic over 150 frames; page checks `rest`, `debris` and `view` pass; GPU suite 41 PASS (the page's GPU engine is unchanged).

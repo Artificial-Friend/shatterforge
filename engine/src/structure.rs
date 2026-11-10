@@ -285,6 +285,8 @@ pub struct Dyn {
     pub want_cells: bool,
     pub cells: Vec<([i32; 5], [f64; 3], [f64; 6])>,
     /// where each cell last rested (displacement and rotation): `DYN_TURN` and `DYN_MOVE` are measured from there
+    /// the cells beyond that range and watched: (how long for (s), how far out when they crossed (ranges))
+    pub beyond: crate::Map<(u32, i32, i32), (f64, f64)>,
     pub rest: crate::Map<(u32, i32, i32), [f64; 6]>,
     /// the stones' beds open (1) or hinged (2) after the last step: (joint, its two cells)
     pub beds: crate::Map<(u32, (u32, i32, i32), (u32, i32, i32)), u8>,
@@ -303,9 +305,15 @@ pub const DYN_DAMP: f64 = 1.0;
 /// displacements), and a part turned by t stretches by t^2 / 2 of its length for nothing (0.005 rad: 1.25e-5,
 /// an eighth of the strain concrete cracks at; at 0.01 rad the 4-storey frame left on one column broke into
 /// pieces of 1,242 bricks at most, 1,171 joints failed, against 1,845 and 843: dyn_tests). What moves that far is cut loose where it meets what does not, and
-/// falls as a body; its own joints are not checked on the way (their strains are the turn's, not load).
+/// falls as a body; joints between cells beyond the range are not checked (their strains are the turn's, not
+/// load). A cell beyond the range has not left yet: it is watched (`DYN_WATCH`).
 pub const DYN_TURN: f64 = 0.005;
 pub const DYN_MOVE: f64 = 0.05;
+/// A cell beyond that range is watched for this long (s) before it is taken to have left; see `analyse_dyn`.
+/// Taken at once, the lab's ball (two steel balls into a facade) cut 14 joints and sent 3 pieces off where the
+/// structure solved at rest fails 2 joints and sends none: cracked pieces by the holes, hanging by their softened
+/// joints, sag past the range and stay.
+pub const DYN_WATCH: f64 = 0.15;
 /// the ratio given to a joint cut because one side has left the structure (so that it goes first)
 pub const DYN_CUT: f32 = 1.0e3;
 impl Dyn {
@@ -623,27 +631,16 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
     // fractions of a millimetre): a node by an open or hinged bed displaced over 5 cm
     let disp = |k: usize| sqrt64(x[k][0] * x[k][0] + x[k][1] * x[k][1] + x[k][2] * x[k][2]);
     let mech_link: Vec<bool> = links.iter().enumerate().map(|(l, lk)| bed_state[l] != 0 && (disp(lk.a as usize) > 0.05 || disp(lk.b as usize) > 0.05)).collect();
-    // a dynamic step: the cells that have left the linear range (`DYN_TURN`, `DYN_MOVE`)
-    // (measured from where the cell last rested: a timber floor at rest has turned 0.005 rad at its bearings under
-    // its own weight, and the city's first dynamic step cut it loose. A cell with no resting place yet, cut from a
-    // brick since, counts from where it is.)
-    let gone: Vec<bool> = if dynamic {
-        let d = dy.as_ref().unwrap();
-        (0..n).map(|k| {
-            if fixed[k] { return false; }
-            let Some(r) = d.rest.get(&key(k)) else { return false };
-            let (t, u) = ([x[k][3] - r[3], x[k][4] - r[4], x[k][5] - r[5]], [x[k][0] - r[0], x[k][1] - r[1], x[k][2] - r[2]]);
-            t[0] * t[0] + t[1] * t[1] + t[2] * t[2] > DYN_TURN * DYN_TURN || u[0] * u[0] + u[1] * u[1] + u[2] * u[2] > DYN_MOVE * DYN_MOVE
-        }).collect()
-    } else { Vec::new() };
-    let left = gone.iter().filter(|g| **g).count();
+    // a dynamic step: each cell in the linear range (0), beyond it and watched (1), or gone (2); see `DYN_TURN`
+    let mut state: Vec<u8> = Vec::new();
+    let mut left = 0usize;
     if dynamic {
         // the cells' new velocities. A step that needed no iteration found the cells at rest: they stay where they
         // were (carried on at their last velocity, nothing would ever damp the solver's last small error).
         let d = dy.unwrap();
         let h = d.h;
         if it == 0 { x = xn.clone(); }
-        d.vel.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = capped; d.left = left; d.cut = bed_changes;
+        d.vel.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = capped; d.left = 0; d.cut = bed_changes;
         d.beds.clear(); for l in 0..links.len() { if bed_state[l] != 0 { d.beds.insert(bed_key(l), bed_state[l]); } }
         for k in 0..n {
             if fixed[k] { continue; }
@@ -657,12 +654,33 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         if !(capped || d.speed > DYN_REST) { d.vel.clear(); }
         // where the cells rest: all of them when the structure does, and a new cell where it is now
         let at_rest = d.vel.is_empty();
-        if at_rest { d.rest.clear(); }
+        if at_rest { d.rest.clear(); d.beyond.clear(); }
         for k in 0..n { if !fixed[k] && (at_rest || !d.rest.contains_key(&key(k))) { d.rest.insert(key(k), x[k]); } }
+        // which cells have left. How far a cell is from where it rested, in ranges: the larger of its turn over
+        // DYN_TURN and its move over DYN_MOVE. Beyond 1 it is watched: after DYN_WATCH s, a cell a range further
+        // out than when it crossed has left (it is falling: from rest a part falls 5 cm in 0.1 s and 31 cm by
+        // 0.25 s); one that after twice as long has not gone a quarter of a range further has found a new resting
+        // place (a cracked piece hanging by its softened joints), and rests there.
+        state = vec![0u8; n];
+        let mut beyond: crate::Map<(u32, i32, i32), (f64, f64)> = Default::default();
+        for k in 0..n {
+            if fixed[k] { continue; }
+            let Some(r) = d.rest.get(&key(k)).copied() else { continue };
+            let (t, u) = ([x[k][3] - r[3], x[k][4] - r[4], x[k][5] - r[5]], [x[k][0] - r[0], x[k][1] - r[1], x[k][2] - r[2]]);
+            let m = (sqrt64(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]) / DYN_TURN).max(sqrt64(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]) / DYN_MOVE);
+            if m <= 1.0 { continue; }
+            let (t0, m0) = d.beyond.get(&key(k)).copied().unwrap_or((0.0, m));
+            let t1 = t0 + h;
+            if t1 >= DYN_WATCH && m >= m0 + 1.0 { state[k] = 2; left += 1; beyond.insert(key(k), (t1, m0)); }
+            else if t1 >= 2.0 * DYN_WATCH && m < m0 + 0.25 { d.rest.insert(key(k), x[k]); }
+            else { state[k] = 1; beyond.insert(key(k), (t1, m0)); }
+        }
+        d.beyond = beyond;
+        d.left = left;
     } else if let Some(d) = dy {
         // (solved at rest: the beds as this solve left them are where the next dynamic step starts)
         d.vel.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = false; d.left = 0; d.cut = 0;
-        d.rest.clear(); for k in 0..n { if !fixed[k] { d.rest.insert(key(k), x[k]); } }
+        d.rest.clear(); d.beyond.clear(); for k in 0..n { if !fixed[k] { d.rest.insert(key(k), x[k]); } }
         d.beds.clear(); for l in 0..links.len() { if bed_state[l] != 0 { d.beds.insert((links[l].joint, key(links[l].a as usize), key(links[l].b as usize)), bed_state[l]); } }
     }
     if let Some(w) = warm { w.0.clear(); for k in 0..n { if !fixed[k] { w.0.insert(key(k), x[k]); } } }
@@ -734,9 +752,11 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
             else { bed_ratio(&sect, fl, ml, [sa[0].min(sb[0]), 0.0, 0.2 * sa[2].min(sb[2])]) };
         // (a dynamic step: a joint between a cell that has left and one that has not is cut; one between two that
         // have left goes with them unchecked)
-        let (mut g_any, mut g_all, mut g_cross) = (false, true, false);
-        if left > 0 { for &l in ls.iter() { let (ga, gb) = (gone[links[l].a as usize], gone[links[l].b as usize]); if ga || gb { g_any = true; } if !(ga && gb) { g_all = false; } if ga != gb { g_cross = true; } } }
-        let ratio = if left == 0 || !g_any { ratio } else if g_cross { DYN_CUT } else if g_all { 0.0 } else { ratio };
+        // (watched cells are not yet cut from what stands, but a joint between two cells beyond the range, watched
+        // or gone, is not checked: what it shows is their turning)
+        let (mut g_all, mut g_cross) = (!state.is_empty(), false);
+        if !state.is_empty() { for &l in ls.iter() { let (sa, sb) = (state[links[l].a as usize], state[links[l].b as usize]); if sa == 0 || sb == 0 { g_all = false; } if (sa == 2 && sb == 0) || (sb == 2 && sa == 0) { g_cross = true; } } }
+        let ratio = if g_cross { DYN_CUT } else if g_all { 0.0 } else { ratio };
         out.ratios.push((j, ratio));
         if ratio > out.max_ratio && ratio < DYN_CUT { out.max_ratio = ratio; }
         if ratio > 1.0 { out.failed.push((j, ratio)); }
@@ -752,7 +772,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         let (eu, ew) = ((k.face_hi[u] - k.face_lo[u]) as f64 * tk, (k.face_hi[w] - k.face_lo[w]) as f64 * tk);
         let (fo, mo) = face_load(l);
         let ratio = section_ratio(&Sect::rect(eu, ew, eu * ew), local(k.axis, &None, fo), local(k.axis, &None, mo), strength(m), flexural_of(b, i as usize));
-        let ratio = if left == 0 { ratio } else { let (ga, gb) = (gone[k.a as usize], gone[k.b as usize]); if ga != gb { out.left_cut += 1; DYN_CUT } else if ga { 0.0 } else { ratio } };
+        let ratio = if state.is_empty() { ratio } else { let (sa, sb) = (state[k.a as usize], state[k.b as usize]); if (sa == 2 && sb == 0) || (sb == 2 && sa == 0) { out.left_cut += 1; DYN_CUT } else if sa != 0 && sb != 0 { 0.0 } else { ratio } };
         if want_cells { out.inner_all.push((i, ratio.min(1.0))); }
         if ratio > out.worst_in.0 { out.worst_in = (ratio, i, k.axis, fo[k.axis] as f32, (mo[u] * mo[u] + mo[w] * mo[w]) as f32, 0.0); }
         if ratio > out.max_ratio && ratio < DYN_CUT { out.max_ratio = ratio; }

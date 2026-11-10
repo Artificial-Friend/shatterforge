@@ -36,7 +36,7 @@ Test `city::tests::the_city_is_what_it_should_be_and_stands` (native, release, b
 ## The dynamic structure by lot (branch `test`, docs/DYNAMIC.md)
 
 - Each lot keeps its own displacements, velocities and beds (`Game::dynst`), and is stepped on its own. A lot still moving stays active; the others cost nothing.
-- Test `dyn_tests::a_city_is_stepped_lot_by_lot` (native, release, build machine): the 3 × 3 city's first step solves its 9 lots at rest in 704–990 ms; at rest a step takes 0.2 ms. A column of the complex building shot out moves lot 0 only: at rest again after 87 steps (1.5 s), the slowest 28 ms.
+- Test `dyn_tests::a_city_is_stepped_lot_by_lot` (native, release, build machine): the 3 × 3 city's first step solves its 9 lots at rest in 704–990 ms; at rest a step takes 0.2 ms. A column of the complex building shot out moves lot 0 only: at rest again after 95 steps (1.6 s), the slowest 31 ms.
 - The engineer's view (key V) colours every brick of the city by its load and draws the lots where their solutions put them: 7,539 bricks and 32,819 cells, 475 kB when it is switched on (every lot analysed once), then only the lots that change.
 
 ## Meshes by lot
