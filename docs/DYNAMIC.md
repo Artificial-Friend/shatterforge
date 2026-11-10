@@ -136,6 +136,8 @@ The ground storey blasted away but one column:
 | --- | --- | --- | --- |
 | `complexcol` | 300 | pass; 16 engine jobs, median 10.1 ms, max 52.4 ms | passes on phase 2 (docs/STATUS.md there) |
 | `collapse` | 150 | fails: 2 frames drawn below what exists, 7 pieces moving too far, 2 rebounds, not settled; 57 engine jobs, median 6.1 ms, p95 299 ms, max 1,214 ms | the same four, the same counts; 54 jobs, median 5.7 ms, p95 323 ms, max 1,168 ms |
+| `mixed` | 960 | fails the same five checks as on phase 2, the same counts | not run |
+| `nibble` | 1,584 | fails 3 checks (4 frames below, 2 above, 5 jumps); engine jobs p95 107 ms, max 5,214 ms | fails 2 (2 below, 6 jumps); p95 1,629 ms, max 3,378 ms |
 
 `ball` with the dynamic structure:
 
@@ -159,6 +161,7 @@ In `collapse` the building is cut from the ground at once and falls as bodies: t
 - **A hinged bed stays hinged** until the lot is next solved at rest; only open beds close again.
 - **Detached parts start from rest.** The cells' velocities are known when a part leaves, and are not yet given to the body on the GPU.
 - **Steps that stop at the cap.** In a damaged building (cracked joints, fracture cells) half the steps of the lab's `ball` did not reach the solver's tolerance in 16 iterations, and 13 of 83 not in 64. Their forces are approximate, and a structure step reports it (`structure_dyn(7)`; the lab's timeline, `dyn.capped`).
+- **A step is not bounded when much leaves at once.** The lab's `nibble` had one engine job of 5.2 s (3.4 s at most solved at rest), in a run where 3,053 cells were beyond the range at once; its p95 fell from 1,629 to 107 ms. It also draws 2 frames above what exists, which it does not at rest. Both open (docs/LAB.md, 10 November).
 - **More fails than at rest** round damage (the lab's `ball`: 15 joints against 2) and in a building left on one column. Not validated against anything.
 - **The complex building rests 4% lower** than at rest (0.817 against 0.855 at its worst joint) after the column shot: it stops under `DYN_REST`, and its beds keep the state they took on the way.
 - **Not on a real GPU yet.** Every timing here is native or the software GPU.

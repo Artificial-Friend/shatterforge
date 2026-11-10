@@ -460,7 +460,7 @@ Software GPU, 300 frames each (`node game/lab.cjs complex --frames 300`, `node g
 
 ## 10 November: the dynamic structure (branch `test`, docs/DYNAMIC.md)
 
-Software GPU. `tools/check.sh lab` (collapse 600 frames, ball, the page checks, collapse twice), then `node game/lab.cjs complex --frames 300`, `node game/lab.cjs city --frames 300` and `node game/lab.cjs far`, all on the build with the dynamic structure on. `SF_STATIC=1` runs a scenario with it off. `mixed` and `nibble` were not run on this build.
+Software GPU. `tools/check.sh lab` (collapse 600 frames, ball, the page checks, collapse twice), then `node game/lab.cjs complex --frames 300`, `node game/lab.cjs city --frames 300` and `node game/lab.cjs far`, all on the build with the dynamic structure on. `SF_STATIC=1` runs a scenario with it off. `mixed` (960 frames) and `nibble` followed, and `nibble` again with `SF_STATIC=1`.
 
 **What the lab now records.** Each structure job in a report's timeline carries `dyn`: the solver's iterations, whether the structure is still moving, the cells that left it and the joints cut for them, whether the solve stopped at its cap, and the fastest cell (mm/s).
 
@@ -485,6 +485,25 @@ Software GPU. `tools/check.sh lab` (collapse 600 frames, ball, the page checks, 
 | `complexcol` | pass | settled at 4.75 s; 12 structure steps, 6 at the cap, 0 failures |
 | `complexroom` | pass | settled at 4.3 s |
 | `keystone` | pass | settled at 4.87 s (limit 5), 1 joint failed. On phase 2 it failed this check: 3 crumbs in the notch never slept. Why it passes now is not looked into; at 0.13 s inside the limit it may not pass every time |
+
+**`mixed` and `nibble`**
+- `mixed` (960 frames) fails the same five checks with the same counts as on phase 2 (3 below, 15 jumps, crumbled share 0.54, 27 rebounds, 12 thrown up), and settles at 15.48 s as there. Its 14 structure steps fail nothing: the building is cut from the ground.
+- `nibble` is where the standing structure answers most, and the result is mixed:
+
+| `nibble`, 1,584 frames | Dynamic | At rest (`SF_STATIC=1`, same build) |
+| --- | --- | --- |
+| Failed checks | 4 frames drawn below, 2 above, 5 jumps | 2 below, 6 jumps |
+| Structure jobs | 85 (65 at the cap) | 120 |
+| Joints failed, pieces sent off | 2,544, 132 | 3,481, 216 |
+| Engine jobs: median, p95, max (ms) | 2.7, 106.7, 5,214 | 2.8, 1,629, 3,378 |
+| GPU ms a step, median | 98.8 | 398.3 |
+| Joints cracked and holding at the end | 4,093 | 2,748 |
+
+  - The engine's p95 falls from 1.6 s to 0.1 s, as the bound on a step's iterations intends.
+  - **Open: one job of 5.2 s**, longer than any at rest. In one step 3,053 cells were beyond the range or gone at once (4,623 joints and faces cut over the run). Not traced: which job it was, and whether the time is the solve, the cutting or the detaching.
+  - **Open: 2 frames drawn above what exists**, a check that passes at rest. Not traced.
+  - Fewer joints fail and fewer pieces come away than at rest, and more joints are left cracked and holding. Which is nearer the truth is not validated.
+  - On phase 2 `nibble` also failed 1 rebound and 14 energy gains (docs/STATUS.md there); neither shows on this build, on or off.
 
 **Found on the way**
 - `ball` failed one check (a particle moving 0.255 m between frames, limit 0.25) when a cell beyond the linear range was taken to have left at once: 14 joints were cut and 3 pieces sent off round the holes. Cells beyond the range are now watched for 0.15 s first (`DYN_WATCH`). The ball scenario is the check.
