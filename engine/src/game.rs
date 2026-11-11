@@ -1432,7 +1432,11 @@ mod tests {
             std::println!("kind {kind}: worst {r0:.2} after the cuts (largest displacement {:.1} mm); without wear {n0} failures in 40 checks; with wear failures in checks {:?} ({} joints, {} cracked, largest displacement {:.1} mm)", still.warm.max_disp() * 1e3, &rounds_with[..rounds_with.len().min(30)], g.failed_total, g.cracked_total, g.warm.max_disp() * 1e3);
             assert_eq!(n0, 0, "kind {kind}: without wear nothing changes");
             assert!(!rounds_with.is_empty(), "kind {kind}: with wear its joints give way in time");
-            assert!(rounds_with[0] >= 2, "kind {kind}: not at once");
+            // (not in the check that follows the cut. It was not in the first two: the solve then stopped at r z down
+            // by 1e-5 and left the cut frame's worst joint at 1.00, held at its residual strength; solved to 1e-7 the
+            // joint that goes first stands at 0.96 to 0.99, and the wear rule, (r - 0.7)^2 a second, takes it in the
+            // second check, 1 s after the cut.)
+            assert!(rounds_with[0] >= 1, "kind {kind}: not at once");
             assert!(rounds_with.len() >= 4, "kind {kind}: in several rounds, not one");
         }
     }
