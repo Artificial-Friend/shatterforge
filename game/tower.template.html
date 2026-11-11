@@ -702,7 +702,7 @@ onmessage = async (m) => {
   const t0 = performance.now();
   let n = 0;
   if (d.op === 'blast') n = E.blast(d.x, d.y, d.z, d.r);
-  else if (d.op === 'structure') { E.set_param(4, d.dt || 0); if (d.rest) for (let k = 0; k < d.rest.length; k += 4) E.rest_load(d.rest[k], d.rest[k + 1], d.rest[k + 2], d.rest[k + 3]); n = E.structure_step(d.max); }
+  else if (d.op === 'structure') { E.set_param(4, d.dt || 0); if (d.rest) E.rest_begin(); if (d.rest) for (let k = 0; k < d.rest.length; k += 4) E.rest_load(d.rest[k], d.rest[k + 1], d.rest[k + 2], d.rest[k + 3]); n = E.structure_step(d.max); }
   else if (d.op === 'pblast') n = E.piece_blast(d.piece, d.x, d.y, d.z, d.r);
   else if (d.op === 'impacts') { const p = E.impacts_in(d.recs.length / 11); new Float32Array(E.memory.buffer, p, d.recs.length).set(d.recs); n = E.impacts(d.dt); }
   else if (d.op === 'snap') { const o = []; for (const pc of d.pieces) { n += E.piece_snap(pc); o.push(...new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len())); } d.outs = o; }
@@ -733,7 +733,7 @@ function runInline(job) {
   const t0 = performance.now();
   let n = 0;
   if (job.op === 'blast') n = E.blast(job.x, job.y, job.z, job.r);
-  else if (job.op === 'structure') { E.set_param(4, job.dt || 0); if (job.rest) for (let k = 0; k < job.rest.length; k += 4) E.rest_load(job.rest[k], job.rest[k + 1], job.rest[k + 2], job.rest[k + 3]); n = E.structure_step(job.max); }
+  else if (job.op === 'structure') { E.set_param(4, job.dt || 0); if (job.rest) E.rest_begin(); if (job.rest) for (let k = 0; k < job.rest.length; k += 4) E.rest_load(job.rest[k], job.rest[k + 1], job.rest[k + 2], job.rest[k + 3]); n = E.structure_step(job.max); }
   else if (job.op === 'pblast') n = E.piece_blast(job.piece, job.x, job.y, job.z, job.r);
   else if (job.op === 'snap') { const o = []; for (const pc of job.pieces) { n += E.piece_snap(pc); o.push(...new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len())); } job.outs = o; }
   else { const p = E.impacts_in(job.recs.length / 11); new Float32Array(E.memory.buffer, p, job.recs.length).set(job.recs); n = E.impacts(job.dt); }

@@ -705,7 +705,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
     let moved = |xp: &[[f64; 6]], d: Vec<[f64; 6]>| -> Vec<[f64; 6]> { let mut x = d; for k in 0..x.len() { for i in 0..6 { x[k][i] += xp[k][i]; } } x };
     // (the dynamic-model spike reads the network a test analyses: structure/dyn_spike.rs)
     #[cfg(test)] dyn_spike::capture(&springs, &ends, &fixed, &pos, &f, &nodes.iter().map(|nd| { let tk = TICK as f64; [(nd.hi[0] - nd.lo[0]) as f64 * tk, (nd.hi[1] - nd.lo[1]) as f64 * tk, (nd.hi[2] - nd.lo[2]) as f64 * tk, nd.load as f64] }).collect::<Vec<_>>());
-    let (mut x, mut it) = if !dynamic { solve_network(&springs, &ends, &fixed, &pos, &f, x0, cap, None) } else if quiet { (xn.clone(), 0) } else { let (d, i) = solve_network(&springs, &ends, &fixed, &pos, &f, None, cap, if settling { None } else { Some(&scale) }); (moved(&xp, d), i) };
+    let (mut x, mut it) = if !dynamic { solve_network(&springs, &ends, &fixed, &pos, &f, x0, cap, None) } else if quiet { (xn.clone(), 0) } else { let (d, i) = solve_network(&springs, &ends, &fixed, &pos, &f, None, cap, Some(&scale)); (moved(&xp, d), i) };
     let mut capped = dynamic && it >= cap;
     // Stones' beds carry no tension, and where the thrust leaves a bed's face a hinge opens through it (Heyman): a bed
     // the solution pulls apart opens (its springs all but go), one whose thrust passes outside its face hinges (it
@@ -779,7 +779,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
             let (x2, it2) = if dynamic {
                 f = rhs_of(&springs, &m6, &vn, &an, &xn, &xp, &vp, sd);
                 let d0: Vec<[f64; 6]> = (0..x.len()).map(|k| { let mut d = x[k]; for i in 0..6 { d[i] -= xp[k][i]; } d }).collect();
-                let (d, i) = solve_network(&springs, &ends, &fixed, &pos, &f, Some(d0), cap, if settling { None } else { Some(&scale) });
+                let (d, i) = solve_network(&springs, &ends, &fixed, &pos, &f, Some(d0), cap, Some(&scale));
                 (moved(&xp, d), i)
             } else { solve_network(&springs, &ends, &fixed, &pos, &f, Some(x.clone()), cap, None) };
             x = x2; it += it2; if dynamic && it2 >= cap { capped = true; }

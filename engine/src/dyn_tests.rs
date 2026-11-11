@@ -337,3 +337,32 @@ fn same_fall(gate: bool) {
     assert!(stood >= 10, "enough cases to mean something: {stood}");
     assert!(bad.is_empty(), "nothing crumbles: {bad:?}");
 }
+
+#[test] fn rubble_on_a_resting_building_does_not_keep_it_moving() {
+    // the complex building at rest again after its corner column was shot out (the lab's complexcol), then rubble
+    // on a floor as the page sends it: a list once a second (here every 15th step of 4 frames), a little heavier
+    // each time. As it was, the rubble weighed only in the step after its list: a load of some kN coming and going
+    // every second, each time 20 settling steps at the cap and a rest forced (lab complexcol, 11 Nov: 97 of 99
+    // structure steps at the cap, never settled). Kept between lists, and with a settling step's tolerance measured
+    // against the loads as every step's is, the building rests within a few steps of each list. This test before:
+    // 60 of 90 steps moving, 60 at the cap, 4 rests forced; after: 3, 0, 0.
+    let shoot = |g: &mut Game| { let (o, d) = (v3(16.0, 1.5, 6.0), v3(-1.0, 0.0, 0.0)); let t = g.raycast(o, d, 100.0); if t < 100.0 { g.blast(o + d * t, 0.7); } };
+    let mut g = Game::new_kind(3, 4);
+    g.dynamic = true;
+    g.structure_step(64);
+    let step = |g: &mut Game| { g.struct_dt = 4.0 / 60.0; g.structure_step(48) };
+    for k in 0..60 { if k < 4 { shoot(&mut g); } step(&mut g); }
+    assert!(!g.moving, "at rest after the shots");
+    let (mut moving, mut capped, mut failed, mut applied, mut longest, mut run) = (0, 0, 0, 0.0f32, 0, 0);
+    for k in 0..90 {
+        if k % 15 == 0 { g.rest_fresh = true; g.rest.clear(); let mut x = -6.0f32; while x <= 6.0 { g.rest.push([x, 6.0, 2.0, 400.0 + 20.0 * (k / 15) as f32]); x += 1.0; } }
+        failed += step(&mut g);
+        if k % 15 == 0 { applied = applied.max(g.rest_applied); }
+        if g.moving { moving += 1; run += 1; longest = longest.max(run); } else { run = 0; }
+        if g.dyn_capped { capped += 1; }
+    }
+    let forced: usize = g.dynst.values().map(|s| s.1.forced).sum();
+    println!("complex building at rest, {:.1} kN of rubble sent 6 times in 90 steps: {moving} steps moving ({longest} in a row at most), {capped} at the cap, {forced} rests forced, {failed} joints failed, worst {:.3}", applied * 1e-3, g.max_ratio);
+    assert!(applied > 1000.0, "the rubble lies on a floor");
+    assert!(longest <= 8 && capped <= 4 && failed == 0, "it rests within a few steps of each list");
+}

@@ -24,6 +24,11 @@ pub struct Game {
     pub b: Bricks,
     /// weight resting on the structure (rubble lying on floors), for the next structure_step: (x, y, z m, N)
     pub rest: Vec<[f32; 4]>,
+    /// a new list of rubble has been given since the last structure step (`wasm::rest_begin`; an empty one too),
+    /// and the list the dynamic structure keeps between steps: the page sends one once a second, and rubble that
+    /// weighed only in the step after it came and went as a load every second (the lab's complexcol never rested)
+    pub rest_fresh: bool,
+    pub rest_kept: Vec<[f32; 4]>,
     /// last structure_step: the resting weight it found a floor for (N)
     pub rest_applied: f32,
     /// joints and bricks failed by sideways hits (all impacts calls)
@@ -205,7 +210,7 @@ impl Game {
         let n = tiles.count();
         let start = if kind == 5 { let l = crate::city::layout(storeys); let x = if l.n % 2 == 1 { crate::city::PITCH_M / 2.0 } else { 0.0 }; v3(x, 0.26, 0.0) } else { v3(0.0, 0.26, -14.0) };
         let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, player: Player::new(start), tiles, active: vec![true; (tiles.n * tiles.n) as usize], tile_ratio: vec![0.0; (tiles.n * tiles.n) as usize], chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, dynamic: false, dynst: Default::default(), moving: false, dyn_speed: 0.0, dyn_its: 0, dyn_kinetic: 0.0, dyn_left: 0, dyn_cut: 0, dyn_capped: false, view: Default::default(), view_want: false, view_out: Vec::new(), view_in: Vec::new(), view_bricks: Vec::new(), view_chunks: Vec::new(), wearing: 0, wearing_at: Vec::new(), worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
+                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), struct_dt: 0.0, rest_fresh: false, rest_kept: Vec::new(), dynamic: false, dynst: Default::default(), moving: false, dyn_speed: 0.0, dyn_its: 0, dyn_kinetic: 0.0, dyn_left: 0, dyn_cut: 0, dyn_capped: false, view: Default::default(), view_want: false, view_out: Vec::new(), view_in: Vec::new(), view_bricks: Vec::new(), view_chunks: Vec::new(), wearing: 0, wearing_at: Vec::new(), worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
         for k in 0..n as i32 { g.remesh(k); }
         g.loose_pending = (0..g.b.len()).any(|i| g.b.flags[i] & crate::brick::F_LOOSE != 0);
         g
@@ -514,7 +519,11 @@ impl Game {
         let mut load: Vec<f32> = set.iter().map(|&i| structure::mass(&self.b, i) * 9.81).collect();
         // rubble lying on the structure weighs on the brick under it: a floor heaped with debris carries it, and
         // fails when it is too much
-        let rest = core::mem::take(&mut self.rest);
+        let rest = if self.dynamic {
+            if self.rest_fresh || !self.rest.is_empty() { self.rest_kept = core::mem::take(&mut self.rest); }
+            self.rest_kept.clone()
+        } else { core::mem::take(&mut self.rest) };
+        self.rest_fresh = false;
         self.rest_applied = 0.0;
         let mut point = Vec::new();
         if !rest.is_empty() {
