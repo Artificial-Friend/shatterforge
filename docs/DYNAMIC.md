@@ -189,26 +189,20 @@ The ground storey blasted away but one column:
 
 ## Lab (software GPU)
 
-| Scenario | Frames | With the dynamic structure | At rest (`SF_STATIC=1`) |
-| --- | --- | --- | --- |
-| `complexcol` | 300 | pass; 16 engine jobs, median 10.1 ms, max 52.4 ms | passes on phase 2 (docs/STATUS.md there) |
-| `collapse` | 150 | fails: 2 frames drawn below what exists, 7 pieces moving too far, 2 rebounds, not settled; 57 engine jobs, median 6.1 ms, p95 299 ms, max 1,214 ms | the same four, the same counts; 54 jobs, median 5.7 ms, p95 323 ms, max 1,168 ms |
-| `mixed` | 960 | fails the same five checks as on phase 2, the same counts | not run |
-| `nibble` | 1,584 | fails 3 checks (4 frames below, 2 above, 5 jumps); engine jobs p95 107 ms, max 5,214 ms | fails 2 (2 below, 6 jumps); p95 1,629 ms, max 3,378 ms |
+docs/LAB.md, 11 November, has the runs and the tables. In short, `tools/compare.sh` on four scenarios, dynamic against at rest on the same build:
 
-`ball` with the dynamic structure:
-
-| | Checks | Joints failed | Pieces sent off | Structure jobs (of them at the cap) |
+| | `ball` | `complexcol` | `keystone` | `nibble` |
 | --- | --- | --- | --- | --- |
-| At rest | pass | 2 | 0 | 25 engine jobs in all |
-| Dynamic, a cell beyond the range gone at once | fails: 1 piece moving further than its speed allows | 17 (14 of them cut) | 3 | 69 engine jobs in all |
-| Dynamic, watched (`DYN_WATCH`) | pass | 15 (9 cut) | 4 | 66 (31) |
-| The same with `DYN_IT` = 64 | pass | 17 (9 cut) | 5 | 83 (13) |
+| Failed checks | none / none | none / none | none / none | 3 / 1 |
+| Engine jobs p95 (ms) | 60 / 94 | 37 / 96 | 44 / 42 | 124 / 2,112 |
+| Slowest engine job (ms) | 89 / 109 | 117 / 96 | 90 / 100 | 2,991 / 2,660 |
+| Structure steps at the cap | 44 of 52 | 5 of 18 | 2 of 34 | 88 of 120 |
+| Joints failed | 22 / 4 | 0 / 0 | 5 / 4 | 3,061 / 3,716 |
 
-- Stepped, more comes away round the balls' holes than solved at rest. The count hardly changes with four times the iterations, so it is the model and not the cap: a piece let go by a hit drops onto its cracked, softened joints, and their forces pass what they carry at rest. Not validated.
-- Half the structure's steps here stop at the cap (31 of 66): cracked joints are soft beside sound ones, and the multigrid converges slowly across them.
-
-In `collapse` the building is cut from the ground at once and falls as bodies: the standing structure has little to answer, and the long engine jobs are the impacts on the falling pieces. The quick suite and the page checks are in docs/STATUS.md.
+- Where the solve at rest stalls (`nibble`), the engine's p95 is a seventeenth and the structure's jobs take 9.9 s of the run for 103 s.
+- `nibble` still fails two checks it passes at rest (frames drawn above and below what exists), and its slowest jobs are an `impacts` job (3.0 s) and a structure step of 2.1 s in which thousands of cells leave at once.
+- Most moving steps stop at the cap of 16 iterations.
+- `collapse`, `complex`, `city` and `mixed` (the building cut from the ground) fail the checks they failed before; their slowest job is `impacts`. The quick suite and the page checks are in docs/STATUS.md.
 
 ## Limits
 

@@ -1,5 +1,7 @@
 # Structure: what holds the building up, and what breaks it
 
+**11 November 2026: the solve changed** (docs/DYNAMIC.md, The solve; docs/LAB.md of that day). Tolerance 1e-7 for 1e-5, the coarsest multigrid level factored, coarse blocks that follow the joints' stiffness, and no weak spring to the ground on cells their joints hold. Iteration counts, times and worst joints quoted below are the solve's as it was when each was written; the worst joints of buildings with stones or cracked joints were up to 2.2 times off (the complex building standing: 0.917 as then solved, 0.416 solved out, 0.415 now).
+
 The engine (`engine/src/structure.rs`, `game.rs`) checks the standing building as a rigid-body-spring network. Numbers below come from the engine tests (`cd engine && cargo test --release -- --nocapture --test-threads 1`), native, on the cloud machine.
 
 ## The model

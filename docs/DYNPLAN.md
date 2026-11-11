@@ -1,5 +1,7 @@
 # Plan: the dynamic structure, better than solved at rest (branch `test`, 11 November 2026)
 
+*"Where it stands" below is the plan's starting point (10 November's build); "Where each stage stands" is the state after the first pass through it.*
+
 **Goal.** The standing structure stepped as a dynamic model (docs/DYNAMIC.md) becomes the only way it is solved, because it beats the solve at rest on everything a player notices: no stalls, a building that sags and then goes, the same cut giving the same fall, nothing crumbling without a visible cause.
 
 **Order.** The engine's logic first (stages 1–6, all provable by native tests), then everything else (stage 7 on). A stage is done when its gates pass; a gate is a number.
@@ -10,7 +12,7 @@
 | --- | --- |
 | Lab checks failed | no more than at rest, on any scenario |
 | Slowest engine job | no slower than at rest |
-| Engine jobs, p95 | at most a quarter of at rest |
+| Engine jobs, p95 | at most a quarter of at rest, or under 20 ms (`tools/compare.cjs`) |
 | Structure steps that stop at the iteration cap | under 5% |
 | Closed-form dynamic tests (stage 1) | within the limits written there |
 
@@ -25,6 +27,46 @@
 | 12-storey tower on one column, slowest step (ms, native) | 140 | 1,554 |
 | Peak force after a sudden column loss, over the new static force | 1.04 | – (theory for a load let go: 2) |
 | `collapse`, `complex`, `city`, `mixed` | the same failed checks | the same |
+
+## Where each stage stands (11 November; docs/DYNAMIC.md, docs/LAB.md of that day)
+
+| Stage | Gate | Result | |
+| --- | --- | --- | --- |
+| 0 Scoreboard | `compare.sh` on `nibble`, `ball`, `complexcol`, `keystone`, tables in docs/LAB.md | done | **met** |
+| | your six benchmark reports in `bench/` | none yet | open (yours) |
+| 1 The step | the six closed-form tests | 1.88 and 1.84 (gate 1.8–2.0); period +1.0%; hinge within a step (+0.6% at 1/240 s); drop −7%; energy −0.6% a period, no gain; 100 s step 0.006% | **met** |
+| | `dyn_tests` with their limits unchanged | pass | **met** |
+| 2 The solver | steps at the cap under 5% in `ball` and `nibble` | 85% and 73% | **not met** |
+| | forces at a capped step within 2% of the converged step, at the joint | not measured step by step; at rest the dynamic structure ends within 0.4% of the solve at rest, itself within 0.3% of 1e-12 | open |
+| | (found on the way) the solve at rest was up to 2.2 times off on the complex building and 15% on a cantilever | fixed, tested | – |
+| 3 No slow step | no step over 150 ms on the 12-storey tower | 198–263 ms | **not met** |
+| | `nibble`, `ball`: slowest engine job below at rest's | `ball` 89 for 109 ms: met; `nibble` 2,991 for 2,660 ms: not (an `impacts` job; the structure's slowest step 2,055 ms) | **half** |
+| | a step at rest under 1 ms | 15 ms (12-storey; a city's lot at rest 0.14 ms) | **not met** |
+| 4 Leaving | `nibble`, `ball` fail no check that passes at rest | `ball` met; `nibble` draws 4 frames above and 2 below | **not met** |
+| | the body's first velocity is its cells' | not started | open |
+| | the hinged beam leaves when theory says | crosses the range at 50.0 ms for 52.1 (stage 1's test); the watch rule's 0.15 s after it is not tested against anything | half |
+| 5 Hits in the step | all | not started; the step takes an impulse rightly (stage 1's dropped mass) | open |
+| 6 The player | nothing crumbles: 20 seeded cases | 16 of 16 that stand at rest stand, worst joints within 0.001 | **met** |
+| | the same cut, the same fall; 1/60 against 1/30 s within 5% | twice identical; the piece within 2.3%; the joints failed 9–36% apart | **half** |
+| | 0.3 s of warning in the one-column cases | 0.02–0.05 s; the gate was wrong for a building in free fall | **not met**, gate to be rewritten for buildings that wear |
+| | your eyes | – | open (yours) |
+
+"Better than at rest", the table at the top, on the four scenarios compared:
+
+| | `ball` | `complexcol` | `keystone` | `nibble` |
+| --- | --- | --- | --- | --- |
+| Failed checks no more than at rest | yes | yes | yes | no (3 for 1) |
+| Slowest job no slower | yes | no (the first solve: 117 for 96 ms) | yes | no |
+| p95 a quarter, or under 20 ms | no (60 for 94 ms) | no (37 for 96) | no (44 for 42) | yes (124 for 2,112) |
+| Steps at the cap under 5% | no | no | no (6%) | no |
+
+**The decision point is not reached.** The step and the model are right where they can be checked (stages 1 and 6's first gate, and the solve itself, which was not); the dynamic structure is not yet better than the solve at rest by this plan's own table. What stands between, in the order it should be done:
+
+1. **Stage 3, the cost of a step that is not iterations**: the network and its multigrid kept between steps (15 ms a step at rest, most of a moving step), and a bound on what one step cuts and detaches (`nibble`'s 2 s step).
+2. **Stage 2, the cap**: with the network kept, a step's time is its iterations, and more of them fit; or a stopping rule on the joints' forces. The gate (under 5% at the cap) may be the wrong one: what matters is the second gate, the force at the joint, which needs its test.
+3. **Stage 4**, `nibble`'s frames drawn above and below, and the velocity to the body.
+4. **Stage 5**, hits as loads of the step; it also removes the `impacts` job that is `nibble`'s slowest.
+5. Stage 6's two open gates, rewritten: the frame rate against the joints failed, and warning for buildings that wear.
 
 ## Two kinds of test
 
