@@ -180,7 +180,7 @@ impl Analysis {
     }
 }
 
-struct Node { brick: u32, lo: [i32; 3], hi: [i32; 3], load: f32, sink: bool, c: [f64; 3] }
+struct Node { brick: u32, lo: [i32; 3], hi: [i32; 3], load: f32, mass: f32, sink: bool, c: [f64; 3] }
 /// A link: between two cells of one brick (`joint` NONE), or across a joint. `face_lo..face_hi` is its face on the
 /// tick grid; a face where a convex cell meets something is a polygon, and `geo` holds it.
 struct Link { a: u32, b: u32, joint: u32, axis: usize, face_lo: [i32; 3], face_hi: [i32; 3], geo: Option<Geo> }
@@ -271,12 +271,32 @@ pub struct Dyn {
     pub max_it: usize,
     /// each cell's velocity and spin (brick, cell corner x, z ticks), m/s and rad/s
     pub vel: crate::Map<(u32, i32, i32), [f64; 6]>,
+    /// and its acceleration (the step is second order)
+    /// settling steps taken in a row (0: not settling), what was out of balance at the last calm step over the
+    /// largest load, and the times the structure was rested after `DYN_SETTLE_MAX` settling steps still out of balance
+    pub settle: usize,
+    pub imbalance: f64,
+    pub forced: usize,
+    /// a settling step was refused (it moved a part out of the linear range) since the structure last rested
+    pub no_settle: bool,
+    /// without the material's damping (`DYN_DAMP`, `DYN_DAMP_K`): for tests of the step against theory
+    pub undamped: bool,
+    /// with `undamped`, after a step: the work of the loads over the cells' displacements, and kinetic plus strain energy less that work (J)
+    pub work: f64,
+    pub energy: f64,
+    /// what each cell's loads and springs left unbalanced when the structure last rested (N, N m): the solver's
+    /// tolerance, taken off the loads of the steps that follow
+    pub bias: crate::Map<(u32, i32, i32), [f64; 6]>,
+    pub acc: crate::Map<(u32, i32, i32), [f64; 6]>,
     /// after a step: the fastest cell (m/s), the iterations it took, and whether it stopped at `max_it`
     pub speed: f64,
     pub its: usize,
     pub capped: bool,
-    /// after a step: the cells' kinetic energy (J)
+    /// after a step: the cells' kinetic energy (J), its part without spin, and the speed that part gives the
+    /// structure's whole mass (m/s)
     pub kinetic: f64,
+    pub kinetic_lin: f64,
+    pub rms: f64,
     /// after a step: the cells that left the structure (`DYN_TURN`, `DYN_MOVE`) and the joints cut for it
     pub left: usize,
     pub cut: usize,
@@ -295,11 +315,35 @@ pub struct Dyn {
     pub beds: crate::Map<(u32, (u32, i32, i32), (u32, i32, i32)), u8>,
 }
 pub const DYN_IT: usize = 16;
-/// Below this speed (m/s, its fastest cell) a structure whose step converged is at rest: its cells' velocities
-/// are dropped. A part let go from rest moves 163 mm/s after its first 60th of a second (g h).
-/// Without it the complex building, a corner column shot out, crept at 0.1-0.3 mm/s for the 8 s tried (the slow
-/// modes of stones on open and hinged beds, which implicit Euler hardly damps), a step and an iteration each time.
+/// How much of a motion too fast for the step survives it (the generalised-alpha method's spectral radius at
+/// infinity; 1 keeps all of it, 0 none). A building's joints ring at kilohertz, and a step is a 60th of a second:
+/// that ringing is noise here and is damped, while motion the step resolves (a floor's bounce, a tower's sway) is
+/// kept to second order. Implicit Euler, the first step tried, damped both: a column lost suddenly peaked at
+/// 1.04 of the new static force where a resolved motion gives 2 (docs/DYNAMIC.md).
+pub const DYN_RHO: f64 = 0.5;
+/// A structure with no cell moving and no cell out of balance by more than this share of its largest load is at
+/// rest, and its step is not solved; see `analyse_dyn`.
+pub const DYN_QUIET: f64 = 1.0e-3;
+/// A calm structure with no more than this share of its largest load out of balance on any cell is at rest (the
+/// solve at rest leaves 1.5% on the 12-storey tower); with more it settles: steps of `DYN_SETTLE_H` s from rest,
+/// `DYN_SETTLE_MAX` at most in a row.
+pub const DYN_SETTLED: f64 = 0.03;
+pub const DYN_SETTLE_H: f64 = 1.0;
+pub const DYN_SETTLE_MAX: usize = 20;
+/// Damping in proportion to stiffness (s): a mode of frequency f is damped at pi f DYN_DAMP_K of critical (10 Hz,
+/// a floor's bounce: 5%; 1 Hz: 0.5%; the joints' ringing far above the step's rate: all of it). It does not touch
+/// a part that moves as one piece, so a falling part falls. With mass damping alone the 4-storey frame, a corner
+/// column gone, rang at 25-80 mm/s for the 4 s tried and never rested.
+pub const DYN_DAMP_K: f64 = 1.6e-3;
+/// Below this speed (m/s; the cells' speeds weighted by mass) a structure whose step converged is at rest, if no
+/// cell is faster than `DYN_REST_CELL`: its cells' velocities are dropped. A part let go from rest moves 163 mm/s
+/// after its first 60th of a second (g h).
+/// - Without it the complex building, a corner column shot out, crept at 0.1-0.3 mm/s for the 8 s tried.
+/// - By the fastest cell alone, the 4-storey frame with a corner column gone never rested: the stubs the blast
+///   left, 9-19 kg on one joint each, kept 7-11 mm/s for the 4 s tried. That is the solver's tolerance, which is
+///   set against the building's loads: a hundredth of a per cent of 1 MN is 11 m/s^2 on 9 kg.
 pub const DYN_REST: f64 = 0.5e-3;
+pub const DYN_REST_CELL: f64 = 0.05;
 /// Damping in proportion to mass (1/s): a mode of frequency f is damped at DYN_DAMP / (4 pi f) of critical (1 Hz,
 /// a tall building's sway: 8%; real buildings 2-5%, cracked and opening joints more), and a part in free fall
 /// loses DYN_DAMP h of its speed a step (2% at 60 Hz) for the tenth of a second before it leaves the structure.
@@ -321,7 +365,7 @@ pub const DYN_WATCH: f64 = 0.15;
 pub const DYN_CUT: f32 = 1.0e3;
 impl Dyn {
     /// is the structure moving (so that another step is due)?
-    pub fn moving(&self) -> bool { self.h > 0.0 && self.its > 0 && (self.capped || self.speed > DYN_REST) }
+    pub fn moving(&self) -> bool { self.h > 0.0 && (!self.vel.is_empty() || self.settle > 0) }
     /// a cell's velocity and spin
     pub fn get(&self, k: &(u32, i32, i32)) -> Option<&[f64; 6]> { self.vel.get(k) }
 }
@@ -370,7 +414,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
             let share = ((hi[0] - lo[0]) * (hi[2] - lo[2])) as f32 / vol;
             let tk = TICK as f64;
             let c = if b.hull[i as usize] != 0 { b.centroid(i) } else { [0.5 * (lo[0] + hi[0]) as f64 * tk, 0.5 * (lo[1] + hi[1]) as f64 * tk, 0.5 * (lo[2] + hi[2]) as f64 * tk] };
-            nodes.push(Node { brick: i, lo, hi, load: load[k] * share, sink: sink[k], c });
+            nodes.push(Node { brick: i, lo, hi, load: load[k] * share, mass: mass(b, i) * share, sink: sink[k], c });
         } }
         // links inside the brick
         let (nx, nz) = grid[k];
@@ -508,42 +552,37 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
     let mut ends: Vec<(u32, u32)> = links.iter().map(|l| (l.a, l.b)).collect();
     let tk = TICK as f64;
     let mut pos: Vec<[f64; 3]> = nodes.iter().map(|nd| nd.c).collect();
-    let key = |k: usize| (nodes[k].brick, nodes[k].lo[0], nodes[k].lo[2]);
+    // A cell is known between steps by where it is (its corners), not by its brick: a brick cut by a blast becomes
+    // new bricks, and the cells of it that the blast did not touch keep their displacements and velocities. (By
+    // brick, every cell of a cut brick started again from no displacement beside neighbours 6 mm down.)
+    // (a convex cell or a free piece is known by its brick: the boxes round two fragments of one brick can be the
+    // same box, and the two then shared one velocity)
+    let shaped: Vec<bool> = nodes.iter().map(|nd| b.cell(nd.brick).is_some() || b.piece(nd.brick).is_some()).collect();
+    let key = |k: usize| { let nd = &nodes[k]; if shaped[k] { (nd.brick | 0x8000_0000, nd.lo[0], nd.lo[2]) } else { (((nd.lo[1] as u32).wrapping_mul(73856093) ^ (nd.hi[0] as u32).wrapping_mul(19349663) ^ (nd.hi[1] as u32).wrapping_mul(83492791) ^ (nd.hi[2] as u32).wrapping_mul(2654435761)) & 0x7FFF_FFFF, nd.lo[0], nd.lo[2]) } };
+    let known: Vec<bool> = warm.as_ref().map(|w| (0..n).map(|k| fixed[k] || w.0.contains_key(&key(k))).collect()).unwrap_or_default();
     let mut x0: Option<Vec<[f64; 6]>> = warm.as_ref().map(|w| (0..n).map(|k| if fixed[k] { [0.0; 6] } else { w.0.get(&key(k)).copied().unwrap_or([0.0; 6]) }).collect());
     // a dynamic step: each cell's inertia as a spring to an anchor (one more cell, fixed), and M / h^2 (x + h v)
     // on the right-hand side. `xn` keeps where the cells were.
     let dynamic = dy.as_ref().map_or(false, |d| d.h > 0.0) && warm.is_some() && gravity;
     let want_cells = dy.as_ref().map_or(false, |d| d.want_cells);
+    // (a settling step, see the end of the step. It is solved to the solver's tolerance on its own move, not on the
+    // loads: it is there to bring what is out of balance down, and against the loads a step can pass with 3% of
+    // them left on a cell.)
+    let settling = dynamic && dy.as_ref().unwrap().settle > 0;
     let mut fixed = fixed;
     let mut xn: Vec<[f64; 6]> = Vec::new();
     let mut cap = MAX_IT;
-    if dynamic {
-        let d = dy.as_ref().unwrap();
-        let h = d.h;
-        cap = if d.max_it > 0 { d.max_it } else { DYN_IT };
-        xn = x0.take().unwrap();
-        let mut y = xn.clone();
-        for k in 0..n {
-            if fixed[k] { continue; }
-            let nd = &nodes[k];
-            let m = nd.load as f64 / 9.81;
-            let (ex, ey, ez) = ((nd.hi[0] - nd.lo[0]) as f64 * tk, (nd.hi[1] - nd.lo[1]) as f64 * tk, (nd.hi[2] - nd.lo[2]) as f64 * tk);
-            let (kt, kr) = (m / (h * h), [m * (ey * ey + ez * ez) / 12.0 / (h * h), m * (ex * ex + ez * ez) / 12.0 / (h * h), m * (ex * ex + ey * ey) / 12.0 / (h * h)]);
-            if let Some(v) = d.vel.get(&key(k)) { let c = h / (1.0 + DYN_DAMP * h); for i in 0..6 { y[k][i] += c * v[i]; } }
-            for i in 0..3 { f[k][i] += kt * y[k][i]; f[k][3 + i] += kr[i] * y[k][3 + i]; }
-            springs.push(Spring { c: nd.c, ra: [0.0; 3], rb: [0.0; 3], k: [kt; 3], kr, fr: None, frr: None });
-            ends.push((n as u32, k as u32));
-        }
-        fixed.push(true); pos.push([0.0, -100.0, 0.0]); f.push([0.0; 6]); y.push([0.0; 6]); xn.push([0.0; 6]);
-        x0 = Some(y);
-    }
+    if dynamic { let d = dy.as_ref().unwrap(); cap = if d.max_it > 0 { d.max_it } else { DYN_IT }; xn = x0.take().unwrap(); }
     let bed_of: Vec<bool> = links.iter().map(|l| l.joint != NONE && l.geo.is_some() && mortar_bed(b, l.joint, [0.0; 3])).collect();
     let mut bed_state = vec![0u8; links.len()];    // 1 open, 2 hinged
     let mut bed_changes = 0usize;
     // a dynamic step starts from the beds as the last step left them (open, hinged): started closed each time, a
     // building with open beds never came to rest (lab complexcol: 70 steps in 280 frames, each re-opening them)
     let bed_key = |l: usize| (links[l].joint, key(links[l].a as usize), key(links[l].b as usize));
-    if dynamic {
+    // (a settling step starts them closed, as the solve at rest does: where the structure comes to rest does not
+    // then depend on which beds opened on the way. Kept through, the complex building with a corner column shot out
+    // rested with its worst joint at 0.435 of its strength; the solve at rest, and now this, has 0.855.)
+    if dynamic && !settling {
         let d = dy.as_ref().unwrap();
         for l in 0..links.len() {
             if !bed_of[l] { continue; }
@@ -554,9 +593,119 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
             }
         }
     }
+    // The dynamic step (generalised alpha, Chung and Hulbert 1993; `DYN_RHO`). With a' = (x' - xp) / (beta h^2) and
+    // v' = vp + gamma h a', where xp = x + h v + h^2 (1/2 - beta) a and vp = v + h (1 - gamma) a are what the cells
+    // do left alone, the balance M a + C v + K x = f taken between the step's ends (at 1 - am for a, 1 - af for the
+    // rest; C = DYN_DAMP M) is
+    //     (K + cm M) x' = (f - af K x - am M a - DYN_DAMP af M v) / (1 - af) + cm M xp - DYN_DAMP M vp,
+    //     cm = (1 - am) / ((1 - af) beta h^2) + DYN_DAMP gamma / (beta h)
+    // so each cell's inertia is a spring cm M to an anchor (one more cell, fixed), as before. A cell with no
+    // velocity kept starts at rest.
+    let nl = links.len();
+    // (the first step from rest is implicit Euler, am = af = 0, gamma = beta = 1: what a change lets go lands on
+    // cells that their joints hold stiffly, a motion far too fast for the step, and Euler damps all of it. Started
+    // with the acceleration the imbalance gives, a = (f - K x) / M, the cell over a lost column, 234 kg let go by
+    // 966 kN, left its first step at 4.4 m/s and 56 joints failed round it; it moves 0.2 mm.)
+    let first = dynamic && dy.as_ref().unwrap().vel.is_empty();
+    // (the damping: the material's, or none for a test of the step itself)
+    let (damp_m, damp_k) = if dy.as_ref().map_or(false, |d| d.undamped) { (0.0, 0.0) } else { (DYN_DAMP, DYN_DAMP_K) };
+    // (the step's length: a settling step is `DYN_SETTLE_H`)
+    let hs = if dynamic { let d = dy.as_ref().unwrap(); if d.settle > 0 { DYN_SETTLE_H } else { d.h } } else { 0.0 };
+    let (am, af) = if first { (0.0, 0.0) } else { ((2.0 * DYN_RHO - 1.0) / (DYN_RHO + 1.0), DYN_RHO / (DYN_RHO + 1.0)) };
+    let (gam, bet) = if first { (1.0, 1.0) } else { (0.5 - am + af, (1.0 - am + af) * (1.0 - am + af) / 4.0) };
+    let (mut m6, mut vn, mut an, mut xp, mut vp): (Vec<[f64; 6]>, Vec<[f64; 6]>, Vec<[f64; 6]>, Vec<[f64; 6]>, Vec<[f64; 6]>) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    // The loads of the step are the cells' loads less what the last rest left unbalanced (`Dyn::bias`): the solve
+    // at rest stops at its tolerance, which leaves up to 1.5% of the largest load on a cell of the 12-storey tower,
+    // 2.4 kN on one that weighs 2.8 kN. Taken for real, the standing tower never rested (9,600 iterations in 600
+    // steps). Rest is then exact, and what a change lets go is the whole of what is out of balance.
+    let raw: Vec<[f64; 6]> = if dy.is_some() { f.clone() } else { Vec::new() };
+    let loads: Vec<[f64; 6]> = if dynamic { let d = dy.as_ref().unwrap(); (0..n).map(|k| { let mut l = f[k]; if let Some(b) = d.bias.get(&key(k)) { for i in 0..6 { l[i] -= b[i]; } } l }).collect() } else { Vec::new() };
+    let mut cm = 1.0;
+    // K x of the cells, from the links' springs
+    let kx_of = |springs: &[Spring], x: &[[f64; 6]]| -> Vec<[f64; 6]> {
+        let mut y = vec![[0.0f64; 6]; n];
+        for l in 0..nl {
+            let (a, c) = (links[l].a as usize, links[l].b as usize);
+            let sp = &springs[l];
+            let (d, r) = sp.strain(&x[a], &x[c]);
+            let (fo, mo) = sp.force(d, r);
+            let (ra, rb) = (&sp.ra, &sp.rb);
+            let ma = [mo[0] + ra[1] * fo[2] - ra[2] * fo[1], mo[1] + ra[2] * fo[0] - ra[0] * fo[2], mo[2] + ra[0] * fo[1] - ra[1] * fo[0]];
+            let mb = [mo[0] + rb[1] * fo[2] - rb[2] * fo[1], mo[1] + rb[2] * fo[0] - rb[0] * fo[2], mo[2] + rb[0] * fo[1] - rb[1] * fo[0]];
+            for i in 0..3 { y[a][i] -= fo[i]; y[a][3 + i] -= ma[i]; y[c][i] += fo[i]; y[c][3 + i] += mb[i]; }
+        }
+        y
+    };
+    // The step is solved for the cells' move from xp, d = x' - xp:
+    //     (K + cm M) d = (f - af K x - am M a - DYN_DAMP af M v) / (1 - af) - DYN_DAMP M vp - K xp
+    // so that the solver's tolerance is on the move and not on where the cells are (6 mm of standing displacement
+    // against a move of micrometres; solved for x', the cells' accelerations, (x' - xp) / (beta h^2), were the
+    // solver's error times 8,100 and the step blew up: the 4-storey frame's cells at 10^8 m/s in 6 steps).
+    // With damping in proportion to stiffness too, C = DYN_DAMP M + DYN_DAMP_K K, the springs' part of C v joins K:
+    // with s = 1 + DYN_DAMP_K gamma / (beta h), and all of it divided by s,
+    //     (K + (cm / s) M) d = ((f - af K x - am M a - DYN_DAMP af M v) / (1 - af) - DYN_DAMP M vp - K xp
+    //                           - DYN_DAMP_K K vp - DYN_DAMP_K af / (1 - af) K v) / s
+    let rhs_of = |springs: &[Spring], m6: &[[f64; 6]], vn: &[[f64; 6]], an: &[[f64; 6]], xn: &[[f64; 6]], xp: &[[f64; 6]], vp: &[[f64; 6]], sd: f64| -> Vec<[f64; 6]> {
+        let (kx, kxp, kvp, kvn) = (kx_of(springs, xn), kx_of(springs, xp), kx_of(springs, vp), kx_of(springs, vn));
+        let mut r = vec![[0.0f64; 6]; n + 1];
+        for k in 0..n { if m6[k][0] == 0.0 { continue; } for i in 0..6 {   // (a fixed cell has no mass here)
+            r[k][i] = ((loads[k][i] - af * kx[k][i] - am * m6[k][i] * an[k][i] - damp_m * af * m6[k][i] * vn[k][i]) / (1.0 - af) - damp_m * m6[k][i] * vp[k][i] - kxp[k][i]
+                - damp_k * kvp[k][i] - damp_k * af / (1.0 - af) * kvn[k][i]) / sd;
+        } }
+        r
+    };
+    let mut sd = 1.0;
+    let scale: Vec<[f64; 6]> = if dynamic { let mut v = loads.clone(); v.push([0.0; 6]); v } else { Vec::new() };
+    let mut quiet = false;
+    if dynamic {
+        let d = dy.as_ref().unwrap();
+        let h = hs;
+        sd = 1.0 + damp_k * gam / (bet * h);
+        cm = ((1.0 - am) / ((1.0 - af) * bet * h * h) + damp_m * gam / (bet * h)) / sd;
+        m6 = vec![[0.0; 6]; n]; vn = vec![[0.0; 6]; n]; an = vec![[0.0; 6]; n];
+        // New cells (cut from a brick since the last step) are put where the cells round them hold them: a solve
+        // at rest of the new cells alone, the others where they are. They start in balance, and from rest.
+        if known.iter().any(|k| !*k) {
+            let kx = kx_of(&springs, &xn);
+            let r: Vec<[f64; 6]> = (0..n).map(|k| if known[k] { [0.0; 6] } else { let mut v = loads[k]; for i in 0..6 { v[i] -= kx[k][i]; } v }).collect();
+            let (xu, _) = solve_network(&springs, &ends, &known, &pos, &r, None, MAX_IT, None);
+            for k in 0..n { if !known[k] { xn[k] = xu[k]; } }
+        }
+        for k in 0..n {
+            if fixed[k] { continue; }
+            let nd = &nodes[k];
+            // (the cell's own mass. It was its load over g: a load that is not a weight, a hit or a test's pull,
+            // then moved as mass; rubble lying on a cell loads it and is not counted in its mass)
+            let m = (nd.mass as f64).max(1e-6);
+            let (ex, ey, ez) = ((nd.hi[0] - nd.lo[0]) as f64 * tk, (nd.hi[1] - nd.lo[1]) as f64 * tk, (nd.hi[2] - nd.lo[2]) as f64 * tk);
+            m6[k] = [m, m, m, (m * (ey * ey + ez * ez) / 12.0).max(1e-9), (m * (ex * ex + ez * ez) / 12.0).max(1e-9), (m * (ex * ex + ey * ey) / 12.0).max(1e-9)];
+        }
+        let noise = DYN_QUIET * loads.iter().take(n).map(|l| sqrt64(l[0] * l[0] + l[1] * l[1] + l[2] * l[2])).fold(0.0, f64::max);
+        for k in 0..n {
+            if fixed[k] { continue; }
+            match (d.vel.get(&key(k)), d.acc.get(&key(k))) {
+                (Some(v), Some(a)) => { vn[k] = *v; an[k] = *a; }
+                _ => {}
+            }
+        }
+        xp = xn.clone(); vp = vn.clone();
+        for k in 0..n { for i in 0..6 { xp[k][i] += h * vn[k][i] + h * h * (0.5 - bet) * an[k][i]; vp[k][i] += h * (1.0 - gam) * an[k][i]; } }
+        for k in 0..n {
+            if fixed[k] { continue; }
+            springs.push(Spring { c: nodes[k].c, ra: [0.0; 3], rb: [0.0; 3], k: [cm * m6[k][0]; 3], kr: [cm * m6[k][3], cm * m6[k][4], cm * m6[k][5]], fr: None, frr: None });
+            ends.push((n as u32, k as u32));
+        }
+        f = rhs_of(&springs, &m6, &vn, &an, &xn, &xp, &vp, sd);
+        // nothing moving and nothing out of balance: the structure is at rest, and the step is not solved
+        quiet = d.vel.is_empty() && f.iter().take(n).all(|r| r[0] * r[0] + r[1] * r[1] + r[2] * r[2] <= noise * noise);
+        fixed.push(true); pos.push([0.0, -100.0, 0.0]); xn.push([0.0; 6]); xp.push([0.0; 6]);
+        x0 = None;
+    }
+    // (x' from the move d)
+    let moved = |xp: &[[f64; 6]], d: Vec<[f64; 6]>| -> Vec<[f64; 6]> { let mut x = d; for k in 0..x.len() { for i in 0..6 { x[k][i] += xp[k][i]; } } x };
     // (the dynamic-model spike reads the network a test analyses: structure/dyn_spike.rs)
     #[cfg(test)] dyn_spike::capture(&springs, &ends, &fixed, &pos, &f, &nodes.iter().map(|nd| { let tk = TICK as f64; [(nd.hi[0] - nd.lo[0]) as f64 * tk, (nd.hi[1] - nd.lo[1]) as f64 * tk, (nd.hi[2] - nd.lo[2]) as f64 * tk, nd.load as f64] }).collect::<Vec<_>>());
-    let (mut x, mut it) = solve_network(&springs, &ends, &fixed, &pos, &f, x0, cap);
+    let (mut x, mut it) = if !dynamic { solve_network(&springs, &ends, &fixed, &pos, &f, x0, cap, None) } else if quiet { (xn.clone(), 0) } else { let (d, i) = solve_network(&springs, &ends, &fixed, &pos, &f, None, cap, if settling { None } else { Some(&scale) }); (moved(&xp, d), i) };
     let mut capped = dynamic && it >= cap;
     // Stones' beds carry no tension, and where the thrust leaves a bed's face a hinge opens through it (Heyman): a bed
     // the solution pulls apart opens (its springs all but go), one whose thrust passes outside its face hinges (it
@@ -626,7 +775,13 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
                 }
             }
             if !changed { break; }
-            let (x2, it2) = solve_network(&springs, &ends, &fixed, &pos, &f, Some(x.clone()), cap);
+            // (a dynamic step: K has changed with the beds, and with it K x on the right-hand side)
+            let (x2, it2) = if dynamic {
+                f = rhs_of(&springs, &m6, &vn, &an, &xn, &xp, &vp, sd);
+                let d0: Vec<[f64; 6]> = (0..x.len()).map(|k| { let mut d = x[k]; for i in 0..6 { d[i] -= xp[k][i]; } d }).collect();
+                let (d, i) = solve_network(&springs, &ends, &fixed, &pos, &f, Some(d0), cap, if settling { None } else { Some(&scale) });
+                (moved(&xp, d), i)
+            } else { solve_network(&springs, &ends, &fixed, &pos, &f, Some(x.clone()), cap, None) };
             x = x2; it += it2; if dynamic && it2 >= cap { capped = true; }
         }
     }
@@ -638,52 +793,111 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
     let mut state: Vec<u8> = Vec::new();
     let mut left = 0usize;
     if dynamic {
-        // the cells' new velocities. A step that needed no iteration found the cells at rest: they stay where they
-        // were (carried on at their last velocity, nothing would ever damp the solver's last small error).
         let d = dy.unwrap();
-        let h = d.h;
-        if it == 0 { x = xn.clone(); }
-        d.vel.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = capped; d.left = 0; d.cut = bed_changes;
+        let h = hs;
+        if quiet { x = xn.clone(); }
+        // (a settling step that moves a cell out of the linear range has found a part with no resting place, a
+        // mechanism: a second of its fall in one step. It is not taken: the part falls in steps of real time.)
+        let mut refused = false;
+        if settling {
+            for k in 0..n {
+                if fixed[k] { continue; }
+                let (t, u) = ([x[k][3] - xn[k][3], x[k][4] - xn[k][4], x[k][5] - xn[k][5]], [x[k][0] - xn[k][0], x[k][1] - xn[k][1], x[k][2] - xn[k][2]]);
+                if t[0] * t[0] + t[1] * t[1] + t[2] * t[2] > DYN_TURN * DYN_TURN || u[0] * u[0] + u[1] * u[1] + u[2] * u[2] > DYN_MOVE * DYN_MOVE { refused = true; break; }
+            }
+            if refused { x = xn.clone(); }
+        }
+        d.vel.clear(); d.acc.clear(); d.speed = 0.0; d.kinetic = 0.0; d.kinetic_lin = 0.0; d.rms = 0.0; d.its = it; d.capped = capped; d.left = 0; d.cut = bed_changes;
         d.beds.clear(); for l in 0..links.len() { if bed_state[l] != 0 { d.beds.insert(bed_key(l), bed_state[l]); } }
-        for k in 0..n {
+        // the cells' new velocities and accelerations
+        let (mut vel, mut acc): (crate::Map<(u32, i32, i32), [f64; 6]>, crate::Map<(u32, i32, i32), [f64; 6]>) = (Default::default(), Default::default());
+        if !quiet && !refused { for k in 0..n {
             if fixed[k] { continue; }
-            let mut v = [0.0; 6];
-            for i in 0..6 { v[i] = (x[k][i] - xn[k][i]) / h; }
+            let (mut v, mut a) = ([0.0; 6], [0.0; 6]);
+            for i in 0..6 { a[i] = (x[k][i] - xp[k][i]) / (bet * h * h); v[i] = vp[k][i] + gam * h * a[i]; }
             let s2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
             if s2 > d.speed * d.speed { d.speed = sqrt64(s2); }
-            d.kinetic += 0.5 * nodes[k].load as f64 / 9.81 * s2;
-            if it > 0 { d.vel.insert(key(k), v); }
+            d.kinetic_lin += 0.5 * m6[k][0] * s2;
+            d.kinetic += 0.5 * m6[k][0] * s2 + 0.5 * (m6[k][3] * v[3] * v[3] + m6[k][4] * v[4] * v[4] + m6[k][5] * v[5] * v[5]);
+            vel.insert(key(k), v); acc.insert(key(k), a);
+        } }
+        let mass: f64 = (0..n).map(|k| m6[k][0]).sum();
+        d.rms = if mass > 0.0 { sqrt64(d.kinetic_lin * 2.0 / mass) } else { 0.0 };
+        if d.undamped {
+            // (for tests of the step: the work the loads have done, and kinetic plus strain energy less that work,
+            // which a step without damping keeps)
+            let kx = kx_of(&springs, &x);
+            let (mut u, mut w) = (0.0, 0.0);
+            for k in 0..n { if !fixed[k] { for i in 0..6 { u += 0.5 * x[k][i] * kx[k][i]; w += loads[k][i] * x[k][i]; } } }
+            d.work = w; d.energy = d.kinetic + u - w;
         }
-        if !(capped || d.speed > DYN_REST) { d.vel.clear(); }
-        // where the cells rest: all of them when the structure does, and a new cell where it is now
-        let at_rest = d.vel.is_empty();
-        if at_rest { d.rest.clear(); d.beyond.clear(); }
-        for k in 0..n { if !fixed[k] && (at_rest || !d.rest.contains_key(&key(k))) { d.rest.insert(key(k), x[k]); } }
-        // which cells have left. How far a cell is from where it rested, in ranges: the larger of its turn over
+        // Which cells have left. How far a cell is from where it rested, in ranges: the larger of its turn over
         // DYN_TURN and its move over DYN_MOVE. Beyond 1 it is watched: after DYN_WATCH s, a cell a range further
         // out than when it crossed has left (it is falling: from rest a part falls 5 cm in 0.1 s and 31 cm by
         // 0.25 s); one that after twice as long has not gone a quarter of a range further has found a new resting
-        // place (a cracked piece hanging by its softened joints), and rests there.
+        // place (a cracked piece hanging by its softened joints), and rests there. (A settling step is no time.)
+        // (Nor has one left that after twice as long is slower than `DYN_REST_CELL`, a speed a falling part passes
+        // in 5 ms: it creeps on softened joints. Without this the 4-storey masonry building left on one pier
+        // watched 3 or 4 such cells at 2-8 mm/s for 600 steps and never rested: dyn_tests.)
+        let slow = |k: usize| vel.get(&key(k)).map_or(true, |v| v[0] * v[0] + v[1] * v[1] + v[2] * v[2] <= DYN_REST_CELL * DYN_REST_CELL && v[3] * v[3] + v[4] * v[4] + v[5] * v[5] <= DYN_REST_CELL * DYN_REST_CELL);
         state = vec![0u8; n];
         let mut beyond: crate::Map<(u32, i32, i32), (f64, f64)> = Default::default();
         for k in 0..n {
             if fixed[k] { continue; }
-            let Some(r) = d.rest.get(&key(k)).copied() else { continue };
+            let Some(r) = d.rest.get(&key(k)).copied() else { d.rest.insert(key(k), x[k]); continue };
             let (t, u) = ([x[k][3] - r[3], x[k][4] - r[4], x[k][5] - r[5]], [x[k][0] - r[0], x[k][1] - r[1], x[k][2] - r[2]]);
             let m = (sqrt64(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]) / DYN_TURN).max(sqrt64(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]) / DYN_MOVE);
             if m <= 1.0 { continue; }
             let (t0, m0) = d.beyond.get(&key(k)).copied().unwrap_or((0.0, m));
-            let t1 = t0 + h;
+            let t1 = t0 + if d.settle > 0 { 0.0 } else { d.h };
             if t1 >= DYN_WATCH && m >= m0 + 1.0 { state[k] = 2; left += 1; beyond.insert(key(k), (t1, m0)); }
-            else if t1 >= 2.0 * DYN_WATCH && m < m0 + 0.25 { d.rest.insert(key(k), x[k]); }
+            else if t1 >= 2.0 * DYN_WATCH && (m < m0 + 0.25 || slow(k)) { d.rest.insert(key(k), x[k]); }
             else { state[k] = 1; beyond.insert(key(k), (t1, m0)); }
         }
         d.beyond = beyond;
         d.left = left;
+        // Rest. The step converged, the structure as a whole is slower than `DYN_REST`, no cell is faster than
+        // `DYN_REST_CELL`, and none is watched. If what is then out of balance is within the solver's tolerance
+        // (`DYN_SETTLED`), the structure rests there, and that remainder is kept off the loads from now on
+        // (`Dyn::bias`). If more is out of balance, it is creeping to a resting place it has not reached (stones on
+        // opened beds a millionth as stiff move for minutes): the next step is a settling step, `DYN_SETTLE_H`
+        // long and from rest, which is nearly the solve at rest, and so on until it is in balance. Rested while it
+        // crept, the complex building with a corner column shot out kept its worst joint at 0.435 of its strength,
+        // where the solve at rest has 0.855: half of what had come onto that joint was written off as tolerance.
+        // (calm does not ask that the step converged: a slow structure whose steps stop at the cap goes on to
+        // settle, where it must converge to rest. Asked for, the complex building rang at 1-3 mm/s for 70 steps of
+        // 16 iterations before one converged.)
+        let calm = d.rms <= DYN_REST && d.speed <= DYN_REST_CELL && d.beyond.is_empty();
+        let rest_now = |d: &mut Dyn, x: &[[f64; 6]], forced: bool| {
+            let kx = kx_of(&springs, x);
+            if forced { d.forced += 1; }
+            d.settle = 0; d.no_settle = false;
+            d.rest.clear(); d.bias.clear(); d.beyond.clear();
+            for k in 0..n { if !fixed[k] { d.rest.insert(key(k), x[k]); let mut b = raw[k]; for i in 0..6 { b[i] -= kx[k][i]; } d.bias.insert(key(k), b); } }
+        };
+        if quiet { d.settle = 0; }
+        else if refused { d.settle = 0; d.no_settle = true; }
+        else if settling {
+            let kx = kx_of(&springs, &x);
+            let big = loads.iter().take(n).map(|l| sqrt64(l[0] * l[0] + l[1] * l[1] + l[2] * l[2])).fold(0.0, f64::max);
+            let out = (0..n).filter(|&k| !fixed[k]).map(|k| { let r = [loads[k][0] - kx[k][0], loads[k][1] - kx[k][1], loads[k][2] - kx[k][2]]; sqrt64(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]) }).fold(0.0, f64::max);
+            d.imbalance = if big > 0.0 { out / big } else { 0.0 };
+            // (it rests after a settling step that converged in balance: that step set the beds as they are at
+            // rest. One that stopped at its cap, or left too much out of balance, is followed by another.)
+            if !capped && d.imbalance <= DYN_SETTLED { rest_now(d, &x, false); }
+            else if d.settle >= DYN_SETTLE_MAX { rest_now(d, &x, true); }
+            else { d.settle += 1; }
+        }
+        else if calm {
+            // (a structure calm again after a settling step was refused creeps on something soft: it rests as it is)
+            if d.no_settle { rest_now(d, &x, true); } else { d.settle = 1; }
+        }
+        else { d.vel = vel; d.acc = acc; d.settle = 0; }
     } else if let Some(d) = dy {
         // (solved at rest: the beds as this solve left them are where the next dynamic step starts)
-        d.vel.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = false; d.left = 0; d.cut = 0;
+        d.vel.clear(); d.acc.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = false; d.left = 0; d.cut = 0; d.settle = 0; d.no_settle = false;
         d.rest.clear(); d.beyond.clear(); for k in 0..n { if !fixed[k] { d.rest.insert(key(k), x[k]); } }
+        let kx = kx_of(&springs, &x); d.bias.clear(); for k in 0..n { if !fixed[k] { let mut b = raw[k]; for i in 0..6 { b[i] -= kx[k][i]; } d.bias.insert(key(k), b); } }
         d.beds.clear(); for l in 0..links.len() { if bed_state[l] != 0 { d.beds.insert((links[l].joint, key(links[l].a as usize), key(links[l].b as usize)), bed_state[l]); } }
     }
     if let Some(w) = warm { w.0.clear(); for k in 0..n { if !fixed[k] { w.0.insert(key(k), x[k]); } } }
@@ -964,7 +1178,7 @@ fn section_ratio(s: &Sect, f: [f64; 3], m: [f64; 3], cap: [f32; 3], flex: f32) -
 /// drop out. Damped block-Jacobi smoothing (each cell's 6 x 6 block inverted) on every level.
 /// With block Jacobi alone the 12-storey tower took 1,552 iterations and 1.2 s (the long, slow bending modes of a
 /// tall building converge slowly).
-fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64; 3]], f: &[[f64; 6]], x0: Option<Vec<[f64; 6]>>, cap: usize) -> (Vec<[f64; 6]>, usize) {
+fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64; 3]], f: &[[f64; 6]], x0: Option<Vec<[f64; 6]>>, cap: usize, scale: Option<&[[f64; 6]]>) -> (Vec<[f64; 6]>, usize) {
     let n = fixed.len();
     #[cfg(test)] let t0 = { extern crate std; std::time::Instant::now() };
     let mut levels = vec![Level::from_springs(sp, ends, fixed.to_vec(), pos.to_vec())];
@@ -974,6 +1188,7 @@ fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64
         if c.n as f64 > 0.7 * levels.last().unwrap().n as f64 { bin *= 2.0; if bin > 256.0 { break; } continue; }
         levels.push(c); bin *= 2.0;
     }
+    levels.last_mut().unwrap().factor();
     // (the finest level's blocks were needed only to build the next one)
     levels[0].off = Vec::new();
     #[cfg(test)] { extern crate std; if std::env::var("SF_MG").is_ok() { std::println!("  levels built in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3); for (i, l) in levels.iter().enumerate() { std::println!("  level {i}: {} cells, {} couplings", l.n, l.off.len()); } } }
@@ -981,16 +1196,24 @@ fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64
     let mut r: Vec<[f64; 6]> = (0..n).map(|k| if fixed[k] { [0.0; 6] } else { f[k] }).collect();
     let mut ap = vec![[0.0f64; 6]; n];
     // the tolerance is measured against the residual from zero, so that a warm start stops at the same accuracy
-    let z0 = vcycle(&levels, 0, &r);
-    let r0 = dot(&r, &z0).max(1e-30);
+    // (a dynamic step is solved for the cells' move, whose right-hand side is next to nothing near rest: its
+    // tolerance is measured against the loads, `scale`, as the solve at rest's is)
+    let r0 = match scale {
+        Some(sc) => { let q: Vec<[f64; 6]> = (0..n).map(|k| if fixed[k] { [0.0; 6] } else { sc[k] }).collect(); let z0 = vcycle(&levels, 0, &q); dot(&q, &z0).max(1e-30) }
+        None => { let z0 = vcycle(&levels, 0, &r); dot(&r, &z0).max(1e-30) }
+    };
     let mut x = match x0 {
         Some(x0) => { levels[0].apply(&x0, &mut ap); for k in 0..n { for i in 0..6 { r[k][i] -= ap[k][i]; } } x0 }
         None => vec![[0.0f64; 6]; n],
     };
+    // (tests: `TOL_TEST` or SF_TOL solve to another tolerance, without the cap on iterations)
+    #[cfg(test)] let tol = { extern crate std; let t = TOL_TEST.with(|t| t.get()); if t > 0.0 { t } else { std::env::var("SF_TOL").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(TOL) } };
+    #[cfg(test)] let cap = { extern crate std; if TOL_TEST.with(|t| t.get()) > 0.0 || std::env::var("SF_CAP").is_ok() { 20000 } else { cap } };
+    #[cfg(not(test))] let tol = TOL;
     let mut z = vcycle(&levels, 0, &r);
     let mut p = z.clone();
     let mut rz = dot(&r, &z);
-    if rz < TOL * r0 { return (x, 0); }
+    if rz < tol * r0 { return (x, 0); }
     let mut it = 0;
     while it < cap {
         levels[0].apply(&p, &mut ap);
@@ -1000,18 +1223,29 @@ fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64
         it += 1;
         z = vcycle(&levels, 0, &r);
         let rz2 = dot(&r, &z);
-        if rz2 < TOL * r0 { break; }
+        if rz2 < tol * r0 { break; }
         let beta = rz2 / rz; rz = rz2;
         for k in 0..n { for i in 0..6 { p[k][i] = z[k][i] + beta * p[k][i]; } }
     }
-    #[cfg(test)] { extern crate std; if std::env::var("SF_MG").is_ok() { std::println!("  solved in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3); } }
+    #[cfg(test)] { extern crate std; if std::env::var("SF_MG").is_ok() { std::println!("  solved in {:.0} ms, {it} iterations", t0.elapsed().as_secs_f64() * 1e3); } }
     (x, it)
 }
+#[cfg(test)] extern crate std;
+#[cfg(test)] std::thread_local! { pub static TOL_TEST: core::cell::Cell<f64> = core::cell::Cell::new(0.0); }
 const MAX_IT: usize = 2000;
-// (r z down by 1e-5 from the start: every building's worst ratio and the validation cases agree with 1e-8 to the
-// digits the tests print, in 62 iterations against 104 for the 12-storey tower)
-const TOL: f64 = 1e-5;
+// r z down by 1e-7 from the start. It was 1e-5, which read well on frames and towers and badly where parts stand on
+// soft joints: the complex building's worst joint, a corner column shot out, 0.889 at 1e-5, 0.824 at 1e-6, 0.819 at
+// 1e-7, 0.817 at 1e-8 and at 1e-12 (5 solves: 93, 139, 197, 260 and 1,045 iterations), and its arch under the loggia
+// without its keystone lost a joint at 1e-5 (worst 0.76) that it keeps from 1e-6 on (0.51): dyn_tests, complex::tests.
+const TOL: f64 = 1e-7;
 const SMOOTH: usize = 1;
+/// two cells go into one coarse block if the joints between them hold at least this share of what holds the weaker
+/// of the two (`Level::coarsen`)
+const STRONG: f64 = 1.0e-3;
+/// a cell whose joints hold it in one direction less than this share of another is held by `Level::finish`
+const REG_FREE: f64 = 1.0e-3;
+/// the coarsest level is factored if it has no more free cells than this (6 unknowns each: 384, 9 M operations)
+const DIRECT: usize = 64;
 const OMEGA: f64 = 0.8;
 
 type M6 = [[f64; 6]; 6];
@@ -1028,7 +1262,9 @@ fn rigid(d: &[f64; 3]) -> M6 {
 /// A level of the solve as a block matrix: each cell's own 6 x 6 block and one block per pair of coupled cells.
 /// The finest level also keeps its springs (`sp`, `ends`) and applies K from them directly: 15 numbers a spring
 /// against a 6 x 6 block, and the solve is bound by memory (the 12-storey tower: 4.3 ms an iteration with blocks).
-struct Level { n: usize, diag: Vec<M6>, off: Vec<(u32, u32, M6)>, fixed: Vec<bool>, pos: Vec<[f64; 3]>, inv: Vec<M6>, up: Vec<u32>, sp: Vec<Spring>, ends: Vec<(u32, u32)>, reg: Vec<f64> }
+struct Level { n: usize, diag: Vec<M6>, off: Vec<(u32, u32, M6)>, fixed: Vec<bool>, pos: Vec<[f64; 3]>, inv: Vec<M6>, up: Vec<u32>, sp: Vec<Spring>, ends: Vec<(u32, u32)>, reg: Vec<[f64; 2]>,
+    /// the coarsest level, factored (`factor`): the free cells' unknowns in order, and L of K = L L^T, row by row
+    dof: Vec<u32>, chol: Vec<f64> }
 impl Level {
     /// the finest level, from the springs: strain e = B_b x_b - B_a x_a (B the rigid map to the face centre),
     /// energy e^T D e / 2, so K_aa = B_a^T D B_a, K_bb = B_b^T D B_b, K_ab = -B_a^T D B_b
@@ -1055,20 +1291,66 @@ impl Level {
     fn finish(n: usize, mut diag: Vec<M6>, off: Vec<(u32, u32, M6)>, fixed: Vec<bool>, pos: Vec<[f64; 3]>) -> Level {
         // (a little added to the diagonal: a cell held only by hinges or infill would be free to turn)
         let mut inv = vec![[[0.0; 6]; 6]; n];
-        let mut reg = vec![0.0; n];
+        let mut reg = vec![[0.0; 2]; n];
         for k in 0..n {
             if fixed[k] { continue; }
             let big = (0..6).map(|i| diag[k][i][i].abs()).fold(0.0, f64::max).max(1.0);
-            reg[k] = 1e-7 * big;
-            for i in 0..6 { diag[k][i][i] += reg[k]; }
+            // (on the turns; on the displacements only of a cell that its joints do not hold in some direction.
+            // On every cell's displacements it held the structure to the ground by springs of 1e-7 of its
+            // stiffest: a 7.6 m cantilever strip of 31 cells sagged 53.1 mm under its weight where beam theory gives
+            // 62.3, and its worst joint read 1.152 for 1.313; now 61.5 mm: dyn_closed)
+            let (lo, hi) = ((0..3).map(|i| diag[k][i][i]).fold(f64::MAX, f64::min), (0..3).map(|i| diag[k][i][i]).fold(0.0, f64::max));
+            #[cfg(test)] let lo = { extern crate std; if std::env::var("SF_OLDREG").is_ok() { -1.0 } else { lo } };
+            reg[k] = [if lo < REG_FREE * hi { 1e-7 * big } else { 0.0 }, 1e-7 * big];
+            for i in 0..3 { diag[k][i][i] += reg[k][0]; diag[k][3 + i][3 + i] += reg[k][1]; }
             inv[k] = invert6(diag[k]);
         }
-        Level { n, diag, off, fixed, pos, inv, up: Vec::new(), sp: Vec::new(), ends: Vec::new(), reg }
+        Level { n, diag, off, fixed, pos, inv, up: Vec::new(), sp: Vec::new(), ends: Vec::new(), reg, dof: Vec::new(), chol: Vec::new() }
+    }
+    /// Factor the level (the coarsest: at most `DIRECT` free cells), so that the V-cycle solves it exactly; it was
+    /// 30 sweeps of block Jacobi. A structure of up to `DIRECT` cells is then solved in one iteration.
+    fn factor(&mut self) {
+        let free: Vec<u32> = (0..self.n as u32).filter(|&k| !self.fixed[k as usize]).collect();
+        let m = free.len() * 6;
+        #[cfg(test)] { extern crate std; if std::env::var("SF_OLDREG").is_ok() { return; } }
+        if free.is_empty() || free.len() > DIRECT { return; }
+        let mut at = vec![NONE; self.n];
+        for (i, &k) in free.iter().enumerate() { at[k as usize] = i as u32; }
+        let mut a = vec![0.0f64; m * m];
+        for (i, &k) in free.iter().enumerate() { let d = &self.diag[k as usize]; for x in 0..6 { for y in 0..6 { a[(i * 6 + x) * m + i * 6 + y] = d[x][y]; } } }
+        for &(p, q, ref b) in &self.off {
+            let (i, j) = (at[p as usize], at[q as usize]); if i == NONE || j == NONE { continue; }
+            let (i, j) = (i as usize, j as usize);
+            for x in 0..6 { for y in 0..6 { a[(i * 6 + x) * m + j * 6 + y] += b[x][y]; a[(j * 6 + y) * m + i * 6 + x] += b[x][y]; } }
+        }
+        // Cholesky, the lower triangle in place
+        for j in 0..m {
+            let mut d = a[j * m + j]; for k in 0..j { d -= a[j * m + k] * a[j * m + k]; }
+            if !(d > 0.0) { return; }   // (not positive definite to rounding: the sweeps stay)
+            let d = sqrt64(d); a[j * m + j] = d;
+            for i in j + 1..m {
+                let mut v = a[i * m + j];
+                let (ri, rj) = (&a[i * m..i * m + j], &a[j * m..j * m + j]);
+                for k in 0..j { v -= ri[k] * rj[k]; }
+                a[i * m + j] = v / d;
+            }
+        }
+        self.dof = free; self.chol = a;
+    }
+    /// z = K^-1 r with the factor
+    fn direct(&self, r: &[[f64; 6]], z: &mut [[f64; 6]]) {
+        let m = self.dof.len() * 6;
+        let l = &self.chol;
+        let mut y = vec![0.0f64; m];
+        for (i, &k) in self.dof.iter().enumerate() { for x in 0..6 { y[i * 6 + x] = r[k as usize][x]; } }
+        for i in 0..m { let mut v = y[i]; let row = &l[i * m..i * m + i]; for k in 0..i { v -= row[k] * y[k]; } y[i] = v / l[i * m + i]; }
+        for i in (0..m).rev() { let mut v = y[i]; for k in i + 1..m { v -= l[k * m + i] * y[k]; } y[i] = v / l[i * m + i]; }
+        for (i, &k) in self.dof.iter().enumerate() { for x in 0..6 { z[k as usize][x] = y[i * 6 + x]; } }
     }
     /// y = K x (fixed cells: y = 0)
     fn apply(&self, x: &[[f64; 6]], y: &mut [[f64; 6]]) {
         if !self.sp.is_empty() {
-            for k in 0..self.n { let r = self.reg[k]; for i in 0..6 { y[k][i] = r * x[k][i]; } }
+            for k in 0..self.n { let r = self.reg[k]; for i in 0..3 { y[k][i] = r[0] * x[k][i]; y[k][3 + i] = r[1] * x[k][3 + i]; } }
             for (s, &(a, c)) in self.sp.iter().zip(&self.ends) {
                 let (a, c) = (a as usize, c as usize);
                 let (d, r) = s.strain(&x[a], &x[c]);
@@ -1102,11 +1384,39 @@ impl Level {
         let mut map = crate::Map::default();
         let mut up = vec![NONE; self.n];
         let mut pos: Vec<[f64; 3]> = Vec::new(); let mut cnt: Vec<f64> = Vec::new();
+        // The cells of a bin make one block only as far as they hold each other: joined through joints at least
+        // `STRONG` of what holds the weaker of the two. A part on open beds or softened joints (a millionth as
+        // stiff as sound ones) moves against its neighbours, and a block rigid across such a joint cannot show
+        // that motion: it was left to the smoothing, which does not find it, and the solve stopped at its
+        // tolerance far from the answer (the complex building's worst joint read 0.917 standing; solved to 1e-12
+        // it is 0.416: structure tests).
+        let mut bin_of = vec![NONE; self.n];
+        let mut nb = 0u32;
         for k in 0..self.n {
             if self.fixed[k] { continue; }
             let p = self.pos[k];
             let key = (floor64(p[0] / bin) as i64, floor64(p[1] / bin) as i64, floor64(p[2] / bin) as i64);
-            let c = *map.entry(key).or_insert_with(|| { pos.push([0.0; 3]); cnt.push(0.0); pos.len() - 1 });
+            bin_of[k] = *map.entry(key).or_insert_with(|| { nb += 1; nb - 1 });
+        }
+        let mut par: Vec<u32> = (0..self.n as u32).collect();
+        fn find(par: &mut [u32], mut a: u32) -> u32 { while par[a as usize] != a { let g = par[par[a as usize] as usize]; par[a as usize] = g; a = g; } a }
+        let hold = |m: &M6| fabs64(m[0][0]) + fabs64(m[1][1]) + fabs64(m[2][2]);
+        for &(a, c, ref m) in &self.off {
+            let (au, cu) = (a as usize, c as usize);
+            if bin_of[au] == NONE || bin_of[au] != bin_of[cu] { continue; }
+            #[cfg(test)] { extern crate std; if std::env::var("SF_NOSTRONG").is_ok() { let (ra, rc) = (find(&mut par, a), find(&mut par, c)); if ra != rc { par[ra.max(rc) as usize] = ra.min(rc); } continue; } }
+            if hold(m) < STRONG * hold(&self.diag[au]).min(hold(&self.diag[cu])) { continue; }
+            let (ra, rc) = (find(&mut par, a), find(&mut par, c));
+            if ra != rc { par[ra.max(rc) as usize] = ra.min(rc); }
+        }
+        #[cfg(test)] let merge_all = { extern crate std; std::env::var("SF_NOSTRONG").is_ok() };
+        #[cfg(not(test))] let merge_all = false;
+        let mut block: crate::Map<(u32, u32), u32> = crate::Map::default();
+        for k in 0..self.n {
+            if self.fixed[k] { continue; }
+            let root = if merge_all { 0 } else { find(&mut par, k as u32) };
+            let c = *block.entry((bin_of[k], root)).or_insert_with(|| { pos.push([0.0; 3]); cnt.push(0.0); pos.len() as u32 - 1 }) as usize;
+            let p = self.pos[k];
             up[k] = c as u32; for d in 0..3 { pos[c][d] += p[d]; } cnt[c] += 1.0;
         }
         for c in 0..pos.len() { for d in 0..3 { pos[c][d] /= cnt[c]; } }
@@ -1139,6 +1449,7 @@ fn vcycle(levels: &[Level], l: usize, r: &[[f64; 6]]) -> Vec<[f64; 6]> {
     let mut z = vec![[0.0f64; 6]; n];
     let mut kz = vec![[0.0f64; 6]; n];
     let coarsest = l + 1 >= levels.len();
+    if coarsest && !lv.chol.is_empty() { lv.direct(r, &mut z); return z; }
     let sweeps = if coarsest { 30 } else { SMOOTH };
     let mut rr = vec![[0.0f64; 6]; n];
     let mut smooth = |z: &mut Vec<[f64; 6]>, kz: &mut Vec<[f64; 6]>, first: bool| {

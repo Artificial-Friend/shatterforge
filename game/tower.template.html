@@ -681,6 +681,9 @@ let structMoving = false, structSpeed = 0, structSag = 0, structIts = 0, dynStep
 let dustBricks = 0, impactMs = 0, dropped = 0, workerMs = 0, spillLost = 0; const partsBy = {};   // (spillLost: tick^3 of spill with no particle room)
 // each engine job's time in the engine (ms), for the lab
 const engineMsLog = [];
+// the structure's steps since the page started: how many, the solver's iterations, steps that stopped at its cap,
+// and their times in the engine (the benchmark's report, docs/DYNPLAN.md stage 0)
+const structStat = { steps: 0, its: 0, capped: 0, maxMs: 0, ms: [] };
 
 // ---- the simulation engine runs in a worker
 // The worker holds the authoritative brick store and does everything that changes it: blasts, the
@@ -802,6 +805,7 @@ function finishInner(r) {
   workerMs = r.ms; dustBricks = r.dust; structRatio = r.ratio;
   if (r.op === 'structure') { structMoving = !!r.moving; structSpeed = r.dynSpeed || 0; structSag = r.sag || 0; structIts = r.dynIts || 0; if (structMoving) dynSteps++; }
   engineMsLog.push(r.ms); if (engineMsLog.length > 5000) engineMsLog.shift();
+  if (r.op === 'structure') { structStat.steps++; structStat.its += r.dynIts || 0; if (r.dynCapped) structStat.capped++; if (r.ms > structStat.maxMs) structStat.maxMs = r.ms; structStat.ms.push(r.ms); if (structStat.ms.length > 5000) structStat.ms.shift(); }
   if (r.cracked !== undefined) crackedJoints = r.cracked;
   if (r.op === 'structure' && job && job.rest) restOnFloors = r.restOn || 0;
   // the page's copy of the store
@@ -1442,6 +1446,8 @@ function benchShow(done) {
     lines.push(`real-time factor ${(simT / wallT).toFixed(2)} (simulated ${simT.toFixed(1)} s in ${wallT.toFixed(1)} s)`);
     lines.push(`frame time: median ${pct(0.5).toFixed(1)} ms · 95th ${pct(0.95).toFixed(1)} ms · worst ${pct(1).toFixed(1)} ms`);
     lines.push(`GPU step: worst ${BENCH.gpuMax.toFixed(1)} ms${last.gpuStages ? ' · last ' + Object.entries(last.gpuStages).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(' · ') : ''}`);
+    { const m = structStat.ms.slice().sort((a, b) => a - b), q = (p) => m.length ? m[Math.min(m.length - 1, Math.floor(p * m.length))] : 0, e = engineMsLog.slice().sort((a, b) => a - b), qe = (p) => e.length ? e[Math.min(e.length - 1, Math.floor(p * e.length))] : 0;
+      lines.push(`structure: ${+setting.dynamic ? 'dynamic' : 'solved at rest'} · ${structStat.steps} steps, ${structStat.its} iterations, ${structStat.capped} at the cap · ms in the engine median ${q(0.5).toFixed(1)} / 95th ${q(0.95).toFixed(1)} / worst ${structStat.maxMs.toFixed(1)} · all engine jobs ${e.length}: median ${qe(0.5).toFixed(1)} / 95th ${qe(0.95).toFixed(1)} / worst ${(e.length ? e[e.length - 1] : 0).toFixed(1)}`); }
     lines.push(`invalid inputs refused: ${gpu.rejected || 0} · bad poses at the end: ${last.bad || 0} · flicker check: ${flick.vanished} shapes vanished unexplained, ${flick.jumps} jumped`);
     lines.push(`particles: ${partsMade} made, ${partsCrushed} crushed to dust, ${partsFar} and ${bodiesFar} pieces removed past ${farDist < Infinity ? farDist + ' m' : 'no limit'}, peak ${Math.max(0, ...r.map(x => x.parts))} · steps skipped at rest: ${last.skipped || 0}`);
     lines.push(`peak bodies ${Math.max(...r.map(x => x.bodies))} · peak contacts ${Math.max(...r.map(x => x.contacts))} · breaks ${last.breaks} · bricks to dust ${last.dust} · roof ${r.length ? r[0].roof.toFixed(1) : '?'} -> ${(last.roof || 0).toFixed(1)} m`);

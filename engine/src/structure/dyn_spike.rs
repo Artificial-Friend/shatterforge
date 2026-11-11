@@ -90,7 +90,7 @@ fn gs(lv: &Level, adj: &Adj, b: &X, x: &mut X, sweeps: usize) {
             if lv.fixed[k] { continue; }
             // the residual of cell k: b - (K x)_k, from its springs
             let mut r = b[k];
-            for i in 0..6 { r[i] -= lv.reg[k] * x[k][i]; }
+            for i in 0..6 { r[i] -= lv.reg[k][i / 3] * x[k][i]; }
             let mut e = adj.head[k];
             while e != NONE {
                 let l = (e / 2) as usize; let sp = &lv.sp[l]; let (a, c) = lv.ends[l];

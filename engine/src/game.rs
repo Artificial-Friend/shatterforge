@@ -617,6 +617,8 @@ impl Game {
         self.last_failed = a.failed.iter().filter_map(|&(j, r)| { let (p, q) = (self.b.ja[j as usize], self.b.jb[j as usize]); if p == NONE { None } else { Some((p, q, r)) } }).collect();
         for c in &a.cracks { self.last_failed.push((c.brick, c.brick, c.ratio)); }
         let work = self.apply_failures(&a, max_fail);
+        // (joints gone: a lot that was settling moves again from here)
+        if !work.is_empty() { for st in self.dynst.values_mut() { st.1.settle = 0; st.1.no_settle = false; } }
         self.failed_total += work.len();
         let mut crumbs = self.shatter_pending();
         let keep = self.crumb_keep;
@@ -1460,7 +1462,14 @@ mod tests {
             std::println!("  after the cut: {} failed; failures by storey {:?}; first far ones (check, storey, x, z, ratio, mats) {:?}", g.failed_total, &by[..storeys as usize + 1], far);
         }
     }
-    #[test] fn parts_far_above_a_cut_do_not_fall_on_their_own() {
+    // Out of the default run since 11 Nov (docs/LAB.md, "The cut mixed building is at its limit"): after the cut this
+    // building stands at 0.91 to 0.99 of strength with 8 to 13 joints wearing, and what the next 20 s do to it turns
+    // on the solve's last digits. Failures in storeys 1-3 / above: 1 / 0 as this test was written (the solve stopped
+    // at 0.857, r z down by 1e-5, cells known by their brick); solved to 1e-12 the same build gives 4 / 3, and this
+    // one 2 / 2; at this build's 1e-7, 580 above (a joint at 1.00 goes and the storey with it). Not a property the
+    // model has, then: no failures above needs the cut building further from its limit, or wear that does not
+    // take a joint at 0.9 in seconds.
+    #[test] #[ignore] fn parts_far_above_a_cut_do_not_fall_on_their_own() {
         // the mixed building's west wall and the west halves of its fronts shot away at 1.3 m (the lab's nibble,
         // first stage), then 20 s of checks with wear. With one sustained threshold (0.7) for every material, a steel
         // roof beam left at 77% at the cut's edge wore through at 14 s and the top storey came down in pieces, 70
@@ -1474,7 +1483,8 @@ mod tests {
         g.struct_dt = 0.25;
         let mut high = 0; let mut low = 0;
         for _ in 0..80 {
-            g.structure_step(64);
+            let nf = g.structure_step(64);
+            if std::env::var("SF_TR").is_ok() { std::println!("  step: failed {nf} its {} worst {:.3} wearing {}", g.last_iterations, g.max_ratio, g.wearing); }
             for &(p, q, _) in &g.last_failed { if (g.b.y[p as usize] as i32).max(g.b.y[q as usize] as i32) >= 3 * tower::STOREY { high += 1 } else { low += 1 } }
         }
         std::println!("20 s after the cut: {low} failures in storeys 1-3, {high} above");

@@ -33,6 +33,7 @@ pub mod structure;
 pub mod hull;
 mod validation;
 #[cfg(test)] mod dyn_tests;
+#[cfg(test)] mod dyn_closed;
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]

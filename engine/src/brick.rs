@@ -1605,8 +1605,9 @@ mod piece_tests {
         let load: std::vec::Vec<f32> = set.iter().map(|&i| if i == beam { p as f32 } else { 0.0 }).collect();
         let sink: std::vec::Vec<bool> = set.iter().map(|&i| b.y[i as usize] < 0).collect();
         let mut w = crate::structure::Warm::default();
-        let a = crate::structure::analyse_warm(&b, &set, &load, &[], &sink, crate::math::v3(1.0, 0.0, 0.0), Some(&mut w));
-        let ux = w.get(&(beam, 0, 0)).unwrap()[0];
+        let mut d = crate::structure::Dyn::default(); d.want_cells = true;
+        let a = crate::structure::analyse_dyn(&b, &set, &load, &[], &sink, crate::math::v3(1.0, 0.0, 0.0), Some(&mut w), Some(&mut d));
+        let ux = a.cells.iter().find(|c| c.0[0] == beam as i32 && c.0[1] == 0 && c.0[2] == 0).unwrap().2[0];
         if !braced { return (ux, 0.0); }
         let j = { let mut j = b.jhead[segs[0] as usize]; while j != NONE && b.joint_other(j, segs[0]) != segs[1] { j = b.joint_next(j, segs[0]); } j };
         let th = (2.85f64 / 3.4).atan();
