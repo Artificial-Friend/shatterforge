@@ -73,11 +73,13 @@ The complex building's worst joint, standing and with its corner column shot out
 
 ## Rules added
 
-- **Rest.** A structure whose cells' speeds, weighted by mass, are under `DYN_REST` = 0.5 mm/s, with no cell over `DYN_REST_CELL` = 5 cm/s and none watched, is calm. A calm structure **settles**: steps of `DYN_SETTLE_H` = 1 s from rest (implicit Euler), with the stones' beds found again from closed, until one converges with no cell out of balance by more than `DYN_SETTLED` = 3% of the largest load; then it rests, and its velocities are dropped. At most `DYN_SETTLE_MAX` = 20 in a row.
+- **Rest.** A structure whose cells' speeds, weighted by mass, are under `DYN_REST` = 0.5 mm/s, with no cell over `DYN_REST_CELL` = 5 cm/s and none watched, is calm. A calm structure **settles**: steps of `DYN_SETTLE_H` = 1 s from rest (implicit Euler), with the stones' beds found again from closed, until one converges with no cell out of balance by more than `DYN_SETTLED` = 3% of the largest load; then it rests, and its velocities are dropped. After `DYN_SETTLE_MAX` = 20 in a row that did not, it is not at rest: it goes on in steps of real time and tries again a second later. **No rest is forced** (13 November; see the next rule).
   - Without settling the complex building rested short of its equilibrium: worst joint 0.435 for 0.855 (as then solved).
   - A settling step that would move a cell out of the linear range has found a mechanism, a second of its fall in one step: it is refused, and the part falls in steps of real time.
-  - Calm does not ask that the step converged: asked for, the complex building rang at 1–3 mm/s for 70 steps of 16 iterations before one did.
-- **What rest leaves out of balance is not a force.** The solve stops at its tolerance; what each cell's loads and springs leave unbalanced when the structure rests (`Dyn::bias`) is taken off the loads of the steps that follow. Taken for real, the standing 12-storey tower never rested (9,600 iterations in 600 steps).
+  - Calm asks that the step converged (13 November). A step that stops at its cap has found the stiff motions and not the slow sag, so a structure whose steps all stop there moves slower than it should and looks calm. A step after one that stopped at its cap may take twice the iterations, up to `DYN_IT` × 2^`DYN_BOOST` = 128, and one that converges gives half back.
+- **What rest leaves out of balance is not a force, up to what the tolerance can leave.** The solve stops at its tolerance; what each cell's loads and springs leave unbalanced when the structure rests (`Dyn::bias`) is taken off the loads of the steps that follow. Taken for real, the standing 12-storey tower never rested (9,600 iterations in 600 steps).
+  - It is at most `DYN_BIAS` = 3% of the cell's own load, or `DYN_BIAS_FLOOR` = 0.5% of the structure's largest load if that is more (the standing tower's solve leaves up to 449 N on a cell, 0.39% of its largest load).
+  - **Until 13 November it had no limit, and rests were forced** on structures that had not settled in 20 steps or whose settling step was refused. A rest forced out of balance then held every cell where it was: reported from the page as upper storeys that "just fly in the air" over a ground storey shot away. `dyn_tests::a_rest_writes_off_no_more_than_the_tolerance` (the complex building shot through from the west, 700 shots): 8 rests forced and a cell held against 4.65 times its own load before; none and 3% after.
 - **At rest nothing is solved.** No velocities and no cell out of balance by more than `DYN_QUIET` = 0.1% of the largest load: the cells stay where they are.
 - **Damping**, Rayleigh: in proportion to mass, `DYN_DAMP` = 1 /s, and to stiffness, `DYN_DAMP_K` = 1.6 ms. Together 4% of critical at 4 Hz, where they are least, 8% at 1 Hz and 6% at 10 Hz. Stiffness damping does not touch a part that moves as one piece, so a falling part falls. With mass damping alone the 4-storey frame, a corner column gone, rang at 25–80 mm/s for the 4 s tried.
 - **A cell is known between steps by where it is** (its corners), not by its brick: a brick cut by a blast becomes new bricks, and its cells the blast did not touch keep their displacement and velocity. A fracture cell or free piece is known by its brick. A cell that is new is put where its neighbours hold it, by a solve of the new cells alone, and starts from rest. (By brick, every cell of a cut brick started again from no displacement beside neighbours 6 mm down.)
@@ -110,8 +112,8 @@ Every brick is coloured by how near its worst joint or section is to its strengt
 - It needs the dynamic structure for the displacements; with it off the colours alone are drawn.
 - A lot is written when the view is first asked for and when its step changed something; the page remeshes only the chunks of the bricks named. Before (reported from a real machine: the 8 × 8 city at 3 frames a second with the view on): every analysed lot was written at every step, the lots with furniture or rubble on their floors every second, and the page remeshed from the first chunk named to the last. Test `the_view_of_a_city_at_rest_is_written_once` (native): the first step writes 3,240,610 numbers, drawn in 640 ms (960 chunks); a step at rest writes nothing; a column shot out on one lot writes 13,674, drawn in 2–3 ms (3 chunks).
 - Displacements are drawn at their true size by default (× 1): the world then differs from the plain one in colour only. Faces are cut along the cells only above × 1.
-- Falling pieces and rubble are not part of the view: they are drawn as always, so a building brought down leaves it.
 - 3 × 3 city: 7,539 bricks and 32,819 cells, 475 kB a full view. The 4-storey frame: 3,420 quads as built, 8,633 in the view.
+- **What has left the structure has one colour**, violet (`VIEW_FREE`), off the scale of stress: falling pieces, crumbs, rubble. In their materials' colours the view seemed to switch off wherever a building came down (reported 13 November; page check `view`).
 
 ## The spike (`engine/src/structure/dyn_spike.rs`)
 
@@ -167,9 +169,10 @@ Native, release, the build machine, 11 November. The closed forms are under "The
 | `the_solve_is_converged_where_parts_stand_on_soft_joints` | see "The solve" |
 | `rubble_on_a_resting_building_does_not_keep_it_moving` | see "Rules added" |
 | `a_city_is_stepped_lot_by_lot` | 3 × 3 city: first step 848 ms (9 lots at rest), then 0.14 ms a step at rest. A column shot out on lot 0: only that lot moves, at rest after 29 steps, slowest step 84 ms |
-| `nothing_crumbles_where_the_solve_at_rest_stands` | 20 seeded cases (one to three 0.7 m blasts) on the five kinds: the solve at rest stands with its worst joint under 0.8 in 16, and the dynamic structure stands in all 16, worst joints within 0.001. In the other 4 it fails 2, 2, 198 and 0 joints for 2, 2, 163 and 0 |
-| `the_same_cut_gives_the_same_fall` | the three buildings below, twice: the same to the joint. At 1/30 s for 1/60 s: the biggest piece within 2.3% |
-| `the_same_joints_fail_at_half_the_frame_rate` (not in the default run) | joints failed at 1/60 and 1/30 s: 146 / 93, 154 / 140, 106 / 132. Gate 5%: not met |
+| `nothing_crumbles_where_the_solve_at_rest_stands` | 20 seeded cases (one to three 0.7 m blasts) on the five kinds: the solve at rest stands with its worst joint under 0.8 in 16, and the dynamic structure stands in all 16, worst joints within 0.002. |
+| `the_same_cut_gives_the_same_fall` | the three buildings below, twice: the same to the joint. At 1/30 s for 1/60 s: the biggest piece within 3.2% |
+| `a_rest_writes_off_no_more_than_the_tolerance` | see "Rules added" |
+| `the_same_joints_fail_at_half_the_frame_rate` (not in the default run) | joints failed at 1/60 and 1/30 s: 133 / 93, 216 / 136, 98 / 131. Gate 5%: not met |
 | `a_building_warns_before_it_goes` (not in the default run) | first joint past 0.7 to first part gone: 0.05, 0.017, 0.017 s. Gate 0.3 s: not met, and wrong for this case (see "Limits") |
 | `the_view_draws_the_structure_where_its_solution_puts_it` | see "The engineer's view" |
 
@@ -178,14 +181,14 @@ The ground storey blasted away but one column:
 | Building | | Joints failed | Steps | Biggest falling piece (bricks) | Most iterations in a step | Slowest step (ms) | In all (ms) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 4-storey concrete | at rest | 82 | 7 | 2,030 | 288 | 664 | 1,523 |
-| | dynamic | 146 | 116 | 1,603 | 16 | 126 | 3,275 |
+| | dynamic | 133 | 118 | 1,569 | 81 | 242 | 5,417 |
 | 4-storey masonry | at rest | 130 | 5 | 2,057 | 240 | 566 | 1,063 |
-| | dynamic | 154 | 14 | 1,920 | 16 | 129 | 559 |
+| | dynamic | 216 | 12 | 1,901 | 63 | 255 | 962 |
 | 12-storey concrete | at rest | 128 | 3 | 3,573 | 174 | 739 | 1,462 |
-| | dynamic | 106 | 15 | 3,561 | 16 | 263 | 718 |
+| | dynamic | 98 | 27 | 3,561 | 84 | 319 | 1,652 |
 
-- On 10 November (implicit Euler, the solve as it was) the dynamic 4-storey buildings broke into pieces of 1,317 and 800 bricks with 516 and 575 joints failed, against 69 and 128 at rest. Now the pieces are 1,603 and 1,920 bricks with 146 and 154 joints: the dynamic structure brings down nearly what the solve at rest does.
-- The slowest dynamic step is a fifth to a quarter of the slowest solve at rest. The 12-storey tower's, 198–263 ms over three runs, is over DYNPLAN stage 3's gate of 150 ms.
+- On 10 November (implicit Euler, the solve as it was) the dynamic 4-storey buildings broke into pieces of 1,317 and 800 bricks with 516 and 575 joints failed, against 69 and 128 at rest. Now the pieces are 1,569 and 1,901 bricks with 133 and 216 joints: the dynamic structure brings down nearly what the solve at rest does.
+- (13 November's build: a step may take up to 128 iterations.) The slowest dynamic step is 37–45% of the slowest solve at rest, 242–319 ms: over DYNPLAN stage 3's gate of 150 ms. With the cap fixed at 16 it was 126–263 ms.
 
 ## Lab (software GPU)
 
@@ -208,6 +211,7 @@ docs/LAB.md, 11 November, has the runs and the tables. In short, `tools/compare.
 
 - **The structure only.** Falling pieces are still rigid bodies on the GPU, broken by their plans and by the engine's impacts a few frames late.
 - **Linear.** Displacements are small until a part leaves; nothing bends plastically or buckles.
+- **How much stands is the model's strengths, in both modes.** With the solve converged the buildings have more in hand than the game was tuned on: worst joint standing 0.34 (4-storey frame), 0.39 (12-storey), 0.59 (masonry), 0.56 (mixed), 0.42 (complex), under their own weight alone. A 4-storey frame with a whole edge line of ground columns gone stands at 0.57, solved at rest or dynamically. Real floors carry finishes and what is in the rooms (half as much again as a 0.25 m slab's weight), and a real flat slab fails in punching shear at about half the 4 MPa used here. Not changed: it is a decision about the game (docs/LAB.md, 13 November).
 - **Cost while moving and at rest.** Every step builds the network and its multigrid again: 15 ms for the 12-storey tower before the first iteration, also when it finds the structure at rest. Keeping them between steps that change nothing is not done (DYNPLAN stage 3).
 - **Detached parts start from rest.** The cells' velocities are known when a part leaves, and are not yet given to the body on the GPU (stage 4).
 - **Hits reach the structure as before**, as loads once a second and through `impacts`: not yet as loads of the step they happen in (stage 5). The step itself takes such a load rightly (`dyn_closed::a_mass_arriving_at_speed...`).

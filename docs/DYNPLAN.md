@@ -60,6 +60,8 @@
 | p95 a quarter, or under 20 ms | no (60 for 94 ms) | no (37 for 96) | no (44 for 42) | yes (124 for 2,112) |
 | Steps at the cap under 5% | no | no | no (6%) | no |
 
+**13 November.** Reported from the page: parts held in the air, and the view off on fallen buildings. Both fixed (docs/LAB.md of that day). The first was this plan's stage 2 left open: steps that stop at the cap. A step may now take up to 128 iterations (steps at the cap in `ball`: 26 of 55, 47%, for 85%; `complexcol` 4 of 20), which makes stage 3 the first thing to do: no step over 150 ms is now 242–319 ms. It also showed that how much stands is a question for the model's loads and strengths, with three candidate changes listed there.
+
 **The decision point is not reached.** The step and the model are right where they can be checked (stages 1 and 6's first gate, and the solve itself, which was not); the dynamic structure is not yet better than the solve at rest by this plan's own table. What stands between, in the order it should be done:
 
 1. **Stage 3, the cost of a step that is not iterations**: the network and its multigrid kept between steps (15 ms a step at rest, most of a moving step), and a bound on what one step cuts and detaches (`nibble`'s 2 s step).

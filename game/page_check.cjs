@@ -34,9 +34,13 @@ const which = process.argv[2] || 'rest';
     await p.keyboard.press('KeyV');
     let v = [];
     for (let i = 0; i < 90; i++) { await new Promise(r => setTimeout(r, 1000)); v = await p.evaluate(() => window.__views); if (v.length) break; }
+    // what has left the structure is drawn in the view's own colour, not its material's (13 Nov: before, brick debris
+    // came back as [0.58, 0.35, 0.27] with the view on; after, VIEW_FREE)
+    const free = await p.evaluate(() => { const a = debrisColour(1, 5), on = [a.r, a.g, a.b]; const keep = setting.view; setting.view = 0; const b = debrisColour(1, 5), off = [b.r, b.g, b.b]; setting.view = keep; return { on, off, want: VIEW_FREE }; });
+    const freeOk = Math.abs(free.on[0] / free.on[2] - free.want[0] / free.want[2]) < 0.01 && free.off[0] > free.off[2];
     const shown = await p.evaluate(() => [viewShown, +setting.view, +setting.dynamic]);
-    const ok = !err && v.length > 0 && v[0][0] > 300 && v[0][1] > 300 && v[0][2] > 1e-5 && shown[0] && shown[1] === 1;
-    console.log(`${ok ? 'PASS' : 'FAIL'} view: ${v.length ? `${v[0][0]} bricks, ${v[0][1]} cells, sag ${(v[0][2] * 1000).toFixed(2)} mm` : 'no view came'}; shown ${shown[0]}, settings view ${shown[1]} dynamic ${shown[2]}${err ? '; page error: ' + err : ''}`);
+    const ok = !err && v.length > 0 && v[0][0] > 300 && v[0][1] > 300 && v[0][2] > 1e-5 && shown[0] && shown[1] === 1 && freeOk;
+    console.log(`${ok ? 'PASS' : 'FAIL'} view: ${v.length ? `${v[0][0]} bricks, ${v[0][1]} cells, sag ${(v[0][2] * 1000).toFixed(2)} mm` : 'no view came'}; shown ${shown[0]}, settings view ${shown[1]} dynamic ${shown[2]}; debris drawn [${free.on.map(x => x.toFixed(2))}] with the view, [${free.off.map(x => x.toFixed(2))}] without${err ? '; page error: ' + err : ''}`);
     await b.close(); process.exit(ok ? 0 : 1);
   }
   if (which === 'debris') {

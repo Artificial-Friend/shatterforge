@@ -590,3 +590,36 @@ Native (`dyn_tests`), the build machine.
 - **The same cut, the same fall:** twice the same to the joint. At 1/30 s for 1/60 s the biggest falling piece is within 2.3% (1,603 / 1,619, 1,920 / 1,963, 3,561 / 3,569 bricks), the joints failed on the way are not within 5%: 146 / 93, 154 / 140, 106 / 132. Gate half met; the test of the joints is out of the default run.
 - **A building warns:** not met, 0.05, 0.017 and 0.017 s in the one-column cases. The gate was wrong for them: a building left on one column is in free fall. Warning exists where a building near its limit wears (1 s and more in `a_building_left_near_its_limit...`); that test's limit changed today, in its own commit, from "no failure in the first two checks" to "none in the first", with the reason beside it.
 
+## 13 November: parts held in the air, and the view on what has fallen (reported from the page)
+
+Two reports from the published build of 11 November, on a real machine: with the dynamic structure "there is no bending any more, it just flies in the air", upper storeys hanging over a ground storey shot away, once "a whole building on one column"; and the engineer's view "goes off" where a building has come down.
+
+**Held in the air: found natively, fixed.** `dyn_tests::a_rest_writes_off_no_more_than_the_tolerance`: the complex building shot through at its ground storey from the west as a player does it (700 shots of 0.7 m, each at whatever stands first in the way, a structure step every second shot).
+
+| | 11 November's build | Now |
+| --- | --- | --- |
+| Rests forced on a structure not in balance | 8 | 0 |
+| The most a rest took off a cell's loads, of the cell's own load | 4.65 | 0.03 |
+| Moving steps, of them at the cap | 412, 401 | 258, 150 |
+| Joints failed, pieces | 984, 343 | 763, 335 |
+| Slowest step (ms, native) | 267 | 890 |
+
+- What a rest takes off a cell's loads as "left by the solve" had no limit, and a rest was forced after 20 settling steps that did not converge or after one that was refused. A rest forced out of balance wrote the whole imbalance off: every cell then stayed where it hung.
+- Behind it: with every moving step stopped at 16 iterations the slow sag is the last thing the solve finds, the structure moved slower than it should, and was taken for calm.
+- Now: no forced rest; at most 3% of a cell's own load written off (or 0.5% of the structure's largest load); calm only after a step that converged; a step after one that stopped at its cap may take twice the iterations, up to 128. docs/DYNAMIC.md, Rules added.
+- **Not proven: that this is all of what was seen.** The shots that left the building of the report standing are not known here. And part of it is not a fault of the step at all, see next.
+
+**How much stands is the model's, at rest as well.** Shot through 6 m and 14 m deep from one side (4,000 shots), the complex building keeps its full height in both modes; a 4-storey frame with a whole edge line of ground columns gone stands at 0.57 of strength in both. Worst joints standing, under own weight alone: 0.34 (4-storey frame), 0.39 (12-storey), 0.59 (masonry), 0.11 (kind 2), 0.56 (mixed), 0.42 (complex). Until 11 November the solve read the complex building at 0.917: the game looked right on a solve that was 2.2 times off, and with it converged the buildings have twice the reserve. What would bring them back, each a decision about the game and none taken:
+
+| Change | Effect | Basis |
+| --- | --- | --- |
+| Floors carry what is on them: 1.5 kPa of finishes and 1.5–2.5 kPa of use on every floor | a 0.25 m slab's load × 1.5–1.7; the frame standing at about 0.5–0.57 | every code's imposed loads; today the buildings are empty shells |
+| Concrete's shear strength 2 MPa for 4 | flat slabs fail round a column that takes a lost neighbour's share (punching) | about 0.33 √f_c = 1.8 MPa for 30 MPa concrete |
+| The slab's flexural strength 8 MPa for 12 | 83 kNm a metre for 125 | an ordinary 0.25 m flat slab has 60–90 |
+
+**The view on what has fallen: fixed in the page.** Falling pieces, crumbs and rubble kept their materials' colours, so a building that came down went grey and brick-red beside its coloured columns. They now have one colour off the scale of stress (violet). Page check `view`: brick debris drawn [0.58, 0.35, 0.27] with the view before, [0.51, 0.43, 0.64] now.
+
+**Checks on this build (software GPU):** `tools/check.sh lab`: engine 92 passed, 12 ignored; GPU suite 40 of 40; page checks `rest`, `debris`, `view` pass; `ball` passes (55 structure steps, 26 at the cap, 25 joints failed; 22 on 11 November); `collapse` fails the five checks it failed (2 below, 4 jumps, 1 rebound, 15 energy gains, not settled); deterministic over 150 frames. `tools/compare.sh complexcol`: no failed check either way; engine jobs p95 72 ms for 164 at rest; 4 of 20 structure steps at the cap. The other scenarios' rows in docs/STATUS.md are 11 November's build.
+
+**Cost.** Steps that converge cost more: the slowest dynamic step in the one-column cases is 242–319 ms (126–263 with the cap fixed at 16), and 890 ms in the test above. Stage 3 (the network kept between steps) is now the first thing to do.
+

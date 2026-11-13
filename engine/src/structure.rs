@@ -279,6 +279,13 @@ pub struct Dyn {
     pub forced: usize,
     /// a settling step was refused (it moved a part out of the linear range) since the structure last rested
     pub no_settle: bool,
+    /// the most the last rest took off a cell's loads as left out of balance (`bias`), as a share of the cell's own
+    /// load (over the cells heavy enough for `DYN_BIAS` and not `DYN_BIAS_FLOOR` to be their limit)
+    pub bias_share: f64,
+    /// the cap on a step's iterations is `DYN_IT` times 2 to this (`DYN_BOOST`)
+    pub boost: usize,
+    /// s until a structure that could not settle tries again
+    pub wait: f64,
     /// without the material's damping (`DYN_DAMP`, `DYN_DAMP_K`): for tests of the step against theory
     pub undamped: bool,
     /// with `undamped`, after a step: the work of the loads over the cells' displacements, and kinetic plus strain energy less that work (J)
@@ -315,6 +322,17 @@ pub struct Dyn {
     pub beds: crate::Map<(u32, (u32, i32, i32), (u32, i32, i32)), u8>,
 }
 pub const DYN_IT: usize = 16;
+/// A step that stops at its cap is not solved: the step after it may take twice the iterations, up to `DYN_IT` times
+/// 2^`DYN_BOOST` (128), and one that converges gives half back. Left at 16, a structure whose steps all stopped
+/// there moved slower than it should (the solve finds the stiff motions first and the slow sag last), was taken
+/// for calm, and was rested where it hung.
+pub const DYN_BOOST: usize = 3;
+/// The most of a cell's own load that a rest may write off as left out of balance by the solve (`Dyn::bias`); or, if
+/// that is more, `DYN_BIAS_FLOOR` of the structure's largest load: what the solve's tolerance leaves on a light cell
+/// beside a heavy one (the standing 12-storey tower: up to 449 N on a cell, 0.39% of its largest load of 116 kN;
+/// with less allowed it was never quiet).
+pub const DYN_BIAS_FLOOR: f64 = 0.005;
+pub const DYN_BIAS: f64 = 0.03;
 /// How much of a motion too fast for the step survives it (the generalised-alpha method's spectral radius at
 /// infinity; 1 keeps all of it, 0 none). A building's joints ring at kilohertz, and a step is a 60th of a second:
 /// that ringing is noise here and is damped, while motion the step resolves (a floor's bounce, a tower's sway) is
@@ -572,7 +590,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
     let mut fixed = fixed;
     let mut xn: Vec<[f64; 6]> = Vec::new();
     let mut cap = MAX_IT;
-    if dynamic { let d = dy.as_ref().unwrap(); cap = if d.max_it > 0 { d.max_it } else { DYN_IT }; xn = x0.take().unwrap(); }
+    if dynamic { let d = dy.as_ref().unwrap(); cap = if d.max_it > 0 { d.max_it } else { DYN_IT << d.boost.min(DYN_BOOST) }; xn = x0.take().unwrap(); }
     let bed_of: Vec<bool> = links.iter().map(|l| l.joint != NONE && l.geo.is_some() && mortar_bed(b, l.joint, [0.0; 3])).collect();
     let mut bed_state = vec![0u8; links.len()];    // 1 open, 2 hinged
     let mut bed_changes = 0usize;
@@ -864,40 +882,59 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         // long and from rest, which is nearly the solve at rest, and so on until it is in balance. Rested while it
         // crept, the complex building with a corner column shot out kept its worst joint at 0.435 of its strength,
         // where the solve at rest has 0.855: half of what had come onto that joint was written off as tolerance.
-        // (calm does not ask that the step converged: a slow structure whose steps stop at the cap goes on to
-        // settle, where it must converge to rest. Asked for, the complex building rang at 1-3 mm/s for 70 steps of
-        // 16 iterations before one converged.)
-        let calm = d.rms <= DYN_REST && d.speed <= DYN_REST_CELL && d.beyond.is_empty();
-        let rest_now = |d: &mut Dyn, x: &[[f64; 6]], forced: bool| {
+        // Calm asks that the step converged: one that stopped at its cap has not found the slow motions, and a
+        // structure moving slower than it should is not calm. (Not asked for, with a cap of 16: the complex building
+        // shot through from the west had 401 of 412 moving steps at the cap and 8 rests forced on it.)
+        d.boost = if capped { (d.boost + 1).min(DYN_BOOST) } else { d.boost.saturating_sub(1) };
+        let calm = !capped && d.rms <= DYN_REST && d.speed <= DYN_REST_CELL && d.beyond.is_empty();
+        // What a rest writes off (`bias`) is what the solve's tolerance left, and never more than `DYN_BIAS` of the
+        // cell's own load. It was all that the cell's loads and springs left out of balance, whatever its size: a
+        // rest forced on a structure not in balance then held its cells where they were, against up to 4.65 times
+        // their own weight (dyn_tests::a_rest_writes_off_no_more_than_the_tolerance), a part hanging in the air.
+        let big_raw = raw.iter().take(n).map(|l| sqrt64(l[0] * l[0] + l[1] * l[1] + l[2] * l[2])).fold(0.0, f64::max);
+        let rest_now = |d: &mut Dyn, x: &[[f64; 6]]| {
             let kx = kx_of(&springs, x);
-            if forced { d.forced += 1; }
-            d.settle = 0; d.no_settle = false;
+            d.settle = 0; d.no_settle = false; d.wait = 0.0;
             d.rest.clear(); d.bias.clear(); d.beyond.clear();
-            for k in 0..n { if !fixed[k] { d.rest.insert(key(k), x[k]); let mut b = raw[k]; for i in 0..6 { b[i] -= kx[k][i]; } d.bias.insert(key(k), b); } }
+            d.bias_share = 0.0;
+            for k in 0..n { if !fixed[k] { d.rest.insert(key(k), x[k]); let mut b = raw[k]; for i in 0..6 { b[i] -= kx[k][i]; }
+                let (bn, rn) = (sqrt64(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]), sqrt64(raw[k][0] * raw[k][0] + raw[k][1] * raw[k][1] + raw[k][2] * raw[k][2]));
+                let lim = (DYN_BIAS * rn).max(DYN_BIAS_FLOOR * big_raw);
+                if bn > lim { let f = lim / bn; for i in 0..6 { b[i] *= f; } }
+                if rn > 0.0 && DYN_BIAS * rn >= DYN_BIAS_FLOOR * big_raw { d.bias_share = d.bias_share.max(bn.min(lim) / rn); }
+                d.bias.insert(key(k), b); } }
         };
         if quiet { d.settle = 0; }
-        else if refused { d.settle = 0; d.no_settle = true; }
+        else if refused { d.settle = 0; d.no_settle = true; d.wait = DYN_SETTLE_H; }
         else if settling {
             let kx = kx_of(&springs, &x);
             let big = loads.iter().take(n).map(|l| sqrt64(l[0] * l[0] + l[1] * l[1] + l[2] * l[2])).fold(0.0, f64::max);
             let out = (0..n).filter(|&k| !fixed[k]).map(|k| { let r = [loads[k][0] - kx[k][0], loads[k][1] - kx[k][1], loads[k][2] - kx[k][2]]; sqrt64(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]) }).fold(0.0, f64::max);
             d.imbalance = if big > 0.0 { out / big } else { 0.0 };
             // (it rests after a settling step that converged in balance: that step set the beds as they are at
-            // rest. One that stopped at its cap, or left too much out of balance, is followed by another.)
-            if !capped && d.imbalance <= DYN_SETTLED { rest_now(d, &x, false); }
-            else if d.settle >= DYN_SETTLE_MAX { rest_now(d, &x, true); }
+            // rest. One that stopped at its cap, or left too much out of balance, is followed by another; after
+            // `DYN_SETTLE_MAX` of them it is not at rest, and goes on in steps of real time. No rest is forced.)
+            if !capped && d.imbalance <= DYN_SETTLED { rest_now(d, &x); }
+            else if d.settle >= DYN_SETTLE_MAX { d.forced += 1; d.settle = 0; d.no_settle = true; d.wait = DYN_SETTLE_H; }
             else { d.settle += 1; }
         }
         else if calm {
-            // (a structure calm again after a settling step was refused creeps on something soft: it rests as it is)
-            if d.no_settle { rest_now(d, &x, true); } else { d.settle = 1; }
+            // (calm after it could not settle: it tries again a second later)
+            if d.no_settle { d.wait -= d.h; if d.wait <= 0.0 { d.no_settle = false; } d.vel = vel; d.acc = acc; } else { d.settle = 1; }
         }
         else { d.vel = vel; d.acc = acc; d.settle = 0; }
     } else if let Some(d) = dy {
         // (solved at rest: the beds as this solve left them are where the next dynamic step starts)
         d.vel.clear(); d.acc.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = false; d.left = 0; d.cut = 0; d.settle = 0; d.no_settle = false;
         d.rest.clear(); d.beyond.clear(); for k in 0..n { if !fixed[k] { d.rest.insert(key(k), x[k]); } }
-        let kx = kx_of(&springs, &x); d.bias.clear(); for k in 0..n { if !fixed[k] { let mut b = raw[k]; for i in 0..6 { b[i] -= kx[k][i]; } d.bias.insert(key(k), b); } }
+        let big_raw = raw.iter().take(n).map(|l| sqrt64(l[0] * l[0] + l[1] * l[1] + l[2] * l[2])).fold(0.0, f64::max);
+        let kx = kx_of(&springs, &x); d.bias.clear(); d.bias_share = 0.0; d.boost = 0; d.wait = 0.0;
+        for k in 0..n { if !fixed[k] { let mut b = raw[k]; for i in 0..6 { b[i] -= kx[k][i]; }
+            let (bn, rn) = (sqrt64(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]), sqrt64(raw[k][0] * raw[k][0] + raw[k][1] * raw[k][1] + raw[k][2] * raw[k][2]));
+            let lim = (DYN_BIAS * rn).max(DYN_BIAS_FLOOR * big_raw);
+            if bn > lim { let f = lim / bn; for i in 0..6 { b[i] *= f; } }
+            if rn > 0.0 && DYN_BIAS * rn >= DYN_BIAS_FLOOR * big_raw { d.bias_share = d.bias_share.max(bn.min(lim) / rn); }
+            d.bias.insert(key(k), b); } }
         d.beds.clear(); for l in 0..links.len() { if bed_state[l] != 0 { d.beds.insert((links[l].joint, key(links[l].a as usize), key(links[l].b as usize)), bed_state[l]); } }
     }
     if let Some(w) = warm { w.0.clear(); for k in 0..n { if !fixed[k] { w.0.insert(key(k), x[k]); } } }

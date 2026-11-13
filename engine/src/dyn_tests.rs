@@ -279,7 +279,7 @@ fn fall(storeys: i32, kind: u8, dt: f32, secs: f32, cut: &dyn Fn(&mut Game)) -> 
 
 #[test] fn the_same_cut_gives_the_same_fall() { same_fall(false); }
 // Out of the default run (docs/LAB.md, 11 Nov, "Stage 6"): at half the frame rate the falling piece is the same
-// within 2.3%, but the joints that fail on the way are not within 5%: 146 / 93, 154 / 140, 106 / 132 (4-storey
+// within 3.2%, but the joints that fail on the way are not within 5%: 133 / 93, 216 / 136, 98 / 131 (4-storey
 // frame, 4-storey masonry, 12-storey frame; 1/60 s against 1/30 s).
 #[test] #[ignore] fn the_same_joints_fail_at_half_the_frame_rate() { same_fall(true); }
 fn same_fall(gate: bool) {
@@ -365,4 +365,33 @@ fn same_fall(gate: bool) {
     println!("complex building at rest, {:.1} kN of rubble sent 6 times in 90 steps: {moving} steps moving ({longest} in a row at most), {capped} at the cap, {forced} rests forced, {failed} joints failed, worst {:.3}", applied * 1e-3, g.max_ratio);
     assert!(applied > 1000.0, "the rubble lies on a floor");
     assert!(longest <= 8 && capped <= 4 && failed == 0, "it rests within a few steps of each list");
+}
+
+/// a player at the west side shooting through the ground storey: `per` shots along each of the lines z, each
+/// at whatever stands first in the way
+fn player_shots(g: &mut Game, k: usize, zs: &[f32], reach: f32) -> bool {
+    let z = zs[k % zs.len()];
+    let (o, d) = (v3(-40.0, 1.5 + 0.9 * ((k / zs.len()) % 2) as f32, z), v3(1.0, 0.0, 0.0));
+    let t = g.raycast(o, d, 40.0 + reach);
+    if t < 40.0 + reach { g.blast(o + d * t, 0.7); true } else { false }
+}
+#[test] fn a_rest_writes_off_no_more_than_the_tolerance() {
+    // the complex building shot through at its ground storey from the west, 700 shots, a structure step every
+    // second shot, as a player does it (reported from the page, 13 Nov: "it just flies in air", upper storeys
+    // hanging over a ground storey shot away). What a rest writes off a cell's loads as left by the solve was all
+    // that was out of balance, and rests were forced on structures that had not settled: 8 rests forced, and a cell
+    // held against 4.65 times its own load. Now no rest is forced and no cell is relieved of more than 3% of its
+    // load (and 763 joints fail for 984: more of it comes down).
+    let zs: Vec<f32> = (0..36).map(|i| -17.5 + i as f32).collect();
+    let mut g = Game::new_kind(3, 4);
+    g.dynamic = true;
+    g.structure_step(64);
+    let (mut shots, mut worst, mut moving, mut capped, mut its, mut slow) = (0, 0.0f64, 0, 0, 0, 0.0f64);
+    let mut go = |g: &mut Game| { let t = Instant::now(); g.struct_dt = 4.0 / 60.0; g.structure_step(64); slow = slow.max(t.elapsed().as_secs_f64() * 1e3); its += g.dyn_its; if g.moving { moving += 1; } if g.dyn_capped { capped += 1; } for s in g.dynst.values() { worst = worst.max(s.1.bias_share); } };
+    for k in 0..700 { if player_shots(&mut g, k, &zs, 8.0) { shots += 1; if shots % 2 == 0 { go(&mut g); } } }
+    for _ in 0..150 { go(&mut g); }
+    let forced: usize = g.dynst.values().map(|s| s.1.forced).sum();
+    println!("complex building, {shots} shots from the west: {} joints failed, {} pieces, worst {:.3}; {moving} steps moving, {capped} at the cap, {its} iterations, slowest step {slow:.0} ms; rests forced {forced}; the most a rest took off a cell's loads: {worst:.2} of its own load; still moving {}", g.failed_total, g.pieces.len(), g.max_ratio, g.moving);
+    assert!(forced == 0 && worst <= crate::structure::DYN_BIAS * 1.001, "no rest forced, no more than 3% written off: {forced}, {worst}");
+    assert!(!g.moving, "and it comes to rest");
 }

@@ -285,10 +285,15 @@ function drawTargets(r) {
 const GLASS = 3, TIMBER = 4;
 const PAINTCOL = [[0.62, 0.61, 0.58], [0.56, 0.56, 0.54], [0.79, 0.77, 0.71], [0.67, 0.65, 0.61], [0.58, 0.57, 0.55]];
 const colTmp = new THREE.Color();
+const VIEW_FREE = [0.56, 0.47, 0.70];   // (violet: not blue, green, yellow or red, the view's scale of stress)
 function debrisColour(code, k) {
   const m = code & 15, paint = code >> 4;
   const c = m === GLASS ? [0.36, 0.50, 0.58] : m === 1 ? [0.60, 0.36, 0.28] : m === TIMBER ? (paint === 8 ? [0.62, 0.46, 0.30] : [0.86, 0.84, 0.79]) : m === 2 ? [0.36, 0.40, 0.44] : (PAINTCOL[paint] || [0.7, 0.7, 0.7]);
   const h = ((Math.imul(k, 2654435761) >>> 24) & 255) / 255, s = 0.96 + 0.06 * h;
+  // In the engineer's view what has left the structure has one colour, off the scale of stress (VIEW_FREE): falling
+  // pieces, crumbs and rubble. In their materials' colours the view seemed to switch off wherever a building came
+  // down (reported 13 Nov: a fallen building drawn grey beside its blue columns).
+  if (+setting.view) { const t = 0.90 + 0.16 * h; return colTmp.setRGB(VIEW_FREE[0] * t, VIEW_FREE[1] * t, VIEW_FREE[2] * t); }
   // the tower mesh is sRGB-like vertex colour: keep the same space
   return colTmp.setRGB(c[0] * s, c[1] * s, c[2] * s);
 }
