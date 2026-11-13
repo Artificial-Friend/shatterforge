@@ -204,6 +204,8 @@ fn furnish(b: &mut Bricks, out: &mut Vec<u32>, sid: &mut u16, seed: &mut u32, x0
 pub struct Parts { pub loggia: u32, pub contents: Vec<u32>, pub wing: Vec<u32>, pub columns: Vec<u32>, pub braces: Vec<Vec<u32>>, pub rafters: Vec<Vec<u32>>, pub boards: Vec<Vec<u32>>, pub ridge: u32, pub piers: Vec<u32>, pub arches: Vec<Vec<u32>>, pub keystones: Vec<u32>, pub beam: Vec<u32>, pub parapet: u32 }
 
 pub fn build() -> Bricks { build_parts().0 }
+/// The same building with `storeys` storeys of the steel frame (2 as designed), its roof on the last.
+pub fn build_tall(storeys: usize) -> Bricks { build_parts_n(storeys.max(2)).0 }
 /// The part of a convex polygon where n.p <= d (Sutherland-Hodgman against one line).
 fn clip(poly: &[[f64; 2]], n: [f64; 2], d: f64) -> Vec<[f64; 2]> {
     let mut out = Vec::new();
@@ -216,7 +218,8 @@ fn clip(poly: &[[f64; 2]], n: [f64; 2], d: f64) -> Vec<[f64; 2]> {
     }
     out
 }
-pub fn build_parts() -> (Bricks, Parts) {
+pub fn build_parts() -> (Bricks, Parts) { build_parts_n(2) }
+pub fn build_parts_n(storeys: usize) -> (Bricks, Parts) {
     let mut b = Bricks::new();
     let mut parts = Parts { ridge: NONE, loggia: NONE, parapet: NONE, ..Default::default() };
     // member ids of the free pieces (boxes are member 1)
@@ -224,7 +227,7 @@ pub fn build_parts() -> (Bricks, Parts) {
     let up = [0.0, 1.0, 0.0];
     let (x0, x1, z0, z1) = (XS[0] - COL, XS[3] + COL, ZS[0] - COL, ZS[2] + COL);
     // ---- the steel frame
-    for k in 0..2 {
+    for k in 0..storeys {
         let y = k as f64 * H;
         let (ytop, ybeam) = (y + H - SLAB, y + H - SLAB - BEAM);
         for &x in &XS { for &z in &ZS { parts.columns.push(bx(&mut b, [x - COL, y, z - COL], [x + COL, ytop, z + COL], mat::STEEL, P_STEEL)); } }
@@ -249,7 +252,7 @@ pub fn build_parts() -> (Bricks, Parts) {
         } }
     }
     // ---- the roof: a ridge beam on posts, rafters, boards
-    let yr = 2.0 * H;                           // the roof slab's top
+    let yr = storeys as f64 * H;                // the roof slab's top
     let (ridge_lo, ridge_hi) = (yr + 2.5, yr + 3.0);
     for &x in &XS { bx(&mut b, [x - 0.125, yr, -0.125], [x + 0.125, ridge_lo, 0.125], mat::STEEL, P_STEEL); }
     parts.ridge = bx(&mut b, [x0, ridge_lo, -0.125], [x1, ridge_hi, 0.125], mat::STEEL, P_STEEL);
@@ -362,10 +365,10 @@ pub fn build_parts() -> (Bricks, Parts) {
     // (loose), a body standing where it was put from the first structure step
     let mut rooms: Vec<(f64, f64, f64, f64, f64, Room)> = Vec::new();
     let xe = [XS[0], XS[1], XS[2], XS[3]]; let ze = [ZS[0], ZS[1], ZS[2]];
-    for k in 0..2 { for i in 0..3 { for j in 0..2 {
+    for k in 0..storeys { for i in 0..3 { for j in 0..2 {
         let hall = i == 1 && j == 0;
         if k == 1 && hall { continue; }      // over the hall: no floor
-        let kind = if k == 0 && hall { Room::Lobby } else if k == 1 && i == 2 && j == 1 { Room::Meeting } else { Room::Office };
+        let kind = if k == 0 && hall { Room::Lobby } else if k >= 1 && i == 2 && j == 1 { Room::Meeting } else { Room::Office };
         rooms.push((xe[i] + 0.75, xe[i + 1] - 0.75, ze[j] + 0.75, ze[j + 1] - 0.75, k as f64 * H, kind));
     } } }
     let mut seed = 0x51ed_270bu32;

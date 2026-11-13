@@ -21,8 +21,32 @@ pub const STEEL_AREA: f32 = 0.16;
 pub const STEEL_SHEAR: f32 = 0.10;
 pub const STEEL_FLEX: f32 = 0.12;
 pub const STEEL_STIFF: f64 = 0.17;
+/// What a floor carries besides itself (N/m^2): finishes, partitions, the rooms' contents; 1,500 to 3,000 in a real
+/// building. **0 for now**: the buildings were sized for their own weight alone, and with it the masonry and mixed
+/// buildings and the city's low ones pass 0.7 of strength standing, where joints wear (13 Nov, measured standing:
+/// at 1,000 the masonry building 0.65, the mixed 0.67, the 3 x 3 city 0.89 and its lots do not rest; at 3,000 the
+/// mixed building's timber floors fail). The load, its mass and the test hook (SF_IMPOSED) are in place for when
+/// those buildings are re-sized.
+pub const IMPOSED: f32 = 0.0;
+/// The same on a timber floor: lighter finishes, a house's rooms.
+pub const IMPOSED_TIMBER: f32 = 0.0;
+/// The imposed load on brick `i` (N): `IMPOSED` on its plan if it is a floor, a concrete or timber plate at most
+/// 0.4 m thick and at least 1 m each way, off the ground.
+pub fn imposed(b: &Bricks, i: u32) -> f32 {
+    let iu = i as usize;
+    if !(b.mat[iu] == mat::CONCRETE || b.mat[iu] == mat::TIMBER) || b.cell(i).is_some() || b.piece(i).is_some() { return 0.0; }
+    let s = b.size(i);
+    if s[1] > 3 || s[0] < 8 || s[2] < 8 || b.y[iu] <= 0 { return 0.0; }
+    #[cfg(test)] { if let Ok(v) = std::env::var("SF_IMPOSED") { return if b.mat[iu] == mat::TIMBER { 0.0 } else { v.parse::<f32>().unwrap() * (s[0] * s[2]) as f32 * TICK * TICK }; } }
+    (if b.mat[iu] == mat::TIMBER { IMPOSED_TIMBER } else { IMPOSED }) * (s[0] * s[2]) as f32 * TICK * TICK
+}
+/// The weight on brick `i` (N): its own and what it carries as a floor.
+pub fn weight(b: &Bricks, i: u32) -> f32 { mass(b, i) * 9.81 + imposed(b, i) }
 pub fn strength(m: u8) -> [f32; 3] {
     match m {
+        // (shear 2 MPa since 13 Nov, for 4: a flat slab fails round a column in punching at about 0.33 sqrt(fc),
+        // 1.8 MPa for this concrete; at 4 a slab hung on from columns that took a lost neighbour's share)
+        #[cfg(test)] mat::CONCRETE if std::env::var("SF_SHEAR").is_ok() => [30e6, 4e6, std::env::var("SF_SHEAR").unwrap().parse::<f32>().unwrap() * 1e6],
         mat::CONCRETE => [30e6, 4e6, 4e6],
         mat::MASONRY => [10e6, 0.3e6, 0.5e6],
         // a steel member is a rolled section, not the solid box it is drawn as: a 254 x 146 universal beam has 16% of
@@ -120,7 +144,7 @@ fn hinge(b: &Bricks, x: usize, y: usize) -> bool {
     ((tf(x) || tf(y)) && mx != my) || (mx == mat::STEEL && my == mat::MASONRY) || (mx == mat::MASONRY && my == mat::STEEL)
 }
 pub fn flexural(m: u8) -> f32 {
-    match m { mat::CONCRETE => 12e6, mat::MASONRY => 0.5e6, mat::STEEL => 250e6 * STEEL_FLEX, mat::GLASS => 40e6, _ => 20e6 }
+    match m { mat::CONCRETE => 10e6, mat::MASONRY => 0.5e6, mat::STEEL => 250e6 * STEEL_FLEX, mat::GLASS => 40e6, _ => 20e6 }
 }
 
 /// A crack through a brick from bending: split brick `brick` at tick `at` across `axis`.
@@ -146,6 +170,8 @@ pub const CELL: i32 = 16;
 
 pub struct Analysis {
     pub failed: Vec<(u32, f32)>,  // joints over strength, with their worst ratio
+    /// joints that are yielding (`Plastic`): at their strength, turning, not failed
+    pub yielded: Vec<u32>,
     pub cracks: Vec<Crack>,       // bricks cracking inside
     pub max_ratio: f32,
     pub iterations: usize,
@@ -170,7 +196,7 @@ pub struct Analysis {
     pub left_cut: usize,
 }
 impl Analysis {
-    pub fn empty() -> Analysis { Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: 0, nodes: 0, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new(), cells: Vec::new(), inner_all: Vec::new(), left_cut: 0 } }
+    pub fn empty() -> Analysis { Analysis { yielded: Vec::new(), failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: 0, nodes: 0, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new(), cells: Vec::new(), inner_all: Vec::new(), left_cut: 0 } }
     /// add another part's analysis (a city's lots, each analysed on its own)
     pub fn merge(&mut self, o: Analysis) {
         self.failed.extend(o.failed); self.cracks.extend(o.cracks); self.ratios.extend(o.ratios); self.forces.extend(o.forces);
@@ -320,6 +346,20 @@ pub struct Dyn {
     pub rest: crate::Map<(u32, i32, i32), [f64; 6]>,
     /// the stones' beds open (1) or hinged (2) after the last step: (joint, its two cells)
     pub beds: crate::Map<(u32, (u32, i32, i32), (u32, i32, i32)), u8>,
+    /// the links that have yielded (`Plastic`), by their two cells
+    pub plastic: crate::Map<((u32, i32, i32), (u32, i32, i32)), Plastic>,
+    /// joints yielding after the last step, and the most any has turned plastically (rad)
+    pub yielding: usize,
+    pub plastic_turn: f64,
+    /// no joint yields (for tests of the elastic step against theory)
+    pub no_yield: bool,
+    /// the lot has sagged enough to be drawn where it is (`game::VIEW_BEND`)
+    pub bent: bool,
+    /// hits: where (m), the impulse (N s) and how much of `KICK_TIME` is left of it (s). Each is a force of
+    /// impulse / `KICK_TIME` on the cell nearest it for that long (docs/DYNPLAN.md stage 5).
+    pub kicks: Vec<([f64; 3], [f64; 3], f64)>,
+    /// with `want_cells`: the velocities of the cells in `Analysis::cells`, in their order
+    pub cell_vel: Vec<[f32; 6]>,
 }
 pub const DYN_IT: usize = 16;
 /// A step that stops at its cap is not solved: the step after it may take twice the iterations, up to `DYN_IT` times
@@ -327,6 +367,33 @@ pub const DYN_IT: usize = 16;
 /// there moved slower than it should (the solve finds the stiff motions first and the slow sag last), was taken
 /// for calm, and was rested where it hung.
 pub const DYN_BOOST: usize = 3;
+/// **Plastic joints** (the dynamic structure only). A joint of a ductile material that bending takes over its
+/// strength does not break: it yields. From there it turns against `PL_H` of its elastic stiffness (the moment it
+/// carried at yield, and a little more as it turns: strain hardening), and keeps the turn when the load goes. It
+/// breaks when it has turned by its material's `ductility`, or if its ratio passes `PL_OVER` all the same (the
+/// part of its moment that its links' own turning does not carry cannot yield here).
+/// What takes it over strength without bending (shear, tension, crushing) breaks it as before.
+pub const PL_H: f64 = 0.02;
+/// A hit's impulse reaches the structure over this long (s): a heavy thing stopping takes about that (at 12 m/s,
+/// 0.6 m of crushing). In one step of 1/60 s the force was six times as large and gone before a joint that it
+/// took over its strength could turn: the joint's state changes after a step, not in it.
+pub const KICK_TIME: f64 = 0.1;
+pub const PL_OVER: f32 = 1.5;
+/// How far a joint of this material turns plastically before it breaks (rad): steel 0.12, reinforced concrete 0.06,
+/// timber 0.015; masonry, stone and glass do not yield. Between two materials the lesser holds.
+/// With `PL_H` = 0.02 a concrete joint that yields at a turn of 0.0016 rad carries 1.75 times its yield moment
+/// when it breaks. A hinge alone does not: a reinforced section has 1.1 to 1.25 of its yield moment at 0.02 to
+/// 0.05 rad. The rest stands for what a linear model has not, the tension a sagging slab or beam develops along
+/// itself (membrane and catenary action), which carries more than bending does once it hangs by a tenth of its
+/// span. It is a game's stand-in, not a section's property.
+pub fn ductility(m: u8) -> f64 { match m { mat::STEEL => 0.12, mat::CONCRETE => 0.06, mat::MASONRY | mat::GLASS => 0.0, _ => 0.015 } }
+/// A link's plastic state: yielding now, the rotation taken off its strain (world), the rotation at which it
+/// yielded and the last step's.
+#[derive(Clone, Copy, Default)]
+pub struct Plastic { pub on: bool, pub t0: [f64; 3], pub ry: [f64; 3], pub r: [f64; 3],
+    /// the ratio it had hardened to when it last stopped yielding (it yields again past that, not past 1), and the
+    /// turn it had made by then
+    pub lev: f32, pub turned: f64 }
 /// The most of a cell's own load that a rest may write off as left out of balance by the solve (`Dyn::bias`); or, if
 /// that is more, `DYN_BIAS_FLOOR` of the structure's largest load: what the solve's tolerance leaves on a light cell
 /// beside a heavy one (the standing 12-storey tower: up to 449 N on a cell, 0.39% of its largest load of 116 kN;
@@ -372,8 +439,13 @@ pub const DYN_DAMP: f64 = 1.0;
 /// pieces of 1,242 bricks at most, 1,171 joints failed, against 1,845 and 843: dyn_tests). What moves that far is cut loose where it meets what does not, and
 /// falls as a body; joints between cells beyond the range are not checked (their strains are the turn's, not
 /// load). A cell beyond the range has not left yet: it is watched (`DYN_WATCH`).
-pub const DYN_TURN: f64 = 0.005;
-pub const DYN_MOVE: f64 = 0.05;
+/// (13 Nov: 0.03 rad and 0.25 m, for 0.005 and 0.05. A part hanging on yielded joints (`Plastic`) sags by centimetres
+/// and by hundredths of a radian and is still held; at 0.03 rad a part is drawn 0.05% too long. The old range is
+/// kept for what a settling step may move, `DYN_SETTLE_TURN`.)
+pub const DYN_TURN: f64 = 0.03;
+pub const DYN_MOVE: f64 = 0.25;
+pub const DYN_SETTLE_TURN: f64 = 0.005;
+pub const DYN_SETTLE_MOVE: f64 = 0.05;
 /// A cell beyond that range is watched for this long (s) before it is taken to have left; see `analyse_dyn`.
 /// Taken at once, the lab's ball (two steel balls into a facade) cut 14 joints and sent 3 pieces off where the
 /// structure solved at rest fails 2 joints and sends none: cracked pieces by the holes, hanging by their softened
@@ -383,12 +455,12 @@ pub const DYN_WATCH: f64 = 0.15;
 pub const DYN_CUT: f32 = 1.0e3;
 impl Dyn {
     /// is the structure moving (so that another step is due)?
-    pub fn moving(&self) -> bool { self.h > 0.0 && (!self.vel.is_empty() || self.settle > 0) }
+    pub fn moving(&self) -> bool { self.h > 0.0 && (!self.vel.is_empty() || self.settle > 0 || !self.kicks.is_empty()) }
     /// a cell's velocity and spin
     pub fn get(&self, k: &(u32, i32, i32)) -> Option<&[f64; 6]> { self.vel.get(k) }
 }
 /// As `analyse_warm`; with `dy` (and `warm`, which holds the cells' displacements between steps), a dynamic step.
-pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32, f32)], sink: &[bool], dir: V3, warm: Option<&mut Warm>, dy: Option<&mut Dyn>) -> Analysis {
+pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f32, f32)], sink: &[bool], dir: V3, warm: Option<&mut Warm>, mut dy: Option<&mut Dyn>) -> Analysis {
     let gravity = fabs(dir.y) > 0.99;
     let mut nodes: Vec<Node> = Vec::new();
     let mut first = vec![NONE; b.len()];     // brick -> first node
@@ -432,7 +504,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
             let share = ((hi[0] - lo[0]) * (hi[2] - lo[2])) as f32 / vol;
             let tk = TICK as f64;
             let c = if b.hull[i as usize] != 0 { b.centroid(i) } else { [0.5 * (lo[0] + hi[0]) as f64 * tk, 0.5 * (lo[1] + hi[1]) as f64 * tk, 0.5 * (lo[2] + hi[2]) as f64 * tk] };
-            nodes.push(Node { brick: i, lo, hi, load: load[k] * share, mass: mass(b, i) * share, sink: sink[k], c });
+            nodes.push(Node { brick: i, lo, hi, load: load[k] * share, mass: (mass(b, i) + imposed(b, i) / 9.81) * share, sink: sink[k], c });
         } }
         // links inside the brick
         let (nx, nz) = grid[k];
@@ -636,6 +708,39 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
     // at rest stops at its tolerance, which leaves up to 1.5% of the largest load on a cell of the 12-storey tower,
     // 2.4 kN on one that weighs 2.8 kN. Taken for real, the standing tower never rested (9,600 iterations in 600
     // steps). Rest is then exact, and what a change lets go is the whole of what is out of balance.
+    // hits: an impulse J at a point is the force J / h on the cell nearest it for this step, with its moment
+    // about the cell's centre
+    if dynamic { let d = dy.as_mut().unwrap(); let mut kicks = core::mem::take(&mut d.kicks); for (p, j, left) in kicks.iter_mut() {
+        let mut best = (f64::MAX, usize::MAX);
+        for k in 0..n { if fixed[k] { continue; } let c = nodes[k].c; let q = (c[0] - p[0]) * (c[0] - p[0]) + (c[1] - p[1]) * (c[1] - p[1]) + (c[2] - p[2]) * (c[2] - p[2]); if q < best.0 { best = (q, k); } }
+        // (the share of the impulse that falls in this step, as a force over the step)
+        let share = left.min(hs) / KICK_TIME / hs;
+        *left -= hs;
+        if best.1 == usize::MAX || best.0 > 9.0 { continue; }
+        let (k, c) = (best.1, nodes[best.1].c);
+        let (fo, r) = ([j[0] * share, j[1] * share, j[2] * share], [p[0] - c[0], p[1] - c[1], p[2] - c[2]]);
+        for i in 0..3 { f[k][i] += fo[i]; }
+        f[k][3] += r[1] * fo[2] - r[2] * fo[1]; f[k][4] += r[2] * fo[0] - r[0] * fo[2]; f[k][5] += r[0] * fo[1] - r[1] * fo[0];
+    } kicks.retain(|k| k.2 > 1e-9); d.kicks = kicks; }
+    // plastic joints: a yielding link turns against `PL_H` of its stiffness, and every link that has yielded has
+    // its plastic rotation taken off its strain, which is a pair of moments on its two cells
+    let lkey = |l: usize| (key(links[l].a as usize), key(links[l].b as usize));
+    let mut pl_on = vec![false; nl];
+    let mut pl_off = vec![[0.0f64; 3]; nl];
+    let kr_el: Vec<[f64; 3]> = springs.iter().map(|sp| sp.kr).collect();
+    if let Some(d) = dy.as_ref() { if !d.plastic.is_empty() {
+        for l in 0..nl { if let Some(p) = d.plastic.get(&lkey(l)) {
+            pl_off[l] = p.t0;
+            if p.on { pl_on[l] = true; for k in 0..3 { springs[l].kr[k] *= PL_H; } }
+            let mo = springs[l].force([0.0; 3], p.t0).1;
+            let (a, c) = (links[l].a as usize, links[l].b as usize);
+            for i in 0..3 { f[a][3 + i] -= mo[i]; f[c][3 + i] += mo[i]; }
+        } }
+    } }
+    let mut pl_update = false;
+    // (a solve that the structure will rest on, a lot's first and a settling step, is taken `TIGHT` further: what
+    // it leaves out of balance is what a rest writes off, `Dyn::bias`, and that has a limit)
+    let tight = dy.is_some() && (!dynamic || settling);
     let raw: Vec<[f64; 6]> = if dy.is_some() { f.clone() } else { Vec::new() };
     let loads: Vec<[f64; 6]> = if dynamic { let d = dy.as_ref().unwrap(); (0..n).map(|k| { let mut l = f[k]; if let Some(b) = d.bias.get(&key(k)) { for i in 0..6 { l[i] -= b[i]; } } l }).collect() } else { Vec::new() };
     let mut cm = 1.0;
@@ -686,7 +791,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         if known.iter().any(|k| !*k) {
             let kx = kx_of(&springs, &xn);
             let r: Vec<[f64; 6]> = (0..n).map(|k| if known[k] { [0.0; 6] } else { let mut v = loads[k]; for i in 0..6 { v[i] -= kx[k][i]; } v }).collect();
-            let (xu, _) = solve_network(&springs, &ends, &known, &pos, &r, None, MAX_IT, None);
+            let (xu, _) = solve_network(&springs, &ends, &known, &pos, &r, None, MAX_IT, None, false);
             for k in 0..n { if !known[k] { xn[k] = xu[k]; } }
         }
         for k in 0..n {
@@ -723,7 +828,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
     let moved = |xp: &[[f64; 6]], d: Vec<[f64; 6]>| -> Vec<[f64; 6]> { let mut x = d; for k in 0..x.len() { for i in 0..6 { x[k][i] += xp[k][i]; } } x };
     // (the dynamic-model spike reads the network a test analyses: structure/dyn_spike.rs)
     #[cfg(test)] dyn_spike::capture(&springs, &ends, &fixed, &pos, &f, &nodes.iter().map(|nd| { let tk = TICK as f64; [(nd.hi[0] - nd.lo[0]) as f64 * tk, (nd.hi[1] - nd.lo[1]) as f64 * tk, (nd.hi[2] - nd.lo[2]) as f64 * tk, nd.load as f64] }).collect::<Vec<_>>());
-    let (mut x, mut it) = if !dynamic { solve_network(&springs, &ends, &fixed, &pos, &f, x0, cap, None) } else if quiet { (xn.clone(), 0) } else { let (d, i) = solve_network(&springs, &ends, &fixed, &pos, &f, None, cap, Some(&scale)); (moved(&xp, d), i) };
+    let (mut x, mut it) = if !dynamic { solve_network(&springs, &ends, &fixed, &pos, &f, x0, cap, None, tight) } else if quiet { (xn.clone(), 0) } else { let (d, i) = solve_network(&springs, &ends, &fixed, &pos, &f, None, cap, Some(&scale), tight); (moved(&xp, d), i) };
     let mut capped = dynamic && it >= cap;
     // Stones' beds carry no tension, and where the thrust leaves a bed's face a hinge opens through it (Heyman): a bed
     // the solution pulls apart opens (its springs all but go), one whose thrust passes outside its face hinges (it
@@ -797,9 +902,9 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
             let (x2, it2) = if dynamic {
                 f = rhs_of(&springs, &m6, &vn, &an, &xn, &xp, &vp, sd);
                 let d0: Vec<[f64; 6]> = (0..x.len()).map(|k| { let mut d = x[k]; for i in 0..6 { d[i] -= xp[k][i]; } d }).collect();
-                let (d, i) = solve_network(&springs, &ends, &fixed, &pos, &f, Some(d0), cap, Some(&scale));
+                let (d, i) = solve_network(&springs, &ends, &fixed, &pos, &f, Some(d0), cap, Some(&scale), tight);
                 (moved(&xp, d), i)
-            } else { solve_network(&springs, &ends, &fixed, &pos, &f, Some(x.clone()), cap, None) };
+            } else { solve_network(&springs, &ends, &fixed, &pos, &f, Some(x.clone()), cap, None, tight) };
             x = x2; it += it2; if dynamic && it2 >= cap { capped = true; }
         }
     }
@@ -811,7 +916,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
     let mut state: Vec<u8> = Vec::new();
     let mut left = 0usize;
     if dynamic {
-        let d = dy.unwrap();
+        let d = dy.as_mut().unwrap();
         let h = hs;
         if quiet { x = xn.clone(); }
         // (a settling step that moves a cell out of the linear range has found a part with no resting place, a
@@ -821,7 +926,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
             for k in 0..n {
                 if fixed[k] { continue; }
                 let (t, u) = ([x[k][3] - xn[k][3], x[k][4] - xn[k][4], x[k][5] - xn[k][5]], [x[k][0] - xn[k][0], x[k][1] - xn[k][1], x[k][2] - xn[k][2]]);
-                if t[0] * t[0] + t[1] * t[1] + t[2] * t[2] > DYN_TURN * DYN_TURN || u[0] * u[0] + u[1] * u[1] + u[2] * u[2] > DYN_MOVE * DYN_MOVE { refused = true; break; }
+                if t[0] * t[0] + t[1] * t[1] + t[2] * t[2] > DYN_SETTLE_TURN * DYN_SETTLE_TURN || u[0] * u[0] + u[1] * u[1] + u[2] * u[2] > DYN_SETTLE_MOVE * DYN_SETTLE_MOVE { refused = true; break; }
             }
             if refused { x = xn.clone(); }
         }
@@ -886,7 +991,8 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         // structure moving slower than it should is not calm. (Not asked for, with a cap of 16: the complex building
         // shot through from the west had 401 of 412 moving steps at the cap and 8 rests forced on it.)
         d.boost = if capped { (d.boost + 1).min(DYN_BOOST) } else { d.boost.saturating_sub(1) };
-        let calm = !capped && d.rms <= DYN_REST && d.speed <= DYN_REST_CELL && d.beyond.is_empty();
+        pl_update = !quiet && !refused && !d.no_yield;
+        let calm = !capped && d.rms <= DYN_REST && d.speed <= DYN_REST_CELL && d.beyond.is_empty() && d.kicks.is_empty();
         // What a rest writes off (`bias`) is what the solve's tolerance left, and never more than `DYN_BIAS` of the
         // cell's own load. It was all that the cell's loads and springs left out of balance, whatever its size: a
         // rest forced on a structure not in balance then held its cells where they were, against up to 4.65 times
@@ -923,7 +1029,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
             if d.no_settle { d.wait -= d.h; if d.wait <= 0.0 { d.no_settle = false; } d.vel = vel; d.acc = acc; } else { d.settle = 1; }
         }
         else { d.vel = vel; d.acc = acc; d.settle = 0; }
-    } else if let Some(d) = dy {
+    } else if let Some(d) = dy.as_mut() {
         // (solved at rest: the beds as this solve left them are where the next dynamic step starts)
         d.vel.clear(); d.acc.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = false; d.left = 0; d.cut = 0; d.settle = 0; d.no_settle = false;
         d.rest.clear(); d.beyond.clear(); for k in 0..n { if !fixed[k] { d.rest.insert(key(k), x[k]); } }
@@ -939,13 +1045,14 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
     }
     if let Some(w) = warm { w.0.clear(); for k in 0..n { if !fixed[k] { w.0.insert(key(k), x[k]); } } }
     let cells_out: Vec<([i32; 5], [f64; 3], [f64; 6])> = if want_cells { (0..n).filter(|&k| !fixed[k]).map(|k| ([nodes[k].brick as i32, nodes[k].lo[0], nodes[k].lo[2], nodes[k].hi[0], nodes[k].hi[2]], nodes[k].c, x[k])).collect() } else { Vec::new() };
-    let mut out = Analysis { failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new(), cells: Vec::new(), inner_all: Vec::new(), left_cut: 0 };
+    let mut out = Analysis { yielded: Vec::new(), failed: Vec::new(), cracks: Vec::new(), max_ratio: 0.0, iterations: it, nodes: n, worst_in: (0.0, 0, 0, 0.0, 0.0, 0.0), ratios: Vec::new(), forces: Vec::new(), inner: Vec::new(), beds: Vec::new(), cells: Vec::new(), inner_all: Vec::new(), left_cut: 0 };
     // forces on each face (on the max side's cell, from the min side's): force and moment about the face centre
     let face_load = |l: usize| -> ([f64; 3], [f64; 3]) {
         let sp = &springs[l];
         let (a, c) = (links[l].a as usize, links[l].b as usize);
         let (d, r) = sp.strain(&x[a], &x[c]);
-        sp.force(d, r)
+        let o = pl_off[l];
+        sp.force(d, [r[0] - o[0], r[1] - o[1], r[2] - o[2]])
     };
     // a link's or joint's force and moment in its face's frame (normal, u, w)
     let local = |ax: usize, geo: &Option<Geo>, v: [f64; 3]| -> [f64; 3] {
@@ -960,6 +1067,8 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         let s = *jslot.entry(k.joint).or_insert_with(|| { jsum.push((k.joint, [0.0; 3], [0.0; 3], [0.0; 3], 0.0)); parts.push(Vec::new()); jsum.len() - 1 });
         parts[s].push(l);
     }
+    let mut pl_now = dy.as_mut().map(|d| core::mem::take(&mut d.plastic)).unwrap_or_default();
+    let (mut pl_count, mut pl_turn) = (0usize, 0.0f64);
     for (s, ls) in parts.iter().enumerate() {
         let j = jsum[s].0; let ju = j as usize;
         let ax = b.jaxis[ju] as usize;
@@ -1010,12 +1119,59 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         // or gone, is not checked: what it shows is their turning)
         let (mut g_all, mut g_cross) = (!state.is_empty(), false);
         if !state.is_empty() { for &l in ls.iter() { let (sa, sb) = (state[links[l].a as usize], state[links[l].b as usize]); if sa == 0 || sb == 0 { g_all = false; } if (sa == 2 && sb == 0) || (sb == 2 && sa == 0) { g_cross = true; } } }
+        // a ductile joint that bending takes over its strength yields (`Plastic`)
+        let mut ratio = ratio;
+        let theta_u = ductility(ma).min(ductility(mb));
+        if pl_update && theta_u > 0.0 && !bed && !hinged && !g_cross && !g_all {
+            let rot_of = |l: usize| springs[l].strain(&x[links[l].a as usize], &x[links[l].b as usize]).1;
+            if ls.iter().any(|&l| pl_on[l]) {
+                let (mut turned, mut work) = (0.0f64, 0.0f64);
+                for &l in ls.iter() {
+                    let r = rot_of(l);
+                    let p = pl_now.entry(lkey(l)).or_insert_with(Plastic::default);
+                    let t = [r[0] - p.ry[0], r[1] - p.ry[1], r[2] - p.ry[2]];
+                    turned = turned.max(p.turned + sqrt64(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]));
+                    let m = springs[l].force([0.0; 3], [r[0] - p.t0[0], r[1] - p.t0[1], r[2] - p.t0[2]]).1;
+                    for i in 0..3 { work += m[i] * (r[i] - p.r[i]); }
+                }
+                pl_turn = pl_turn.max(turned);
+                if turned > theta_u || ratio > PL_OVER { ratio = ratio.max(1.01); for &l in ls.iter() { pl_now.remove(&lkey(l)); } }
+                else if work < 0.0 {
+                    // (turning back: elastic again, about the turn it keeps)
+                    for &l in ls.iter() {
+                        let (r, sp) = (rot_of(l), &springs[l]);
+                        let p = pl_now.get_mut(&lkey(l)).unwrap();
+                        let (rl, tl) = (sp.rloc(r), sp.rloc(p.t0));
+                        let mut nt = [0.0; 3];
+                        for i in 0..3 { nt[i] = if kr_el[l][i] > 0.0 { rl[i] - sp.kr[i] * (rl[i] - tl[i]) / kr_el[l][i] } else { rl[i] }; }
+                        p.on = false; p.t0 = sp.rwor(nt); p.r = r; p.lev = ratio.max(1.0); p.turned = turned;
+                    }
+                    ratio = ratio.min(0.999);
+                }
+                else { for &l in ls.iter() { let r = rot_of(l); pl_now.get_mut(&lkey(l)).unwrap().r = r; } ratio = ratio.min(0.999); out.yielded.push(j); pl_count += 1; }
+            } else if ratio > ls.iter().map(|&l| pl_now.get(&lkey(l)).map_or(1.0, |p| p.lev.max(1.0))).fold(1.0f32, f32::max) && section_ratio(&sect, fl, [0.0; 3], cap, flex) < 1.0 {
+                let lev = ls.iter().map(|&l| pl_now.get(&lkey(l)).map_or(1.0, |p| p.lev.max(1.0))).fold(1.0f32, f32::max);
+                for &l in ls.iter() {
+                    let (r, sp) = (rot_of(l), &springs[l]);
+                    let p = pl_now.entry(lkey(l)).or_insert_with(Plastic::default);
+                    let (rl, tl) = (sp.rloc(r), sp.rloc(p.t0));
+                    let mut nt = [0.0; 3];
+                    // (the moment it carries now, brought down to its strength, is the moment it yields at)
+                    for i in 0..3 { nt[i] = if kr_el[l][i] > 0.0 { rl[i] - (rl[i] - tl[i]) * lev as f64 / (ratio as f64 * PL_H) } else { rl[i] }; }
+                    p.on = true; p.t0 = sp.rwor(nt); p.ry = r; p.r = r;
+                }
+                ratio = 0.999; out.yielded.push(j); pl_count += 1;
+            }
+        }
+        // (a joint that has yielded and hardened carries up to what it hardened to)
+        if ratio > 1.0 && ratio < DYN_CUT && !ls.is_empty() { let lev = ls.iter().map(|&l| pl_now.get(&lkey(l)).map_or(1.0, |p| if p.on { 1.0 } else { p.lev })).fold(1.0f32, f32::max); if ratio <= lev { ratio = 0.999; } }
         let ratio = if g_cross { DYN_CUT } else if g_all { 0.0 } else { ratio };
         out.ratios.push((j, ratio));
         if ratio > out.max_ratio && ratio < DYN_CUT { out.max_ratio = ratio; }
         if ratio > 1.0 { out.failed.push((j, ratio)); }
         if ratio >= DYN_CUT { out.left_cut += 1; }
     }
+    if let Some(d) = dy.as_mut() { d.plastic = pl_now; d.yielding = pl_count; d.plastic_turn = d.plastic_turn.max(pl_turn); }
     // faces inside bricks: the brick's own section; over strength it cracks there
     for (l, k) in links.iter().enumerate() {
         if k.joint != NONE || !live[k.a as usize] { continue; }
@@ -1034,6 +1190,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         else if ratio > 0.7 { out.inner.push((i, k.axis, k.face_lo[k.axis], ratio)); }
     }
     let _ = gravity;
+    if want_cells { if let Some(d) = dy.as_mut() { d.cell_vel = (0..n).filter(|&k| !fixed[k]).map(|k| d.vel.get(&key(k)).map_or([0.0; 6], |v| [v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32, v[4] as f32, v[5] as f32])).collect(); } }
     out.cells = cells_out;
     out
 }
@@ -1060,6 +1217,9 @@ impl Spring {
             }
         }
     }
+    /// a rotation in the frame of the face's rotational stiffness, and back
+    fn rloc(&self, r: [f64; 3]) -> [f64; 3] { match &self.fr { None => r, Some(fr) => rot(self.frr.as_ref().unwrap_or(fr), r) } }
+    fn rwor(&self, r: [f64; 3]) -> [f64; 3] { match &self.fr { None => r, Some(fr) => rot_t(self.frr.as_ref().unwrap_or(fr), r) } }
     /// the 6 x 6 stiffness of the face (force and moment against displacement and rotation), world axes
     fn d6(&self) -> M6 {
         let mut d = [[0.0; 6]; 6];
@@ -1215,7 +1375,7 @@ fn section_ratio(s: &Sect, f: [f64; 3], m: [f64; 3], cap: [f32; 3], flex: f32) -
 /// drop out. Damped block-Jacobi smoothing (each cell's 6 x 6 block inverted) on every level.
 /// With block Jacobi alone the 12-storey tower took 1,552 iterations and 1.2 s (the long, slow bending modes of a
 /// tall building converge slowly).
-fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64; 3]], f: &[[f64; 6]], x0: Option<Vec<[f64; 6]>>, cap: usize, scale: Option<&[[f64; 6]]>) -> (Vec<[f64; 6]>, usize) {
+fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64; 3]], f: &[[f64; 6]], x0: Option<Vec<[f64; 6]>>, cap: usize, scale: Option<&[[f64; 6]]>, tight: bool) -> (Vec<[f64; 6]>, usize) {
     let n = fixed.len();
     #[cfg(test)] let t0 = { extern crate std; std::time::Instant::now() };
     let mut levels = vec![Level::from_springs(sp, ends, fixed.to_vec(), pos.to_vec())];
@@ -1247,6 +1407,7 @@ fn solve_network(sp: &[Spring], ends: &[(u32, u32)], fixed: &[bool], pos: &[[f64
     #[cfg(test)] let tol = { extern crate std; let t = TOL_TEST.with(|t| t.get()); if t > 0.0 { t } else { std::env::var("SF_TOL").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(TOL) } };
     #[cfg(test)] let cap = { extern crate std; if TOL_TEST.with(|t| t.get()) > 0.0 || std::env::var("SF_CAP").is_ok() { 20000 } else { cap } };
     #[cfg(not(test))] let tol = TOL;
+    let tol = if tight { tol * TIGHT } else { tol };
     let mut z = vcycle(&levels, 0, &r);
     let mut p = z.clone();
     let mut rz = dot(&r, &z);
@@ -1276,6 +1437,8 @@ const MAX_IT: usize = 2000;
 // without its keystone lost a joint at 1e-5 (worst 0.76) that it keeps from 1e-6 on (0.51): dyn_tests, complex::tests.
 const TOL: f64 = 1e-7;
 const SMOOTH: usize = 1;
+/// a solve the dynamic structure rests on is taken this much further than `TOL`
+const TIGHT: f64 = 1e-3;
 /// two cells go into one coarse block if the joints between them hold at least this share of what holds the weaker
 /// of the two (`Level::coarsen`)
 const STRONG: f64 = 1.0e-3;

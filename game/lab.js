@@ -198,7 +198,8 @@ function labOnRead(r, pr) {
     // (a spare body parked for a break on the GPU: not there yet; once placed, it counts as new)
     if (gb.spare !== undefined && y < -500) continue;
     if (y < -1) { below++; labEvent('below_ground_body', f, { body: b, y: +y.toFixed(2), size: gb.labH, made_at: gb.labF }); }
-    if (gb.labBall) continue;
+    // (a ball's track: frame, where it is, how fast)
+    if (gb.labBall) { (L.ballTrack = L.ballTrack || []).push([f, +r.body[o].toFixed(2), +y.toFixed(2), +r.body[o + 2].toFixed(2), +Math.hypot(vx, vy, vz).toFixed(2)]); continue; }
     const m = (gb.labVol || 0) * 2400, ek = 0.5 * m * (vx * vx + vy * vy + vz * vz), e = ek + m * 9.81 * y;
     now.set(b, { gb, vy, e, ek, v: [vx, vy, vz], y, vol: gb.labVol || 0, cut: gb.labCut });
     // the same body as at the last read-back (a reused slot holds another one)
@@ -261,8 +262,9 @@ async function labAct(act, a) {
     L.lostBy.tool = (L.lostBy.tool || 0) + Math.max(0, T0 - L.T);
     physicsPaused = false; lastActive = clock();
   } else if (act === 'ball') {
-    const [x, y, z, yw, pt] = a, d = [Math.sin(yw) * Math.cos(pt), Math.sin(pt), Math.cos(yw) * Math.cos(pt)];
-    L.ballNext = true; gpu.addBodies([{ shapes: ballShapes([x, y, z], 0.4), v: [d[0] * 120, d[1] * 120, d[2] * 120], w: [0, 0, 0] }]); lastActive = clock();
+    // (position, yaw, pitch; then its speed, 120 m/s if not given, and its radius, 0.4 m)
+    const [x, y, z, yw, pt] = a, sp = a[5] || 120, rad = a[6] || 0.4, d = [Math.sin(yw) * Math.cos(pt), Math.sin(pt), Math.cos(yw) * Math.cos(pt)];
+    L.ballNext = true; gpu.addBodies([{ shapes: ballShapes([x, y, z], rad), v: [d[0] * sp, d[1] * sp, d[2] * sp], w: [0, 0, 0] }]); lastActive = clock();
   } else if (act === 'blast') {
     const [ox, oy, oz, dx, dy, dz, r] = a;
     setRadius(r); doBlast(new THREE.Vector3(ox, oy, oz), new THREE.Vector3(dx, dy, dz).normalize());
@@ -314,6 +316,19 @@ function labReport(wallS) {
   // wrong place. 8 November: spare bodies seen parked 1 km under the ground, 1,018 m3 of the mixed building went)
   checks.push({ name: 'spare bodies awake while parked (most at once)', value: L.parkedAwake || 0, limit: 0, pass: !(L.parkedAwake > 0), what: 'the world never at rest' });
   if (S.far == null) checks.push({ name: 'removed past the clean-up distance (% of the building)', value: +(100 * (L.lostBy.far || 0) / L.V0).toFixed(1), limit: 0.5, pass: 100 * (L.lostBy.far || 0) / L.V0 <= 0.5, what: 'parts removed that did not fly that far' });
+  if (S.expect && S.expect.ballStops) {
+    // a ball sent into a building is stopped by it: it ends at rest inside, above the ground storey, and what it
+    // lost in its first second of breaking through is most of its speed
+    const E = S.expect.ballStops, tr = L.ballTrack || [], end = tr[tr.length - 1] || [0, 0, 0, 0, 99];
+    const v0 = tr.length ? tr[0][4] : 0;
+    const hit = tr.findIndex(t => t[4] < 0.95 * v0), after = hit >= 0 ? tr.find(t => t[0] >= tr[hit][0] + 30) : null;
+    const levels = []; for (const t of tr) { if (t[4] < 1 && (!levels.length || Math.abs(levels[levels.length - 1] - t[2]) > 0.5)) levels.push(t[2]); }
+    checks.push({ name: 'ball: speed at the end (m/s)', value: end[4], limit: 1, pass: end[4] <= 1, what: 'the building stops it' });
+    checks.push({ name: 'ball: height where it stops (m)', value: end[2], limit: `${E.above} to ${E.top}`, pass: end[2] >= E.above && end[2] <= E.top, what: 'it stops inside the building, not on the ground under it' });
+    if (E.box) checks.push({ name: 'ball: where it stops, x and z (m)', value: `${end[1]}, ${end[3]}`, limit: `x ${E.box[0]} to ${E.box[1]}, z ${E.box[2]} to ${E.box[3]}`, pass: end[1] >= E.box[0] && end[1] <= E.box[1] && end[3] >= E.box[2] && end[3] <= E.box[3], what: 'inside the building\'s plan' });
+    checks.push({ name: 'ball: speed half a second after it first hits, of its speed before', value: after && v0 ? +(after[4] / v0).toFixed(2) : 'no hit', limit: '<= 0.5', pass: !!after && after[4] <= 0.5 * v0, what: 'the first of the building takes most of it' });
+    L.ballSummary = { v0, first_hit_frame: hit >= 0 ? tr[hit][0] : null, end, rests_at_m: levels, track: tr.filter((t, i) => i % 6 === 0) };
+  }
   if (S.expect && S.expect.far) {
     // past the clean-up distance things go at the next read-back (what their speed carries them over the lag is
     // allowed for, see labOnRead)
@@ -329,7 +344,7 @@ function labReport(wallS) {
     scenario: L.name, shortened: S.frames !== LAB_SCENARIOS[L.name].frames, title: S.title, kind: KIND_NAMES[S.kind], storeys: S.storeys, frames: S.frames,
     readLag: L.readLag, jobLag: L.jobLag, settings: { ...setting }, ua: navigator.userAgent, adapter: L.adapter, date: new Date().toISOString(),
     pass: checks.every(c => c.pass), checks, colConflicts: L.colConflicts || 0, colConflictAt: L.colConflictAt || null, digest: L.digest, dumpRaw: L.dumpRaw ? { ...L.dumpRaw, colRows: L.colRows, allRows: L.allRows } : (L.colRows ? { colRows: L.colRows, allRows: L.allRows } : null),
-    physics: { roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_by: { ...partsBy }, big_breaks: L.bigBreaks, made: L.made, gains: L.gains, spill_why: { crumbs: E.spill_why(0), fragments: E.spill_why(1), crushed_storey: E.spill_why(2), static: E.spill_why(3), fragment_bricks_by_mat: [0, 1, 2, 3, 4, 5, 6, 7].map(k => E.spill_mat(k)), single_brick_fragments: E.spill_mat(8) }, over_breaks: L.overBreaks, dbg_breaks: L.dbgBreaks, lost_m3: Object.fromEntries(Object.entries({ ...L.lostBy, particles_crushed: L.lostParticles || 0, building: L.V0 }).map(([k, v]) => [k, +v.toFixed(1)])), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, removed_far: { bodies: L.farBodies || 0, particles: L.farParts || 0, m3: +((L.lostBy.far || 0)).toFixed(2) }, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps, gradual: L.gradual || undefined, awake_at_end: L.awakeEnd || undefined, late_calls: L.lateCalls || {}, late_inputs: L.lateInputs || null, skip_state: { inputs: gpu.inputs, statsInputs: gpu.statsInputs, skipped: gpu.skipped || 0, frame: gpu.frame, realFrame: gpu.realFrame, awake: gpu.stats.awake, pActive: gpu.stats.pActive, blasts: (gpu.pBlasts || []).length, wakeReq: !!gpu.wakeReq, inherit: (gpu.pendingInherit || []).length, sleep: gpu.sleep } },
+    physics: { ball: L.ballSummary, roof_m: [+roof0.toFixed(2), +(last.roof || 0).toFixed(2)], dust_of_building: +(1 - (L.T) / L.V0).toFixed(3), particles_by: { ...partsBy }, big_breaks: L.bigBreaks, made: L.made, gains: L.gains, spill_why: { crumbs: E.spill_why(0), fragments: E.spill_why(1), crushed_storey: E.spill_why(2), static: E.spill_why(3), fragment_bricks_by_mat: [0, 1, 2, 3, 4, 5, 6, 7].map(k => E.spill_mat(k)), single_brick_fragments: E.spill_mat(8) }, over_breaks: L.overBreaks, dbg_breaks: L.dbgBreaks, lost_m3: Object.fromEntries(Object.entries({ ...L.lostBy, particles_crushed: L.lostParticles || 0, building: L.V0 }).map(([k, v]) => [k, +v.toFixed(1)])), particles_made: partsMade, particles_crushed: partsCrushed, bodies_crushed: crushedBodies, removed_far: { bodies: L.farBodies || 0, particles: L.farParts || 0, m3: +((L.lostBy.far || 0)).toFixed(2) }, breaks, failed_joints: failedJoints, settled_s: L.settledAt == null ? null : +(L.settledAt / 60).toFixed(2), bounce_max: +L.bounceMax.toFixed(2), launch_max: +L.launchMax.toFixed(2), hole_max_m3: +L.holeMax.toFixed(3), dup_max_m3: +L.dupMax.toFixed(3), energy_given_by_cuts_J: Math.round(L.givenTotal || 0), rubble_on_floors_max_t: +((L.restMax || 0) / 9810).toFixed(1), rubble_sent_bodies_particles_t: L.restSplit || null, joints_cracked: L.cracked || 0, gpu_breaks: gpuSnaps, gradual: L.gradual || undefined, awake_at_end: L.awakeEnd || undefined, late_calls: L.lateCalls || {}, late_inputs: L.lateInputs || null, skip_state: { inputs: gpu.inputs, statsInputs: gpu.statsInputs, skipped: gpu.skipped || 0, frame: gpu.frame, realFrame: gpu.realFrame, awake: gpu.stats.awake, pActive: gpu.stats.pActive, blasts: (gpu.pBlasts || []).length, wakeReq: !!gpu.wakeReq, inherit: (gpu.pendingInherit || []).length, sleep: gpu.sleep } },
     perf: {
       wall_s: +wallS.toFixed(1), steps: stepsDone, steps_skipped: gpu.skipped || 0,
       gpu_ms: { median: +med(gpuMs).toFixed(2), p95: +p95(gpuMs).toFixed(2), max: +Math.max(0, ...gpuMs).toFixed(2) },

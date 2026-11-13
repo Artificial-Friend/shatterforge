@@ -380,7 +380,8 @@ fn stair(s: &mut Storey, floor: i32) {
 pub fn build(storeys: i32, structure: u16) -> Bricks { build_kind(storeys, structure, 0) }
 pub fn build_kind(storeys: i32, structure: u16, kind: u8) -> Bricks {
     // kind 4: the complex building, of boxes and free pieces at any angle (crate::complex); its size is its own
-    if kind == 4 { return crate::complex::build(); }
+    // (the complex building: as designed, two storeys, up to 3 asked; taller if more are)
+    if kind == 4 { return if storeys > 3 { crate::complex::build_tall(storeys as usize) } else { crate::complex::build() }; }
     // kind 5: the city, `storeys` lots a side (crate::city)
     if kind == 5 { return crate::city::build(storeys); }
     let mut b = Bricks::new();

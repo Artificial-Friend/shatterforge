@@ -139,6 +139,10 @@ const LAB_SCENARIOS = {
   // the clean-up distance, short: a steel ball fired at the facade from 30 m goes once it has flown 15 m from where
   // it was fired (a blast into a cut building's rubble threw nothing 8 m: the scenario must throw something)
   far: { kind: 0, storeys: 3, frames: 240, far: 15, title: 'concrete frame, 3 storeys: a steel ball fired from 30 m, clean-up distance 15 m', script: [[10, 'ball', [-4, 4, -30, 0.15, 0.02]]], expect: { far: true } },
+  // an 8-storey concrete frame, a steel ball of 0.4 m sent down onto the middle of a roof bay at 45 m/s: it breaks
+  // through the roof, which takes most of its speed, and stops inside on a floor (13 Nov; docs/LAB.md: at 25 m/s it
+  // stays in a crater on the roof, at 80 m/s it bounces 20 m up and off the building)
+  tallball: { kind: 0, storeys: 8, frames: 600, title: 'concrete frame, 8 storeys: a steel ball onto the roof at 45 m/s', script: [[10, 'ball', [7.5, 45, 7.5, 0, -1.5707, 45, 0.4]]], expect: { ballStops: { above: 3.0, top: 29.5, box: [-11.5, 11.5, -11.5, 11.5] } } },
   // the complex building (kind 4, docs/PHASE2.md): steel frame with free-piece braces, a roof of rafters and boards
   // at 26 degrees, an arcade of stone arches; the ground storey and the arcade's piers cut
   complex: { kind: 4, storeys: 3, frames: 600, title: 'complex (braced steel frame, pitched timber roof, stone arcade): the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
@@ -650,6 +654,9 @@ function addPieces(list, xf, vel, cool) {
     });
     c = c.map(x => x / m);
     const v = vel ? vel(c, b) : { v: [0, 0, 0], w: [0, 0, 0] };
+    // (v.u, v.r, where the structure had this part, are not used: the bodies and the ground they meet are where
+    // the building was built, and a part put down by its sag started inside what is under it. Lab collapse, 13 Nov:
+    // 101 energy gains while quiet with the shift, for 15. So a sagged part still jumps back by its sag as it lets go.)
     return { shapes, v: v.v, w: v.w };
   });
   // particles: equal-volume spheres, drawn as their bricks
@@ -816,32 +823,54 @@ function finishInner(r) {
   // the page's copy of the store
   if (r.snap) { const p = E.snap_in(r.snap.length); new Uint8Array(E.memory.buffer, p, r.snap.length).set(r.snap); E.snap_load(r.lo, r.hi); }
   readPlans(r);
+  // (a hit on the dynamic structure is a load of its next step: it must have one)
+  if (r.op === 'impacts' && +setting.dynamic) jobs.structure = true;
   if (r.op === 'blast') onBlast(job, r);
   else if (r.op === 'snap') onSnap(job, r);
   else if (r.op === 'pblast') onImpacts(job, r);
   else if (r.op === 'structure') onStructure(r);
   else onImpacts(job, r);
-  if (r.view && +setting.view) showView(r.view);
+  if (r.view && viewParam()) showView(r.view);
 }
 // ---- the structure as the engineer sees it (key V; docs/DYNAMIC.md): each brick coloured by how near its worst joint
 // or section is to its strength, and the building drawn where the structure's solution puts it, its displacements
 // VIEW_SCALE[setting.viewScale] times as large. The engine writes it with each structure step (set_param 8); the
 // page's copy of the engine draws it (view_apply) into the chunks' meshes.
 const VIEW_SCALE = [0, 1, 10, 100, 1000];
+// (13 Nov: with the dynamic structure the building is drawn where it has sagged without the view too, in its own
+// colours and at its true size: the engine then writes only the lots that have moved 2 cm, set_param 8 at 2)
+function drawView() { if (+setting.view) E.view_apply(VIEW_SCALE[setting.viewScale] || 0, 1); else E.view_apply(1, 0); }
+function viewParam() { return +setting.view ? 1 : (+setting.dynamic ? 2 : 0); }
+// the motion of the structure's cell at a point, for a part that leaves it there (from the view's cells: only lots
+// that have sagged to see are in it)
+function motionAt(c) {
+  if (!E.view_motion || !viewParam() || !E.view_motion(c[0], c[1], c[2])) return { v: [0, 0, 0], w: [0, 0, 0] };
+  const m = new Float32Array(E.memory.buffer, E.motion_ptr(), 12);
+  const sc = +setting.view ? (VIEW_SCALE[setting.viewScale] || 0) : 1;
+  return { u: [m[0] * sc, m[1] * sc, m[2] * sc], r: [m[3] * sc, m[4] * sc, m[5] * sc], v: [m[6], m[7], m[8]], w: [m[9], m[10], m[11]] };
+}
 function showView(v) {
   if (!E.view_in || (v[0] === 0 && v[1] === 0)) return;   // (nothing changed in the step)
   const p = E.view_in(v.length); new Float32Array(E.memory.buffer, p, v.length).set(v);
-  E.view_apply(VIEW_SCALE[setting.viewScale] || 0, 1);
+  drawView();
   // (drawn at once: remeshDirty waits for the read-back that shows the debris of a change, and a building at rest
   // has none coming)
-  for (let i = 0, n = E.view_chunk_count(); i < n; i++) chunkMesh(E.view_chunk(i));
+  // (without the view a lot is written because it moved, and what moved may be about to leave as bodies: its chunks
+  // wait for the read-back that shows those, as every change's do. Drawn at once, the lab's ball had 26 frames
+  // with less drawn than exists, 13 Nov.)
+  const later = gpu && !+setting.view;
+  for (let i = 0, n = E.view_chunk_count(); i < n; i++) { if (later) pendingChunks.push({ k: E.view_chunk(i), need: readSeq + 1 }); else chunkMesh(E.view_chunk(i)); }
 }
 let viewShown = false;
 function applyView() {
-  if (!E || !E.view_off || (!+setting.view && !viewShown)) return;
+  if (!E || !E.view_off) return;
+  const was = viewShown;
   viewShown = !!+setting.view;
-  if (worker) worker.postMessage({ op: 'param', id: 8, v: +setting.view }); else E.set_param(8, +setting.view);
-  if (+setting.view) { jobs.structure = true; pump(); }
+  if (worker) worker.postMessage({ op: 'param', id: 8, v: viewParam() }); else E.set_param(8, viewParam());
+  // (a structure step is asked for only when the view itself is switched: at start-up the settings are applied
+  // before the building's first step, and a step asked for here ran ahead of it: its loose furniture, 208 bodies,
+  // never reached the GPU; page check rest, 13 Nov)
+  if (viewParam()) { if (was || viewShown) { drawView(); for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k); jobs.structure = true; pump(); } }
   else { E.view_off(); for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k); }
 }
 
@@ -1152,8 +1181,9 @@ function onImpacts(job, r) {
   if (st.updates.length || st.bodies.length) {
     remeshDirty();
     applyStatic(st.updates);
-    // crushed material sprays out a little; what came loose starts at rest
-    addPieces(st.bodies, null, (c, b) => b.id >= 0 ? { v: [0, 0, 0], w: [0, 0, 0] } : { v: [(Math.random() - 0.5) * 3, Math.random() * 2, (Math.random() - 0.5) * 3], w: [0, 1, 2].map(() => (Math.random() - 0.5) * 8) });
+    // crushed material sprays out a little; what came loose starts where the structure had it and as it moved
+    // there (motionAt: it started as built and at rest, and a part that had sagged 20 cm jumped back up as it let go)
+    addPieces(st.bodies, null, (c, b) => b.id >= 0 ? motionAt(c) : { v: [(Math.random() - 0.5) * 3, Math.random() * 2, (Math.random() - 0.5) * 3], w: [0, 1, 2].map(() => (Math.random() - 0.5) * 8) });
     jobs.structure = true;
   }
   // 2. broken pieces
@@ -1258,7 +1288,7 @@ const SETTINGS = {
   view: { el: 's-view', def: 0, fmt: v => (+v ? 'on' : 'off'), apply: () => applyView() },
   viewScale: { el: 's-viewScale', def: 1, fmt: v => (VIEW_SCALE[+v] ? `× ${VIEW_SCALE[+v]}` : 'not drawn'), apply: () => { if (+setting.view) applyView(); } },
   // (the standing structure stepped as a dynamic model, docs/DYNAMIC.md)
-  dynamic: { el: 's-dynamic', def: window.__static ? 0 : 1, fmt: v => (+v ? 'on' : 'off'), apply: v => setParam(7, +v) },
+  dynamic: { el: 's-dynamic', def: window.__static ? 0 : 1, fmt: v => (+v ? 'on' : 'off'), apply: v => { setParam(7, +v); applyView(); } },
   // (chunks: loose bricks break into convex chunks, and the engine splits bricks on a fracture surface into
   // convex cells, at most 1,500 standing bricks)
   chunks: { el: 's-chunks', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: v => setParam(3, +v && !window.__noFracCells ? 1500 : 0) },

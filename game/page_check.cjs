@@ -33,13 +33,18 @@ const which = process.argv[2] || 'rest';
     await p.evaluate(() => { const f0 = finishInner; window.__views = []; finishInner = (r) => { if (r.op === 'structure' && r.view) window.__views.push([r.view[0], r.view[1 + 2 * r.view[0]], r.sag]); return f0(r); }; });
     await p.keyboard.press('KeyV');
     let v = [];
-    for (let i = 0; i < 90; i++) { await new Promise(r => setTimeout(r, 1000)); v = await p.evaluate(() => window.__views); if (v.length) break; }
+    for (let i = 0; i < 90; i++) { await new Promise(r => setTimeout(r, 1000)); v = await p.evaluate(() => window.__views); if (v.some(x => x[0] > 300)) break; }
     // what has left the structure is drawn in the view's own colour, not its material's (13 Nov: before, brick debris
     // came back as [0.58, 0.35, 0.27] with the view on; after, VIEW_FREE)
     const free = await p.evaluate(() => { const a = debrisColour(1, 5), on = [a.r, a.g, a.b]; const keep = setting.view; setting.view = 0; const b = debrisColour(1, 5), off = [b.r, b.g, b.b]; setting.view = keep; return { on, off, want: VIEW_FREE }; });
     const freeOk = Math.abs(free.on[0] / free.on[2] - free.want[0] / free.want[2]) < 0.01 && free.off[0] > free.off[2];
+    // (13 Nov) without the view the dynamic structure still has the engine write the lots that have sagged (set_param 8
+    // at 2), and the page can ask where the structure had a point (for parts that leave it)
+    const bend = await p.evaluate(() => { const k = setting.view; setting.view = 0; const a = viewParam(); setting.view = k; return [a, typeof E.view_motion]; });
     const shown = await p.evaluate(() => [viewShown, +setting.view, +setting.dynamic]);
-    const ok = !err && v.length > 0 && v[0][0] > 300 && v[0][1] > 300 && v[0][2] > 1e-5 && shown[0] && shown[1] === 1 && freeOk;
+    // (the view with the most bricks: since 13 Nov empty ones come before V, the lots that have not sagged)
+    v.sort((a, b) => b[0] - a[0]);
+    const ok = !err && v.length > 0 && v[0][0] > 300 && v[0][1] > 300 && v[0][2] > 1e-5 && shown[0] && shown[1] === 1 && freeOk && bend[0] === 2 && bend[1] === 'function';
     console.log(`${ok ? 'PASS' : 'FAIL'} view: ${v.length ? `${v[0][0]} bricks, ${v[0][1]} cells, sag ${(v[0][2] * 1000).toFixed(2)} mm` : 'no view came'}; shown ${shown[0]}, settings view ${shown[1]} dynamic ${shown[2]}; debris drawn [${free.on.map(x => x.toFixed(2))}] with the view, [${free.off.map(x => x.toFixed(2))}] without${err ? '; page error: ' + err : ''}`);
     await b.close(); process.exit(ok ? 0 : 1);
   }
@@ -64,7 +69,9 @@ const which = process.argv[2] || 'rest';
   const r0 = s.readSeq;
   for (let i = 0; i < 20; i++) { await new Promise(r => setTimeout(r, 1000)); }
   const s1 = await st();
-  const ok = !err && s.skipped >= 3 && s1.readSeq > r0 && s1.bodies > s.bodies;
+  // (and the complex building's loose furniture is there as bodies from its first structure step: 208; on 13 Nov a
+  // structure step asked for while the settings were applied ran ahead of that one, and none of it came)
+  const ok = !err && s.skipped >= 3 && s1.readSeq > r0 && s1.bodies > s.bodies && s.bodies > 100;
   console.log(`${ok ? 'PASS' : 'FAIL'} rest: at rest ${JSON.stringify(s)}; 20 s after a click ${JSON.stringify(s1)}${err ? '; page error: ' + err : ''}`);
   await b.close();
   process.exit(ok ? 0 : 1);

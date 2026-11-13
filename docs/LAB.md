@@ -623,3 +623,77 @@ Two reports from the published build of 11 November, on a real machine: with the
 
 **Cost.** Steps that converge cost more: the slowest dynamic step in the one-column cases is 242–319 ms (126–263 with the cap fixed at 16), and 890 ms in the test above. Stage 3 (the network kept between steps) is now the first thing to do.
 
+## 13 November, later: bending that stays, the calibration, hits in the step, the ball
+
+Asked for after the first fixes of the day: the calibration (floor loads, strengths), real bending without a scale ("parts hanging with some bending because their columns are gone"; metal bends, brick and concrete break), and a scenario of a ball stopped inside a taller building. docs/DYNAMIC.md, "Plastic joints", has the model and its closed-form tests.
+
+### The calibration: what could be done, and what the buildings do not allow
+
+| Change | Done | Standing, worst joint (native, `Game::new_kind`, first solve) |
+| --- | --- | --- |
+| Concrete's flexural strength 10 MPa for 12 | yes | 4-storey frame 0.34 → 0.34, 12-storey 0.39 → 0.42, masonry 0.59 → 0.59, mixed 0.56 → 0.56, complex 0.42 → 0.42; the frame with a line of ground columns gone 0.57 → 0.57 (its worst joint is shear's) |
+| Floors carry 1,000 N/m² besides themselves (`IMPOSED`) | **no**: the code and its mass are in, set to 0 | frame 0.39, 12-storey 0.46, masonry 0.65, mixed 0.67, complex 0.48, 3 × 3 city 0.89 and its lots no longer rest |
+| The same at 3,000 N/m², timber floors too | no | the mixed building's timber floors fail standing (2.33) |
+| Concrete's shear strength 2 MPa for 4 | **no** | frame 0.67, 12-storey 0.77, the masonry building fails standing (1.18) |
+
+- **The buildings were sized for their own weight, to the solve as it was.** The masonry and mixed buildings and the city's low ones stand at 0.59 to 0.83 with nothing on their floors; joints wear above 0.7. Real floor loads or real punching shear need those buildings re-sized first (thicker slabs at the walls, deeper timber joists). That is building design, and it is the next step of the calibration.
+- **So the calibration changed almost nothing.** The frame still stands with a whole edge line of ground columns gone, at 0.57, unbent, as before; what would bring it down there is the shear strength, which the masonry building does not allow yet. Bending answers the cases past a joint's strength: see below.
+
+### Bending
+
+- `dyn_tests::a_frame_that_lost_columns_hangs_bent`: the complex building built 5 storeys tall (`complex::build_tall`; standing at 0.87, its columns are the 2-storey design's), the ground columns of its two western grid lines shot out. 737 joints fail and part falls; what stands has sagged **80 mm**, on up to 79 yielding joints, and is at rest after 110 steps. Solved at rest by the same cut nothing sags.
+- The same with one grid line out, 5 storeys: 4 joints yield, 7 mm. 3 storeys, one line: none yields.
+- The 4-storey concrete frame, its ground storey gone west of x = −4 m: 42 joints yield at most, 216 fail, the rest stands 10 mm down at 0.93 (solved at rest: 122 fail). West of −6 m: nothing yields, 4 mm.
+- **How often a building hangs bent:** when the load on a joint is between its strength and what it hardens to before it breaks (1.75 times for concrete). Below, nothing is seen; above, it turns through its ductility in a few steps and breaks. The window is real and not wide, and sags are centimetres: 1 to 8 cm in these cases.
+- A step of 1/30 s for 1/60 s now also changes the biggest falling piece of the 4-storey frame (1,646 / 2,014 bricks); the 12-storey tower is within 1% in joints and piece.
+- Cost: the 4-storey frame left on one column takes 387 dynamic steps to come to rest (118 before): parts hang and creep on yielded joints before they go.
+
+### Hits
+
+- `dyn_tests::a_hit_bends_steel_and_breaks_brick`, through the game's interface (`impacts`): 120 kN s sideways on a ground column of the 5-storey steel frame: 6 joints yield, 20 fail, the frame comes to rest; scanned, none yields at 60 kN s, 3 at 100, 9 at 150 (31 broken), and it comes down at 200. 60 kN s on the masonry building's wall: 93 joints fail, none yields.
+- In one step of 1/60 s a hit's force was gone before a joint could turn (a joint's state changes after a step): no bending at any size of hit, only breaking. Over `KICK_TIME` = 0.1 s it bends.
+- **Not done:** a falling piece is still a rigid body. A steel beam that has come off does not bend when it lands; only the standing structure's steel does.
+
+### The ball (`tallball`, new scenario)
+
+Asked for: a ball or car into a taller building, the first impact the strongest, stopped part-way by what it breaks. `node game/lab.cjs tallball`, software GPU, 600 frames: an 8-storey concrete frame, a steel ball of 0.4 m sent down onto the middle of a roof bay at 45 m/s.
+
+| | |
+| --- | --- |
+| Speed half a second after it first hits, of its speed before | 0.16 (limit 0.5) |
+| Where it stops | on the 7th floor, 26.97 m up, under the roof it went through (limits: 3 to 29.5 m, inside the plan) |
+| Its track | hits the roof at frame 30 (about 47 → 11 m/s), bounces some 7 m, falls back into its crater, goes through at about frame 250, lands a storey down and stays |
+| Failed checks | pieces moving further than their speed allows: 4 (the falling pieces' check; `collapse` fails it on other days) |
+| Structure steps (at the cap), joints failed | 107 (55), 592 |
+
+**It stops inside, one storey down, and not the way a ball does.** What was tried on the way, each a run of this scenario:
+
+| Run | What happened |
+| --- | --- |
+| The complex building built 5 storeys tall, a 0.6 m ball onto its roof at 40 m/s | glances off the pitched roof (45 → 22 m/s) and flies 75 m out along z |
+| The same, a 0.4 m ball at 20 m/s | the same: off the roof |
+| The same building, a ball into its third storey from the side at 60 m/s | through the open storey between the columns, 6% slower, and out |
+| The 8-storey frame, flat roof, 25 m/s | stays in a crater on the roof (the crater is smaller than the ball) |
+| 80 m/s | bounces 20 m up and comes down beside the building |
+| 45 m/s | this scenario |
+
+- **Why:** the GPU stops a body against the standing structure as against a rigid wall, in the step of the hit; the engine crushes and breaks what was hit some frames later. So a hit bounces first and breaks second: the body is never slowed by going through. "The first impact is the strongest" holds (it is a rigid stop); "resistance stops it in the middle" holds only when the bounce brings it back into the hole it made.
+- **What it needs:** a hit that breaks what it meets goes on with what is left of its energy (the page has the body's velocity before the hit and gives it back for falling pieces that are cut free, `noRebound`; not for a body against the structure). That is the next piece of work on hits, with the crushing of the pieces themselves (DYNPLAN stage 7).
+- The complex building has no walls or floors a ball from the side meets, and its roof is pitched: the scenario is on the frame for that reason. `complex::build_tall` and `Game::new_kind(5, 4)` build the taller complex building (it stands at 0.87).
+
+### Checks on this build (software GPU)
+
+`tools/check.sh lab`: engine 96 passed, 12 ignored; GPU suite 40 of 40; page checks `rest`, `debris`, `view` pass; deterministic over 150 frames.
+
+| Scenario | Result | Before (this morning's build) |
+| --- | --- | --- |
+| `ball` | passes; 78 structure steps (56 at the cap), **505 joints failed**; slowest job a structure step, 228 ms | passes; 55 (26), 25 joints; 136 ms |
+| `collapse` | fails 3: 2 frames drawn below, **79 energy gains while quiet**, not settled; 51 structure steps (6 at the cap) | fails 5: 2 below, 4 jumps, 1 rebound, 15 energy gains, not settled |
+| `complexcol` (`tools/compare.sh`) | no failed check, dynamic or at rest; p95 69 ms for 148 at rest; 7 of 23 steps at the cap | the same; 72 for 164; 4 of 20 |
+| `tallball` | above | – |
+
+- **`ball`: 505 joints fail where 25 did.** The balls' hits are now loads of the dynamic step: each is the momentum of 2.4 t stopped from 120 m/s against a rigid wall, 290 kN s, and by the scan above a frame comes down at 200. The impulse is the rigid stop's, more than a ball that breaks through would give. It follows from the same cause as the ball's bounce.
+- **`collapse`: 79 energy gains for 15.** Not traced. Parts that leave a sagged lot now start with the structure's velocity there, which the lab may count as energy from nowhere; or the pieces are other pieces than before.
+- Three faults of today's first builds, found by these checks and fixed: the page asked for a structure step while applying its settings, ahead of the building's first, and the complex building's 208 pieces of furniture never became bodies (page check `rest` now asks for them); a sagged lot's chunks were remeshed at once and `ball` had 26 frames with less drawn than exists; parts put down by their sag started inside what was under them (101 energy gains in `collapse`).
+- The other scenarios' rows in docs/STATUS.md (complex, city, far, mixed, keystone, nibble) are earlier builds'.
+

@@ -62,6 +62,19 @@
 
 **13 November.** Reported from the page: parts held in the air, and the view off on fallen buildings. Both fixed (docs/LAB.md of that day). The first was this plan's stage 2 left open: steps that stop at the cap. A step may now take up to 128 iterations (steps at the cap in `ball`: 26 of 55, 47%, for 85%; `complexcol` 4 of 20), which makes stage 3 the first thing to do: no step over 150 ms is now 242–319 ms. `nibble` now fails no check that passes at rest (stage 4's first gate: met), with its slowest job a structure step of 3.9 s for 3.7 s at rest (not met). It also showed that how much stands is a question for the model's loads and strengths, with three candidate changes listed there.
 
+**13 November, later** (docs/LAB.md, docs/DYNAMIC.md "Plastic joints"). Asked for: the calibration, real bending, a ball stopped in a building.
+
+| | |
+| --- | --- |
+| Plastic joints: ductile joints yield, keep their turn, break at their ductility | done; closed form within 4%; a 5-storey steel frame hangs 80 mm down on yielded joints |
+| Stage 5, hits as loads of the step | done for the standing structure (`KICK_TIME`); the falling pieces' impacts are as before |
+| Stage 4, velocity to the body | done (velocity); its position is still as built |
+| Drawn where it has sagged, at true size, without the view | done |
+| The calibration | flexural strength only; floor loads and shear wait for three building kinds to be re-sized |
+| A ball stopped part-way | one storey down, by bouncing back into its crater: a hit does not yet go on through what it breaks |
+
+New or worse: `ball` fails 505 joints for 25 (the rigid stop's whole impulse now loads the structure); `collapse` has 79 energy gains for 15; the slowest steps are slower (stage 3 is still first).
+
 **The decision point is not reached.** The step and the model are right where they can be checked (stages 1 and 6's first gate, and the solve itself, which was not); the dynamic structure is not yet better than the solve at rest by this plan's own table. What stands between, in the order it should be done:
 
 1. **Stage 3, the cost of a step that is not iterations**: the network and its multigrid kept between steps (15 ms a step at rest, most of a moving step), and a bound on what one step cuts and detaches (`nibble`'s 2 s step).

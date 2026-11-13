@@ -43,6 +43,47 @@ Against closed forms (`engine/src/dyn_closed.rs`; native, steps of 1/60 s and 1/
 - The energy at a step's end wobbles by 3.4 parts in 10,000 from one step to the next with the phase of the swing (the step conserves another quadratic form); over a period it only falls. The first step, Euler, takes 7% of what the sudden load put in.
 - The cantilever at rest sags 61.5 mm at its last brick's centre; beam theory gives 62.3 mm. Before 11 November the solve at rest gave 53.1 mm (see "The solve").
 
+## Plastic joints: bending that stays (13 November)
+
+Until now a joint over its strength broke, so a part stood as built (bent by millimetres) or fell. A joint of a ductile material that **bending** takes over its strength now yields instead (`structure::Plastic`; the dynamic structure only).
+
+- **Yield.** The moment it carried in the step that took it over, brought down to its strength, is its yield moment. From there it turns against `PL_H` = 2% of its elastic stiffness, about the turn it has made, and its ratio is reported as 0.999.
+- **It keeps the turn.** When it turns back it is elastic again about where it is, and yields again only past what it had hardened to.
+- **It breaks** when it has turned by its material's ductility, or if its ratio passes `PL_OVER` = 1.5 all the same.
+- **What does not bend, breaks:** if the joint is over its strength without its moments (shear, tension, crushing), it fails as before.
+- **Yielding joints do not wear.** They are at their strength because they yield, and their turning is counted against their ductility.
+
+| Material | Ductility (rad) | |
+| --- | --- | --- |
+| Steel | 0.12 | bends |
+| Reinforced concrete | 0.06 | bends a little, then breaks |
+| Timber | 0.015 | hardly |
+| Masonry, stone, glass | 0 | break |
+
+- **The hardening is a game's stand-in, and says so.** At 2% a concrete joint carries 1.75 times its yield moment when it breaks; a reinforced section alone has 1.1 to 1.25. The rest stands for what a linear model has not: the tension a sagging slab or beam develops along itself (membrane and catenary action), which is what lets a real floor hang by a tenth of its span.
+- **You asked for concrete that does not bend.** Plain concrete would not; the buildings' concrete is reinforced (its flexural strength is the reinforcement's), and a floor hanging over lost columns hangs by it. Set `ductility(CONCRETE)` to 0 and it breaks at once.
+- **A joint's state changes after a step, not in it.** A load that lasts one step cannot make a joint turn; hits are therefore spread over `KICK_TIME` (below).
+
+Against closed forms (`dyn_closed`, native, 1/60 s):
+
+| Case | Theory | Result |
+| --- | --- | --- |
+| A 3.5 m concrete strip, a load on its end raised over 8 s to 1.1 times what takes its held joint to its strength; then taken off | the joint turns (1.1 − 1) / `PL_H` = 5 times its turn at yield, 0.0067 rad, and keeps it | keeps 0.0065 rad (−3.6%): the end is down 33.9 mm loaded (12.9 elastic), 21.0 mm unloaded; 1 joint yields, none fails |
+| The same strip in masonry | breaks at 1 / 1.1 of the load, having bent only elastically | breaks at 0.92 of the load, 3.5 mm down; none yields |
+
+In buildings (`dyn_tests`, native):
+
+| Test | Result |
+| --- | --- |
+| `a_frame_that_lost_columns_hangs_bent` | the complex building built 5 storeys tall, the ground columns of two grid lines shot out: 737 joints fail and part comes down; what stands has sagged 80 mm on up to 79 yielding joints, worst joint 0.999, at rest after 110 steps. Solved at rest by the same cut: no sag |
+| `a_hit_bends_steel_and_breaks_brick` | a sideways hit of 120 kN s on a ground column of that steel frame: 6 joints yield (20 fail); 60 kN s on the masonry building's wall: 93 joints fail, none yields; 3 kN s on the column: nothing |
+
+**The range of the linear model is wider for it:** `DYN_TURN` = 0.03 rad and `DYN_MOVE` = 0.25 m (0.005 and 0.05 before), so that a part hanging on yielded joints is not taken to have left. At 0.03 rad a part is drawn 0.05% too long. A settling step may still move a cell only 0.005 rad and 5 cm.
+
+**Hits are loads of the step** (DYNPLAN stage 5). A hit on the standing structure faster than `KICK_SPEED` = 1 m/s reaches the dynamic structure as its impulse over `KICK_TIME` = 0.1 s on the cell nearest it; the checks at rest that `impacts` ran for it are the solve at rest's only. Crushing at the contact is unchanged.
+
+**Drawn where it is, without the view.** With the dynamic structure the engine writes the lots that have moved 2 cm from where they were built (`VIEW_BEND`; set_param 8 at 2), and the page draws them there at true size in their own colours; a brick whose cells are 5 mm apart is cut along them. **A part that leaves a sagged lot starts as a body with the structure's velocity there** (`view_motion`; DYNPLAN stage 4); it started at rest. It still starts where it was built: the bodies and what they land on are as built, and a part put down by its sag started inside what is under it (the lab's `collapse` had 101 energy gains with the shift, for 15). So a sagged part jumps back by its sag, centimetres, as it lets go. Not solved.
+
 ## The solve
 
 Found by the closed-form tests and by comparing the game's solve with the same solved to 1e-12 (`structure::TOL_TEST`, or `SF_TOL=1e-12 cargo test ...`). All four change the solve at rest as well.
@@ -170,9 +211,9 @@ Native, release, the build machine, 11 November. The closed forms are under "The
 | `rubble_on_a_resting_building_does_not_keep_it_moving` | see "Rules added" |
 | `a_city_is_stepped_lot_by_lot` | 3 × 3 city: first step 848 ms (9 lots at rest), then 0.14 ms a step at rest. A column shot out on lot 0: only that lot moves, at rest after 29 steps, slowest step 84 ms |
 | `nothing_crumbles_where_the_solve_at_rest_stands` | 20 seeded cases (one to three 0.7 m blasts) on the five kinds: the solve at rest stands with its worst joint under 0.8 in 16, and the dynamic structure stands in all 16, worst joints within 0.002. |
-| `the_same_cut_gives_the_same_fall` | the three buildings below, twice: the same to the joint. At 1/30 s for 1/60 s: the biggest piece within 3.2% |
+| `the_same_cut_gives_the_same_fall` | the three buildings below, twice: the same to the joint. (At 1/30 s for 1/60 s: the test below) |
 | `a_rest_writes_off_no_more_than_the_tolerance` | see "Rules added" |
-| `the_same_joints_fail_at_half_the_frame_rate` (not in the default run) | joints failed at 1/60 and 1/30 s: 133 / 93, 216 / 136, 98 / 131. Gate 5%: not met |
+| `the_same_joints_fail_at_half_the_frame_rate` (not in the default run) | joints failed and biggest piece at 1/60 and 1/30 s: 139 / 124 and 1,646 / 2,014; 278 / 279 and 1,901 / 1,820; 159 / 159 and 3,572 / 3,586. Gate 5%: met by the tower only |
 | `a_building_warns_before_it_goes` (not in the default run) | first joint past 0.7 to first part gone: 0.05, 0.017, 0.017 s. Gate 0.3 s: not met, and wrong for this case (see "Limits") |
 | `the_view_draws_the_structure_where_its_solution_puts_it` | see "The engineer's view" |
 
@@ -180,15 +221,16 @@ The ground storey blasted away but one column:
 
 | Building | | Joints failed | Steps | Biggest falling piece (bricks) | Most iterations in a step | Slowest step (ms) | In all (ms) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 4-storey concrete | at rest | 82 | 7 | 2,030 | 288 | 664 | 1,523 |
-| | dynamic | 133 | 118 | 1,569 | 81 | 242 | 5,417 |
-| 4-storey masonry | at rest | 130 | 5 | 2,057 | 240 | 566 | 1,063 |
-| | dynamic | 216 | 12 | 1,901 | 63 | 255 | 962 |
-| 12-storey concrete | at rest | 128 | 3 | 3,573 | 174 | 739 | 1,462 |
-| | dynamic | 98 | 27 | 3,561 | 84 | 319 | 1,652 |
+| 4-storey concrete | at rest | 84 | 7 | 2,030 | 288 | 527 | 1,248 |
+| | dynamic | 139 | 387 | 1,646 | 92 | 232 | 14,976 |
+| 4-storey masonry | at rest | 130 | 5 | 2,037 | 245 | 462 | 883 |
+| | dynamic | 278 | 28 | 1,901 | 128 | 302 | 2,115 |
+| 12-storey concrete | at rest | 128 | 3 | 3,573 | 174 | 742 | 1,377 |
+| | dynamic | 159 | 17 | 3,572 | 127 | 451 | 1,676 |
 
-- On 10 November (implicit Euler, the solve as it was) the dynamic 4-storey buildings broke into pieces of 1,317 and 800 bricks with 516 and 575 joints failed, against 69 and 128 at rest. Now the pieces are 1,569 and 1,901 bricks with 133 and 216 joints: the dynamic structure brings down nearly what the solve at rest does.
-- (13 November's build: a step may take up to 128 iterations.) The slowest dynamic step is 37–45% of the slowest solve at rest, 242–319 ms: over DYNPLAN stage 3's gate of 150 ms. With the cap fixed at 16 it was 126–263 ms.
+- (13 November's build, with plastic joints and steps of up to 128 iterations.) The 4-storey frame takes 387 steps to come to rest: parts hang and creep on yielded joints before they go.
+- The slowest dynamic step is 44 to 65% of the slowest solve at rest, 232 to 451 ms: over DYNPLAN stage 3's gate of 150 ms.
+- On 10 November (implicit Euler, the solve as it was) the dynamic 4-storey buildings broke into pieces of 1,317 and 800 bricks with 516 and 575 joints failed.
 
 ## Lab (software GPU)
 

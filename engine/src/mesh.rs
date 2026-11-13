@@ -61,7 +61,7 @@ pub struct View {
 }
 /// A cell of a brick: its corners in x and z (ticks), its centre (m), displacement (m) and rotation (rad).
 #[derive(Clone, Copy)]
-pub struct ViewCell { pub lo: [i32; 2], pub hi: [i32; 2], pub c: [f32; 3], pub u: [f32; 3], pub r: [f32; 3] }
+pub struct ViewCell { pub lo: [i32; 2], pub hi: [i32; 2], pub c: [f32; 3], pub u: [f32; 3], pub r: [f32; 3], pub v: [f32; 3], pub w: [f32; 3] }
 impl View {
     /// load / strength as a colour: blue (unloaded) to green (a third) to yellow (0.7, where joints begin to
     /// wear) to red (at strength)
@@ -97,7 +97,9 @@ impl View {
     fn cuts(&self, i: u32) -> (Vec<i32>, Vec<i32>) {
         let (mut xs, mut zs) = (Vec::new(), Vec::new());
         // (at 1 and below the displacements are millimetres: a face left whole shows the same)
-        if self.scale > 1.0 { if let Some(cs) = self.cells.get(&i) { for c in cs { xs.push(c.lo[0]); xs.push(c.hi[0]); zs.push(c.lo[1]); zs.push(c.hi[1]); } } }
+        // (and a brick whose cells are more than 5 mm apart in where they have gone: it has bent to see)
+        let bent = self.cells.get(&i).map_or(false, |cs| cs.iter().any(|c| { let d = [c.u[0] - cs[0].u[0], c.u[1] - cs[0].u[1], c.u[2] - cs[0].u[2]]; (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) * self.scale * self.scale > 25e-6 }));
+        if self.scale > 1.0 || bent { if let Some(cs) = self.cells.get(&i) { for c in cs { xs.push(c.lo[0]); xs.push(c.hi[0]); zs.push(c.lo[1]); zs.push(c.hi[1]); } } }
         xs.sort_unstable(); xs.dedup(); zs.sort_unstable(); zs.dedup();
         (xs, zs)
     }

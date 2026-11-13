@@ -83,7 +83,7 @@ static mut SNAP: Vec<u8> = Vec::new();
     let g = game();
     match id { 0 => g.crumb_keep = (v.max(0.0) as usize).max(2), 1 => g.rubble_keep = v.max(0.0) as usize, 2 => g.crush_depth = v.max(0.0), 3 => g.frac_max = v.max(0.0) as usize, 4 => g.struct_dt = v.max(0.0), 5 => g.spill_on = v > 0.5, 6 => g.masonry_parts = v > 0.5, 7 => g.dynamic = v > 0.5,
         // (the view asked for: the next structure step analyses every lot, so that all of them are drawn)
-        8 => { g.view_want = v > 0.5; if g.view_want { for a in g.active.iter_mut() { *a = true; } for st in g.dynst.values_mut() { st.1.viewed = false; } } }
+        8 => { g.view_want = v > 0.5; g.view_bend = v > 1.5; if g.view_want { for a in g.active.iter_mut() { *a = true; } for st in g.dynst.values_mut() { st.1.viewed = false; } } }
         _ => {} }
 }
 #[no_mangle] pub extern "C" fn game_mesh(on: u32) { game().mesh = on != 0; }
@@ -111,6 +111,9 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn dirty_hi() -> i32 { game().dirty.1 }
 #[no_mangle] pub extern "C" fn out_ptr() -> *const f32 { game().out.as_ptr() }
 #[no_mangle] pub extern "C" fn out_len() -> u32 { game().out.len() as u32 }
+/// the page's copy: the motion of the structure's cell at a point (Game::view_motion): 1 if found; then motion_ptr (12 numbers)
+#[no_mangle] pub extern "C" fn view_motion(x: f32, y: f32, z: f32) -> i32 { game().view_motion([x, y, z]) as i32 }
+#[no_mangle] pub extern "C" fn motion_ptr() -> *const f32 { game().motion.as_ptr() }
 /// a new list of rubble lying on the structure follows (`rest_load`), replacing the last
 #[no_mangle] pub extern "C" fn rest_begin() { let g = game(); g.rest.clear(); g.rest_fresh = true; }
 #[no_mangle] pub extern "C" fn rest_load(x: f32, y: f32, z: f32, f: f32) { game().rest.push([x, y, z, f]); }

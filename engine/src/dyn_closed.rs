@@ -14,7 +14,7 @@ impl Rig {
     fn new(b: Bricks, fixed: &[u32]) -> Rig {
         let set: Vec<u32> = (0..b.len() as u32).filter(|&i| b.alive(i)).collect();
         let sink = set.iter().map(|i| fixed.contains(i)).collect();
-        let mut d = Dyn::default(); d.want_cells = true; d.max_it = 400;
+        let mut d = Dyn::default(); d.want_cells = true; d.max_it = 400; d.no_yield = true;
         Rig { b, set, sink, warm: Warm::default(), d, t: 0.0, cells: Vec::new() }
     }
     /// one step of `h` s (0: the solve at rest) under `g` m/s^2 on every brick's mass plus `extra` (brick, N)
@@ -208,4 +208,59 @@ fn strip() -> (Rig, f64, f64, f64) {
             assert!((peak / delta / theory - 1.0).abs() < 0.10, "within 10%: {} / {theory}", peak / delta);
         }
     }
+}
+
+// ---- plastic joints (structure::Plastic)
+
+/// a strip of 8 bricks of 0.5 m, 0.25 m deep, the first held, a load on the last: (the rig, the last brick)
+fn loaded_strip(m: u8) -> (Rig, u32) { let r = cantilever(m, 8, 4, 2); (r, 7) }
+
+#[test] fn a_ductile_joint_yields_turns_as_its_hardening_allows_and_stays_bent() {
+    use crate::structure::{ductility, PL_H};
+    // A concrete strip without weight, a load on its end raised over 8 s to 1.1 times what takes the joint at the
+    // held end to its strength. That joint yields: it turns until the little it stiffens by (PL_H of its elastic
+    // stiffness) carries the tenth over, (1.1 - 1) / PL_H = 10 times its turn at yield; the strip's end goes down
+    // by that turn times its distance. With the load taken off, the turn stays.
+    let (mut e, tip) = loaded_strip(mat::CONCRETE);
+    let a = e.step(0.0, 0.0, &[(tip, 1000.0)]);
+    let p = 1000.0 * 1.1 / a.max_ratio;
+    let a = e.step(0.0, 0.0, &[(tip, p)]);
+    assert!((a.max_ratio - 1.1).abs() < 0.01);
+    let mut cells = e.cells.clone(); cells.sort_by(|a, b| a.1[0].partial_cmp(&b.1[0]).unwrap());
+    // (the held end's joint: its turn is the first free cell's, and at yield 1 / 1.1 of this)
+    let (el_tip, th_y, arm) = (e.tip().0, -cells[0].2[5] / 1.1, cells[cells.len() - 1].1[0] - (cells[0].1[0] - 0.25));
+    let theory_turn = th_y * (0.1 / PL_H);
+    let (mut r, tip) = loaded_strip(mat::CONCRETE);
+    r.d.no_yield = false;
+    r.step(0.0, 0.0, &[]);
+    let (mut failed, mut yielded, mut peak) = (0, 0, 0.0f64);
+    while r.t < 12.0 { let a = r.step(H, 0.0, &[(tip, (p * (r.t / 8.0).min(1.0) as f32))]); failed += a.failed.len(); yielded = yielded.max(a.yielded.len()); peak = peak.max(r.tip().0); if std::env::var("SF_TR").is_ok() && (r.t * 60.0).round() as i64 % 20 == 0 { println!("  t {:.2} tip {:.2} mm ratio {:.3} yielded {} failed {} turn {:.4} beyond {} settle {} its {} capped {}", r.t, r.tip().0 * 1e3, a.max_ratio, a.yielded.len(), a.failed.len(), r.d.plastic_turn, r.d.beyond.len(), r.d.settle, r.d.its, r.d.capped); } }
+    let (down, turn) = (r.tip().0, r.d.plastic_turn);
+    while r.t < 19.0 { let a = r.step(H, 0.0, &[(tip, (p * (1.0 - (r.t - 12.0) / 4.0).max(0.0) as f32))]); failed += a.failed.len(); }
+    let left = r.tip().0;
+    println!("concrete strip, the load at 1.1 of the held joint's strength ({:.1} kN): elastic it goes down {:.2} mm; it goes down {:.1} mm (peak {:.1}), the joint turned {:.4} rad plastically by the step's count (theory {:.4}: {:+.1}%), {:.1} mm at the end; unloaded, {:.1} mm stay, a turn of {:.4} rad; {yielded} joint yielding, {failed} failed; its ductility is {} rad", p * 1e-3, el_tip * 1e3, down * 1e3, peak * 1e3, turn, theory_turn, (turn / theory_turn - 1.0) * 100.0, turn * arm * 1e3, left * 1e3, left / arm, ductility(mat::CONCRETE));
+    assert!(failed == 0 && yielded == 1, "it yields and does not break");
+    // (the turn it keeps, read from where the unloaded end stays, is theory's; the step's own count of it,
+    // `plastic_turn`, runs 15% over: it counts from the step in which the joint passed its strength)
+    assert!((left / arm / theory_turn - 1.0).abs() < 0.10, "the turn it keeps within 10%: {} / {theory_turn}", left / arm);
+    assert!((turn / theory_turn - 1.0).abs() < 0.25);
+    assert!((down - el_tip - left).abs() < 0.1 * down, "loaded, the end is down by the elastic sag and the turn times its arm");
+    assert!(left > 1.5 * el_tip, "and unloaded it stays bent: {left}");
+}
+
+#[test] fn a_brittle_joint_breaks_without_bending() {
+    // the same strip in masonry and the same load history: the joint breaks as it passes its strength, and the
+    // strip has not gone down more than it does elastically at that load
+    let (mut e, tip) = loaded_strip(mat::MASONRY);
+    let a = e.step(0.0, 0.0, &[(tip, 100.0)]);
+    let p = 100.0 * 1.1 / a.max_ratio;
+    e.step(0.0, 0.0, &[(tip, p)]);
+    let el_tip = e.tip().0;
+    let (mut r, tip) = loaded_strip(mat::MASONRY);
+    r.d.no_yield = false;
+    r.step(0.0, 0.0, &[]);
+    let (mut at, mut yielded, mut down) = (0.0, 0, 0.0f64);
+    while r.t < 5.0 && at == 0.0 { let a = r.step(H, 0.0, &[(tip, (p * (r.t / 2.0).min(1.0) as f32))]); yielded += a.yielded.len(); down = down.max(r.tip().0); if !a.failed.is_empty() { at = r.t; } }
+    println!("masonry strip, the same: its held joint breaks at {at:.2} s ({:.2} of the load), the end down {:.3} mm (elastic at the full load {:.3} mm); {yielded} joints yielded", (at / 2.0).min(1.0), down * 1e3, el_tip * 1e3);
+    assert!(at > 1.5 && at < 2.1 && yielded == 0 && down < 1.05 * el_tip);
 }
