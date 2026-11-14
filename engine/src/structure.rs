@@ -22,14 +22,16 @@ pub const STEEL_SHEAR: f32 = 0.10;
 pub const STEEL_FLEX: f32 = 0.12;
 pub const STEEL_STIFF: f64 = 0.17;
 /// What a floor carries besides itself (N/m^2): finishes, partitions, the rooms' contents; 1,500 to 3,000 in a real
-/// building. **0 for now**: the buildings were sized for their own weight alone, and with it the masonry and mixed
-/// buildings and the city's low ones pass 0.7 of strength standing, where joints wear (13 Nov, measured standing:
-/// at 1,000 the masonry building 0.65, the mixed 0.67, the 3 x 3 city 0.89 and its lots do not rest; at 3,000 the
-/// mixed building's timber floors fail). The load, its mass and the test hook (SF_IMPOSED) are in place for when
-/// those buildings are re-sized.
-pub const IMPOSED: f32 = 0.0;
+/// building. 2,000 since 14 Nov (0 before, the buildings having been sized for their own weight alone: on 13 Nov
+/// at 1,000 the masonry building stood at 0.65, the mixed one at 0.67 and the 3 x 3 city at 0.89). What made room
+/// for it: a concrete floor bears on a brick wall as a hinge (`hinge`) and the masonry building's piers are
+/// 1.125 m (tower.rs). Standing with it, worst joint over strength: frame 0.59 to 0.64 (3 to 12 storeys), masonry
+/// 0.41 to 0.54 (2 to 5), mixed 0.15 to 0.19, steel 0.48 to 0.53, complex 0.57
+/// (dyn_tests::the_buildings_standing_margins, docs/LAB.md 14 November). It is weight and mass both (`weight`,
+/// `Node::mass`). Test hook: SF_IMPOSED.
+pub const IMPOSED: f32 = 2000.0;
 /// The same on a timber floor: lighter finishes, a house's rooms.
-pub const IMPOSED_TIMBER: f32 = 0.0;
+pub const IMPOSED_TIMBER: f32 = 1000.0;
 /// The imposed load on brick `i` (N): `IMPOSED` on its plan if it is a floor, a concrete or timber plate at most
 /// 0.4 m thick and at least 1 m each way, off the ground.
 pub fn imposed(b: &Bricks, i: u32) -> f32 {
@@ -44,10 +46,12 @@ pub fn imposed(b: &Bricks, i: u32) -> f32 {
 pub fn weight(b: &Bricks, i: u32) -> f32 { mass(b, i) * 9.81 + imposed(b, i) }
 pub fn strength(m: u8) -> [f32; 3] {
     match m {
-        // (shear 2 MPa since 13 Nov, for 4: a flat slab fails round a column in punching at about 0.33 sqrt(fc),
-        // 1.8 MPa for this concrete; at 4 a slab hung on from columns that took a lost neighbour's share)
+        // (shear 3 MPa since 14 Nov, for 4: a flat slab fails round a column in punching at about 0.33 sqrt(fc),
+        // 1.8 MPa for this concrete, and with shear reinforcement up to about twice that; at 4 a slab hung on from
+        // columns that took a lost neighbour's share. Not 2: the frame's slabs here are 0.25 m with no drops or
+        // column heads, and at 2 with the floor loads the frame stands at 0.89 (3 storeys) to 0.97 (12), at 3 at 0.59 to 0.64.)
         #[cfg(test)] mat::CONCRETE if std::env::var("SF_SHEAR").is_ok() => [30e6, 4e6, std::env::var("SF_SHEAR").unwrap().parse::<f32>().unwrap() * 1e6],
-        mat::CONCRETE => [30e6, 4e6, 4e6],
+        mat::CONCRETE => [30e6, 4e6, 3e6],
         mat::MASONRY => [10e6, 0.3e6, 0.5e6],
         // a steel member is a rolled section, not the solid box it is drawn as: a 254 x 146 universal beam has 16% of
         // that box's area (axial strength), its web 10% (shear). Solid, the mixed building stood on its core with
@@ -141,7 +145,17 @@ pub fn flexural_of(b: &Bricks, i: usize) -> f32 { if b.mat[i] == mat::TIMBER && 
 fn hinge(b: &Bricks, x: usize, y: usize) -> bool {
     let tf = |i: usize| b.mat[i] == mat::TIMBER && b.paint[i] == 8;
     let (mx, my) = (b.mat[x], b.mat[y]);
+    #[cfg(test)] let cm = std::env::var("SF_NOCM").is_err();
+    #[cfg(not(test))] let cm = true;
+    // (14 Nov) and a concrete floor on brickwork or brickwork on a concrete floor: a mortar bed, which turns before
+    // it bends the brick. Bonded, the floor's turning at its bearing put the brick in tension wherever little weight
+    // stood on it: 0.89 of strength at the foot of the mixed building's first-floor walls when it has 3 storeys (0.56
+    // with 5), 0.83 on the masonry building's top piers when it has 5. Checked as a bed with no tension at all
+    // (`mortar_bed`) the masonry building's wall heads, 0.25 m wide under a floor's edge, failed standing.
     ((tf(x) || tf(y)) && mx != my) || (mx == mat::STEEL && my == mat::MASONRY) || (mx == mat::MASONRY && my == mat::STEEL)
+        // (brickwork, not cut stone: a free piece's joints are its beds, `mortar_bed`, and the complex building's
+        // arcade under its floor went from 0.42 to 0.77 as a hinge)
+        || (cm && b.hull[x] != crate::brick::HULL_FREE && b.hull[y] != crate::brick::HULL_FREE && ((mx == mat::CONCRETE && my == mat::MASONRY) || (mx == mat::MASONRY && my == mat::CONCRETE)))
 }
 pub fn flexural(m: u8) -> f32 {
     match m { mat::CONCRETE => 10e6, mat::MASONRY => 0.5e6, mat::STEEL => 250e6 * STEEL_FLEX, mat::GLASS => 40e6, _ => 20e6 }
@@ -353,8 +367,14 @@ pub struct Dyn {
     pub plastic_turn: f64,
     /// no joint yields (for tests of the elastic step against theory)
     pub no_yield: bool,
+    /// cells with no way to a support are stepped too, held by their mass alone (a piece in flight: docs/DEFORM.md).
+    /// Only a dynamic step can: at rest nothing holds them. Not used by the game yet.
+    pub free: bool,
     /// the lot has sagged enough to be drawn where it is (`game::VIEW_BEND`)
     pub bent: bool,
+    /// after a solve at rest: the most any cell's loads and springs leave out of balance, over the structure's
+    /// largest load on a cell (what the solve's tolerance leaves; `bias` is this, limited)
+    pub residual: f64,
     /// hits: where (m), the impulse (N s) and how much of `KICK_TIME` is left of it (s). Each is a force of
     /// impulse / `KICK_TIME` on the cell nearest it for that long (docs/DYNPLAN.md stage 5).
     pub kicks: Vec<([f64; 3], [f64; 3], f64)>,
@@ -629,7 +649,7 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         next[2 * l + 1] = head[k.b as usize]; head[k.b as usize] = (2 * l + 1) as u32;
     }
     let other = |e: u32| -> u32 { let l = (e / 2) as usize; if e % 2 == 0 { links[l].b } else { links[l].a } };
-    let mut live = vec![false; n];
+    let mut live = vec![dy.as_ref().map_or(false, |d| d.free && d.h > 0.0); n];
     let mut st: Vec<u32> = (0..n as u32).filter(|&k| nodes[k as usize].sink).collect();
     for &k in &st { live[k as usize] = true; }
     while let Some(k) = st.pop() { let mut e = head[k as usize]; while e != NONE { let o = other(e); if !live[o as usize] { live[o as usize] = true; st.push(o); } e = next[e as usize]; } }
@@ -788,7 +808,8 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         m6 = vec![[0.0; 6]; n]; vn = vec![[0.0; 6]; n]; an = vec![[0.0; 6]; n];
         // New cells (cut from a brick since the last step) are put where the cells round them hold them: a solve
         // at rest of the new cells alone, the others where they are. They start in balance, and from rest.
-        if known.iter().any(|k| !*k) {
+        // (not with `Dyn::free`: a piece held by nothing has no rest to be put at, and starts where it is)
+        if !d.free && known.iter().any(|k| !*k) {
             let kx = kx_of(&springs, &xn);
             let r: Vec<[f64; 6]> = (0..n).map(|k| if known[k] { [0.0; 6] } else { let mut v = loads[k]; for i in 0..6 { v[i] -= kx[k][i]; } v }).collect();
             let (xu, _) = solve_network(&springs, &ends, &known, &pos, &r, None, MAX_IT, None, false);
@@ -1034,9 +1055,10 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
         d.vel.clear(); d.acc.clear(); d.speed = 0.0; d.kinetic = 0.0; d.its = it; d.capped = false; d.left = 0; d.cut = 0; d.settle = 0; d.no_settle = false;
         d.rest.clear(); d.beyond.clear(); for k in 0..n { if !fixed[k] { d.rest.insert(key(k), x[k]); } }
         let big_raw = raw.iter().take(n).map(|l| sqrt64(l[0] * l[0] + l[1] * l[1] + l[2] * l[2])).fold(0.0, f64::max);
-        let kx = kx_of(&springs, &x); d.bias.clear(); d.bias_share = 0.0; d.boost = 0; d.wait = 0.0;
+        let kx = kx_of(&springs, &x); d.bias.clear(); d.bias_share = 0.0; d.boost = 0; d.wait = 0.0; d.residual = 0.0;
         for k in 0..n { if !fixed[k] { let mut b = raw[k]; for i in 0..6 { b[i] -= kx[k][i]; }
             let (bn, rn) = (sqrt64(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]), sqrt64(raw[k][0] * raw[k][0] + raw[k][1] * raw[k][1] + raw[k][2] * raw[k][2]));
+            if big_raw > 0.0 { d.residual = d.residual.max(bn / big_raw); }
             let lim = (DYN_BIAS * rn).max(DYN_BIAS_FLOOR * big_raw);
             if bn > lim { let f = lim / bn; for i in 0..6 { b[i] *= f; } }
             if rn > 0.0 && DYN_BIAS * rn >= DYN_BIAS_FLOOR * big_raw { d.bias_share = d.bias_share.max(bn.min(lim) / rn); }

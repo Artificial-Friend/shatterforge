@@ -180,7 +180,7 @@ After stage 6 the table at the top is filled for all 12 scenarios.
 
 In this order, each with its own plan when it starts.
 
-1. **Falling pieces.** Crushing before the solve (the 602 t floor stopped by a 158 kg column stub, docs/LAB.md 9 November) and more than one break plan a piece. This is where `collapse`, `complex`, `city` and `mixed` fail, with either structure.
+1. **Falling pieces.** Pieces that bend when they land and keep the bend they left with: planned in docs/DEFORM.md (14 November; stage 0 of it done). Crushing before the solve (the 602 t floor stopped by a 158 kg column stub, docs/LAB.md 9 November) and more than one break plan a piece. This is where `collapse`, `complex`, `city` and `mixed` fail, with either structure.
 2. **The burst** in resting piles (one `stress` run in four).
 3. **Scale on the real GPU:** the city benchmark at 3 × 3, 5 × 5, 8 × 8 with a collapse; lots analysed in parallel.
 4. **The engineer's view:** falling pieces in it, the predictor ("what fails if I cut here").

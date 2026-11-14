@@ -107,6 +107,44 @@ What the change needed:
 - **Steel on brick is a hinge.** It sits on a padstone. When bonded, the beam's end rotation bent the brick pier under it in the mixed building to 1.31 of strength.
 - **A timber joist floor spans one way, along its joists** (x). Across them, the boards' bending and the deck's twisting are a twentieth of a solid plate's. As a plate bending both ways, a 3.25 m bay under 40 kPa came out at a third of its strength. With soft boards but the deck still twisting like a solid plate, it came out at 0.68: torsion carried a third of the load to the walls along the bay's sides.
 
+## The buildings with their floors loaded (14 November)
+
+The table above is the buildings under their own weight, as they were sized. Since 14 November a floor also
+carries what a real one does: `IMPOSED` = 2,000 N/m² on a concrete floor, `IMPOSED_TIMBER` = 1,000 on a timber one
+(finishes, partitions, the rooms' contents), as weight and as mass (`structure::weight`, `imposed`). Concrete's
+shear strength is 3 MPa (it was 4). `dyn_tests::the_buildings_standing_margins` (ignored: a design table, native,
+the first solve at rest) prints the worst joint over its strength:
+
+| Building (`kind`) | Storeys | Worst joint, floors loaded | Own weight alone (`SF_IMPOSED=0`) |
+| --- | --- | --- | --- |
+| concrete frame (0) | 3 / 4 / 8 / 12 | 0.59 / 0.60 / 0.62 / 0.64 | 0.45 / 0.45 / 0.47 / 0.52 |
+| masonry (1) | 2 / 3 / 4 / 5 | 0.41 / 0.44 / 0.47 / 0.54 | 0.31 / 0.33 / 0.39 / 0.46 |
+| mass timber (2) | 3 / 4 / 6 | 0.15 / 0.16 / 0.19 | 0.10 / 0.11 / 0.15 |
+| mixed (3) | 3 / 4 / 5 | 0.48 / 0.51 / 0.53 | 0.36 / 0.38 / 0.40 |
+| complex (4) | 3 (5, `build_tall`) | 0.57 (0.75) | 0.42 |
+
+Joints wear above 0.7: every building stands under it except the complex building built 5 storeys tall, whose
+columns are the 2-storey design's (it is there for the bending tests and says so).
+
+What made room for the loads (on 13 November, at 1,000 N/m², the masonry building stood at 0.65, the mixed one at
+0.67, and the 3 × 3 city at 0.89 with lots that did not rest):
+- **A concrete floor bears on a brick wall as a hinge** (`hinge`), as steel on brick already did. Bonded, the
+  slab's end rotation bent the wall head under it: that joint, not the wall or the slab, governed the masonry
+  and mixed buildings (0.83 and 0.89). A slab on a wall is a bearing; it is not built in.
+  - Tried first and rejected: the joint as a mortar bed with no tension. The masonry building then failed
+    standing, at 2 to 47 times strength at the 0.25 m wall heads.
+  - Cut stone is excluded (free pieces): the complex building's arcade went from 0.42 to 0.77 with it.
+- **The masonry building's piers are 1.125 m** (0.625 before; tower.rs). With the floors hinged, what governed
+  was its top slab: the brick piers shorten more than the concrete core, and the slab bends between them. At
+  0.875 m it stood at 0.79 with the loads and shear at 3 MPa; at 1.125 m, 0.54.
+- Concrete's shear at 2 MPa (plain punching) is not possible with these slabs: the frame stands at 0.89 to
+  0.97. At 3 it is 0.59 to 0.64. The slabs are 0.25 m flat plates without column heads.
+
+`dyn_tests::every_building_is_in_balance_at_rest` holds this in the default run: each kind at its least and
+greatest height stands under 0.9, no cell is out of balance by more than 0.2% of the largest load on a cell
+(measured: 3.5e-5 to 1.6e-4), and for the box buildings the level joints into the ground carry the weight above
+the ground to 0.1% (measured: 0.00%, 13,401 to 79,305 kN).
+
 ## Rubble weighs on floors
 
 Once a second, the page sends the weight of the debris at rest to the engine with a structure check:

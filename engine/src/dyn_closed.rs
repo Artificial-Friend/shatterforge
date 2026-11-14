@@ -8,6 +8,8 @@ use crate::structure::{analyse_dyn, mass, modulus_of, Analysis, Dyn, Warm, DYN_T
 use alloc::vec::Vec;
 use std::println;
 
+/// the mass a brick moves with: its own and, if it is a floor, what it carries (structure::imposed)
+fn moved(b: &Bricks, i: u32) -> f32 { mass(b, i) + crate::structure::imposed(b, i) / 9.81 }
 struct Rig { b: Bricks, set: Vec<u32>, sink: Vec<bool>, warm: Warm, d: Dyn, t: f64, cells: Vec<([i32; 5], [f64; 3], [f64; 6])> }
 impl Rig {
     /// `fixed`: the bricks held (the supports)
@@ -19,7 +21,7 @@ impl Rig {
     }
     /// one step of `h` s (0: the solve at rest) under `g` m/s^2 on every brick's mass plus `extra` (brick, N)
     fn step(&mut self, h: f64, g: f32, extra: &[(u32, f32)]) -> Analysis {
-        let mut load: Vec<f32> = self.set.iter().map(|&i| mass(&self.b, i) * g).collect();
+        let mut load: Vec<f32> = self.set.iter().map(|&i| moved(&self.b, i) * g).collect();
         for &(i, f) in extra { load[self.set.iter().position(|&s| s == i).unwrap()] += f; }
         self.d.h = h; self.t += h;
         let a = analyse_dyn(&self.b, &self.set, &load, &[], &self.sink, v3(0.0, -1.0, 0.0), Some(&mut self.warm), Some(&mut self.d));
@@ -60,7 +62,7 @@ fn strip() -> (Rig, f64, f64, f64) {
     let r = cantilever(mat::CONCRETE, 31, 2, 2);
     let (l, dp) = (30.0 * 2.0 * TICK as f64 + TICK as f64, 2.0 * TICK as f64);   // to the tip's end: 7.625 m
     let e = modulus_of(&r.b, 1);
-    let rho = mass(&r.b, 1) as f64 / (2.0 * TICK as f64 * dp * 1.0);
+    let rho = moved(&r.b, 1) as f64 / (2.0 * TICK as f64 * dp * 1.0);
     // first period of a cantilever: 2 pi / (1.875^2 sqrt(E I / (rho A L^4))), I / A = d^2 / 12
     let t1 = 2.0 * core::f64::consts::PI / (1.8751f64.powi(2) * (e * dp * dp / (12.0 * rho * l.powi(4))).sqrt());
     // deflection under its weight at the last brick's centre, x from the held end: w x^2 (6 L^2 - 4 L x + x^2) / (24 E I)
@@ -263,4 +265,49 @@ fn loaded_strip(m: u8) -> (Rig, u32) { let r = cantilever(m, 8, 4, 2); (r, 7) }
     while r.t < 5.0 && at == 0.0 { let a = r.step(H, 0.0, &[(tip, (p * (r.t / 2.0).min(1.0) as f32))]); yielded += a.yielded.len(); down = down.max(r.tip().0); if !a.failed.is_empty() { at = r.t; } }
     println!("masonry strip, the same: its held joint breaks at {at:.2} s ({:.2} of the load), the end down {:.3} mm (elastic at the full load {:.3} mm); {yielded} joints yielded", (at / 2.0).min(1.0), down * 1e3, el_tip * 1e3);
     assert!(at > 1.5 && at < 2.1 && yielded == 0 && down < 1.05 * el_tip);
+}
+
+// ---- a body with no support (groundwork for falling pieces that deform: docs/DEFORM.md)
+
+#[test] fn a_free_strip_hit_in_the_middle_leaves_with_the_impulse() {
+    // A steel strip 6 m long, 1 m wide and 0.25 m deep, held by nothing and without weight, hit in the middle
+    // across its length by an impulse J over `KICK_TIME`. The step has no support to stand on, only the cells' mass
+    // (`Dyn::free`): the strip must leave with J / M, all of it, the middle first. The same network and the same
+    // plastic joints as the standing structure: this is what a falling piece would be stepped as.
+    // What it shows is missing (14 Nov): with the structure's damping the strip is slowed in flight, by
+    // exp(-DYN_DAMP t), since damping on mass acts on a cell's whole velocity and not on its velocity within the
+    // piece; and displacements are measured from where the piece started, so the leaving rule (`DYN_MOVE`) and
+    // small-turn springs limit it to a few cm and a fraction of a turn. Both go with stepping a piece in its own
+    // flight's frame (docs/DEFORM.md, stage 1).
+    use crate::structure::{DYN_DAMP, KICK_TIME};
+    let v = 0.5f64;
+    for undamped in [true, false] {
+        let mut b = Bricks::new();
+        for k in 0..12 { b.add([k * 4, 40, 0], [4, 2, 8], mat::STEEL, 0, 0); }
+        b.build_joints();
+        let mut r = Rig::new(b, &[]);
+        r.d.no_yield = false; r.d.free = true; r.d.undamped = undamped;
+        let m: Vec<f64> = (0..12).map(|i| moved(&r.b, i) as f64).collect();
+        let total: f64 = m.iter().sum();
+        let j = total * v;
+        r.d.kicks.push(([3.0, 5.125, 0.5], [0.0, -j, 0.0], KICK_TIME));
+        let (mut failed, mut lead) = (0, 0.0f64);
+        while r.t < 0.2 {
+            let a = r.step(H, 0.0, &[]); failed += a.failed.len();
+            lead = lead.max((r.of(0)[1] + r.of(11)[1]) * 0.5 - (r.of(5)[1] + r.of(6)[1]) * 0.5);
+        }
+        let mut p = 0.0;
+        for (c, vel) in r.cells.iter().zip(r.d.cell_vel.iter()) { p += m[c.0[0] as usize] * -(vel[1] as f64); }
+        // (the damping acts from the middle of the hit on: about t - KICK_TIME / 2)
+        let lost = (-(DYN_DAMP as f64) * (r.t - 0.5 * KICK_TIME as f64)).exp();
+        println!("free steel strip of {total:.0} kg hit in the middle with {:.2} kN s (to leave at {v} m/s), {}: after {:.2} s its {} cells carry {:.3} of the impulse (damping on mass alone would leave {:.3}); it has gone {:.1} mm; the middle led the ends by {:.2} mm at most; {failed} joints failed", j * 1e-3, if undamped { "no damping" } else { "the structure's damping" }, r.t, r.cells.len(), p / j, lost, -r.of(5)[1] * 1e3, lead * 1e3);
+        assert_eq!(r.cells.len(), 12);
+        assert!(failed == 0 && lead > 0.0);
+        // (37/36 of it: the first step from rest is implicit Euler, which gives that step's force whole, and the
+        // next step counts the same acceleration again as the old one, by 1 - gamma = 1/6: a sixth of one of the
+        // hit's six steps. 2.8% of a hit that wakes a structure at rest, less if it is already moving.)
+        let over = 37.0 / 36.0;
+        if undamped { assert!((p / j - over).abs() < 0.005, "it leaves with the impulse: {}", p / j); }
+        else { assert!((p / j - lost * over).abs() < 0.03, "slowed as the damping on mass says: {} against {}", p / j, lost * over); }
+    }
 }

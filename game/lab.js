@@ -49,7 +49,8 @@ function labInstall() {
     // (a ball removed frees its slot: the next body there is not a ball. Left marked, a piece of the facade given
     // that slot was left out of what is drawn, and the lab saw a 0.2 m3 hole for 214 frames, scenario far)
     const wasBall = L.balls.has(parent); L.balls.delete(parent);
-    if (window.__farKill) { L.lostBy.far = (L.lostBy.far || 0) + v; L.farBodies = (L.farBodies || 0) + 1; const gb = gpu.bodies[parent - 1]; labEvent('removed_far', L.f, { body: parent, vol: +v.toFixed(3), ball: wasBall, size: gb && gb.labH, made_at: gb && gb.labF, shapes: (gpu.bodyShapes.get(parent) || []).length }); }   // (removed past the clean-up distance)
+    if (window.__farKill === 'budget') { L.lostBy.budget = (L.lostBy.budget || 0) + v; L.budgetBodies = (L.budgetBodies || 0) + 1; L.budgetBodyVol = Math.max(L.budgetBodyVol || 0, v); }
+    else if (window.__farKill) { L.lostBy.far = (L.lostBy.far || 0) + v; L.farBodies = (L.farBodies || 0) + 1; const gb = gpu.bodies[parent - 1]; labEvent('removed_far', L.f, { body: parent, vol: +v.toFixed(3), ball: wasBall, size: gb && gb.labH, made_at: gb && gb.labF, shapes: (gpu.bodyShapes.get(parent) || []).length }); }   // (removed past the clean-up distance)
     // (a break must not make volume: the kids, bodies and particles, against the parent; logged when over by 5%)
     { const kv = (rest[0] || []).reduce((s, k) => s + (L.bodyVol.get(k) || 0), 0) + (L.pendingParts || []).reduce((s, i) => s + (i >= 0 && pInfo[i] ? labBoxVol(pInfo[i].h) : 0), 0);
       if (kv > 1.05 * v + 0.5 && (L.overBreaks = L.overBreaks || []).length < 20) { const gb = gpu.bodies[parent - 1]; L.overBreaks.push({ f: L.f, op: L.jobOp, parent, parent_m3: +v.toFixed(2), kids_m3: +kv.toFixed(2), kids: (rest[0] || []).length, made_at: gb && gb.labF, what: gb && gb.labH, spare: !!(gb && gb.spare), shapes_gpu: (gpu.bodyShapes.get(parent) || []).length }); } }
@@ -86,7 +87,7 @@ function labInstall() {
   };
   gpu.killBody = (b) => { const v = L.bodyVol.get(b) || 0; L.gpuVol -= v; L.bodyVol.delete(b); return kill(b); };
   gpu.addParticles = (list) => { const s = addP(list); L.pendingParts = (L.pendingParts || []).concat(s); return s; };
-  gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); if (window.__farKill) { L.lostBy.far = (L.lostBy.far || 0) + v; L.farParts = (L.farParts || 0) + 1; labEvent('removed_far', L.f, { particle: i, vol: +v.toFixed(3) }); } else L.lostParticles = (L.lostParticles || 0) + v; return killP(i); };
+  gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); if (window.__farKill === 'budget') { L.lostBy.budget = (L.lostBy.budget || 0) + v; L.budgetParts = (L.budgetParts || 0) + 1; } else if (window.__farKill) { L.lostBy.far = (L.lostBy.far || 0) + v; L.farParts = (L.farParts || 0) + 1; labEvent('removed_far', L.f, { particle: i, vol: +v.toFixed(3) }); } else L.lostParticles = (L.lostParticles || 0) + v; return killP(i); };
 }
 // (particle volumes are known once the page has their brick sizes: after addPieces)
 function labParticlesMade() {
@@ -296,9 +297,9 @@ function labReport(wallS) {
     // what the tools did not take out must stay in the world: standing, falling, as rubble or particles. Dust (fines
     // removed) is real but small; a whole floor gone as dust is a floor that vanished (7 November: 57% in collapse)
     // (what the clean-up distance removed is gone on purpose, like what the tools took)
-    ['volume lost, not to the tools (% of the building)', +(100 * (L.V0 - L.T - (L.lostBy.tool || 0) - (L.lostBy.far || 0)) / L.V0).toFixed(1), 2, 'parts vanishing'],
+    ['volume lost, not to the tools (% of the building)', +(100 * (L.V0 - L.T - (L.lostBy.tool || 0) - (L.lostBy.far || 0) - (L.lostBy.budget || 0)) / L.V0).toFixed(1), 2, 'parts vanishing'],
     // (and none made: a part doubled, 7 November: the mixed building's falling part doubled where the GPU had broken it)
-    ['volume made (% of the building)', +Math.max(0, -100 * (L.V0 - L.T - (L.lostBy.tool || 0) - (L.lostBy.far || 0)) / L.V0).toFixed(1), 0.5, 'parts doubled'],
+    ['volume made (% of the building)', +Math.max(0, -100 * (L.V0 - L.T - (L.lostBy.tool || 0) - (L.lostBy.far || 0) - (L.lostBy.budget || 0)) / L.V0).toFixed(1), 0.5, 'parts doubled'],
   ].map(([name, value, limit, what]) => ({ name, value, limit, pass: value <= limit, what }));
   if (S.expect && S.expect.gradual) {
     // a building eaten away fails progressively: joints crack (and wear through) before the upper storeys come
@@ -316,6 +317,20 @@ function labReport(wallS) {
   // wrong place. 8 November: spare bodies seen parked 1 km under the ground, 1,018 m3 of the mixed building went)
   checks.push({ name: 'spare bodies awake while parked (most at once)', value: L.parkedAwake || 0, limit: 0, pass: !(L.parkedAwake > 0), what: 'the world never at rest' });
   if (S.far == null) checks.push({ name: 'removed past the clean-up distance (% of the building)', value: +(100 * (L.lostBy.far || 0) / L.V0).toFixed(1), limit: 0.5, pass: 100 * (L.lostBy.far || 0) / L.V0 <= 0.5, what: 'parts removed that did not fly that far' });
+  if (S.expect && S.expect.debrisCap) {
+    // the debris budget: never more pieces and particles at once than it allows (and one read-back's worth that
+    // had not been counted yet), and the oldest have gone to keep it
+    const cap = S.expect.debrisCap, peak = L.debrisPeak || 0;
+    checks.push({ name: 'debris kept at once, at most', value: peak, limit: cap, pass: peak <= cap, what: 'pieces and particles together, after each read-back' });
+    checks.push({ name: 'debris removed over the budget', value: debrisCapped, limit: '> 0', pass: debrisCapped > 0, what: 'the scenario makes more than the budget' });
+    checks.push({ name: 'debris removed: the smallest first, the oldest of those', value: L.debrisOrder === false ? 'no' : 'yes', limit: 'yes', pass: L.debrisOrder !== false, what: 'nothing is left that is of a smaller class than what was removed, or of its class and older' });
+    // (what the budget costs the picture: the heaviest piece it took, and how much of the building; limits in
+    // `expect`, from the scenario's first runs, docs/LAB.md 14 November)
+    const heavy = Math.round(L.debrisHeaviest || 0), share = +(100 * (L.lostBy.budget || 0) / L.V0).toFixed(1);
+    if (S.expect.debrisHeaviest != null) checks.push({ name: 'heaviest piece the budget removed (kg)', value: heavy, limit: S.expect.debrisHeaviest, pass: heavy <= S.expect.debrisHeaviest, what: 'big pieces stay while crumbs and small pieces can go' });
+    if (S.expect.debrisShare != null) checks.push({ name: 'removed by the budget (% of the building)', value: share, limit: S.expect.debrisShare, pass: share <= S.expect.debrisShare, what: 'the budget takes crumbs, not the building' });
+    labEvent('budget', L.f, { removed: debrisCapped, particles: L.budgetParts || 0, bodies: L.budgetBodies || 0, heaviest_kg: heavy, largest_m3: +(L.budgetBodyVol || 0).toFixed(3), share_pct: share });
+  }
   if (S.expect && S.expect.ballStops) {
     // a ball sent into a building is stopped by it: it ends at rest inside, above the ground storey, and what it
     // lost in its first second of breaking through is most of its speed
@@ -395,11 +410,14 @@ async function labRun() {
   });
   // the defaults, whatever this browser has saved (the report lists them)
   for (const [k, d] of Object.entries(SETTINGS)) { setting[k] = d.def; d.apply(d.def); }
-  setting.preset = 'high (lab defaults)';
+  setting.phys = 'high (lab defaults)'; setting.gfx = 'high (lab defaults)';
   // fixed sub-steps: adapting them to this machine's speed would make the runs differ between machines
   // (SF_PRESET: a quality preset over the defaults, as a player would pick it: a benchmark on 'low' kept bodies
   // awake far longer than the lab's 'high')
-  if (window.__preset && PRESETS[window.__preset]) { const pr = PRESETS[window.__preset]; for (const k of ['crumbs', 'rubble', 'substeps', 'colors']) { setting[k] = pr[k]; SETTINGS[k].apply(pr[k]); } setting.preset = window.__preset; }
+  if (window.__preset && PRESETS[window.__preset]) { const pr = PRESETS[window.__preset]; for (const k of PHYS_KEYS) { setting[k] = pr[k]; SETTINGS[k].apply(pr[k]); } setting.phys = window.__preset; }
+  // (the debris budget: none in the lab, so that a scenario is the same whatever it leaves lying, unless the
+  // scenario sets one, `debris`, or a preset does)
+  if (!(window.__preset && PRESETS[window.__preset])) { setting.debris = LAB.spec.debris || 20000; SETTINGS.debris.apply(setting.debris); }
   setting.adaptive = 0; gpu.substeps = setting.substeps;
   Math.random = seededRandom(window.__seed || 20261104);   // (SF_SEED: another run of the same scenario, to tell a trend from one run's luck)
   if (window.__pinch && gpu) gpu.pinching = true;

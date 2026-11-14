@@ -25,6 +25,33 @@ const which = process.argv[2] || 'rest';
   await p.goto('file://' + html);
   for (let i = 0; i < 180; i++) { await new Promise(r => setTimeout(r, 1000)); if (await p.evaluate(() => !!gpu && !$('go').disabled)) break; }
   await p.evaluate(() => $('go').click());
+  if (which === 'settings') {
+    // (14 Nov) two presets, physics and graphics, each setting what it owns; every other parameter folded away
+    // until asked for; a slider moved by hand makes its preset custom.
+    const r = await p.evaluate(() => {
+      const out = {}, pick = (id, v) => { const el = document.getElementById(id); el.value = v; el.dispatchEvent(new Event('change')); };
+      out.folded = !document.getElementById('s-adv').open && !document.getElementById('s-tools').open;
+      out.inAdv = ['s-debris', 's-crumbs', 's-rubble', 's-substeps', 's-colors', 's-far', 's-dynamic'].every(id => document.getElementById('s-adv').contains(document.getElementById(id)));
+      out.top = ['s-kind', 's-gfx', 's-phys', 's-view'].every(id => { const el = document.getElementById(id); return !document.getElementById('s-adv').contains(el) && !document.getElementById('s-tools').contains(el); });
+      pick('s-phys', 'low'); out.low = [setting.debris, setting.crumbs, setting.rubble, setting.substeps, setting.colors, debrisMax, setting.phys];
+      pick('s-phys', 'ultra'); out.ultra = [setting.debris, setting.crumbs, debrisMax === Infinity, setting.phys];
+      pick('s-gfx', 'low'); out.gfxLow = [renderer.shadowMap.enabled, renderer.getPixelRatio(), sun.shadow.mapSize.x, setting.gfx];
+      pick('s-gfx', 'high'); out.gfxHigh = [renderer.shadowMap.enabled, sun.shadow.mapSize.x, setting.gfx];
+      pick('s-phys', 'high');
+      toggleSettings(true); document.getElementById('s-adv').open = true;
+      return out;
+    });
+    // (a real key on the slider: the page tells a hand from its own presets by the event being trusted)
+    await p.focus('#s-debris'); await p.keyboard.press('ArrowLeft');
+    Object.assign(r, await p.evaluate(() => {
+      const custom = [debrisMax, document.getElementById('s-phys').value, setting.phys];
+      const el = document.getElementById('s-phys'); el.value = 'high'; el.dispatchEvent(new Event('change'));
+      return { custom, saved: JSON.parse(localStorage.getItem('sf-settings') || '{}').phys, back: debrisMax };
+    }));
+    const ok = !err && r.folded && r.inAdv && r.top && JSON.stringify(r.low) === JSON.stringify([1500, 64, 16, 6, 10, 1500, 'low']) && r.ultra[0] === 20000 && r.ultra[2] === true && r.gfxLow[0] === false && r.gfxLow[1] === 1 && r.gfxLow[2] === 1024 && r.gfxHigh[0] === true && r.gfxHigh[1] === 2048 && r.custom[0] === 9750 && r.custom[1] === '' && r.custom[2] === '' && r.saved === 'high' && r.back === 10000;
+    console.log(`${ok ? 'PASS' : 'FAIL'} settings: ${JSON.stringify(r)}${err ? ' · ' + err : ''}`);
+    await b.close(); process.exit(ok ? 0 : 1);
+  }
   if (which === 'view') {
     // view: the engineer's view switched on with V. The worker must have the page's settings (the dynamic structure
     // on: a line of the settings' start-up commented out by a comment added mid-line left every setting unapplied,

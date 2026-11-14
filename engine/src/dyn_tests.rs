@@ -447,3 +447,71 @@ fn columns_out(g: &mut Game, xs: &[f32]) { for &x in xs { for &z in &[-6.0f32, 0
     assert!(!g.moving && steps < 900, "it comes to rest");
     assert!(yl >= 10 && sag >= 0.03 && sag < 0.5, "and hangs bent: {yl} joints yielded, {sag} m of sag");
 }
+// The design table: every kind of building at the heights the city builds it, standing under its own weight and
+// what its floors carry: its worst joint or section, and the two worst kinds of joint. Not a check (the checks are
+// `game::tests` and `city::tests`); run it when a building, a strength or a load changes:
+//   cargo test --release standing_margins -- --ignored --nocapture      (SF_KIND=n for one kind;
+//   SF_IMPOSED=N/m2 and SF_SHEAR=MPa try a floor load and a concrete shear strength; SF_NOCM=1 bonds concrete to brick)
+#[test] #[ignore] fn the_buildings_standing_margins() {
+    use crate::brick::TICK;
+    let only: Option<u8> = std::env::var("SF_KIND").ok().and_then(|v| v.parse().ok());
+    for (kind, sts) in [(0u8, std::vec![3, 4, 8, 12]), (1, std::vec![2, 3, 4, 5]), (2, std::vec![3, 4, 6]), (3, std::vec![3, 4, 5]), (4, std::vec![3])] {
+        if only.map_or(false, |k| k != kind) { continue; }
+        for st in sts {
+            let b = crate::tower::build_kind(st, 1, kind);
+            let set: Vec<u32> = (0..b.len() as u32).filter(|&i| b.alive(i)).collect();
+            let load: Vec<f32> = set.iter().map(|&i| crate::structure::weight(&b, i)).collect();
+            let sink: Vec<bool> = set.iter().map(|&i| b.y[i as usize] <= 0).collect();
+            let a = crate::structure::analyse(&b, &set, &load, &sink, v3(0.0, -1.0, 0.0));
+            let mut r = a.ratios.clone(); r.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap());
+            let over = r.iter().filter(|x| x.1 > 0.6).count();
+            let wi = a.worst_in; let wb = wi.1 as usize; let ws = b.size(wi.1);
+            println!("kind {kind}, {st} storeys: worst {:.3}, {} joints over 0.6, {} failed, {} its; worst inside a brick {:.3}: mat {} paint {} {:?} m at y {:.2} axis {}", a.max_ratio, over, a.failed.len(), a.iterations, wi.0, b.mat[wb], b.paint[wb], [ws[0] as f32 * TICK, ws[1] as f32 * TICK, ws[2] as f32 * TICK], b.y[wb] as f32 * TICK, wi.2);
+            let mut seen = Vec::new();
+            for &(j, ratio) in r.iter() {
+                let (p, q) = (b.ja[j as usize], b.jb[j as usize]);
+                let (sp, sq) = (b.size(p), b.size(q));
+                let d = (b.mat[p as usize], b.paint[p as usize], sp, b.mat[q as usize], b.paint[q as usize], sq, b.jaxis[j as usize]);
+                if seen.contains(&d) { continue; }
+                seen.push(d);
+                println!("    {ratio:.3}: mat {} paint {} {:?} m at y {:.2} | mat {} paint {} {:?} m at y {:.2} | axis {} area {} t2", d.0, d.1, [sp[0] as f32 * TICK, sp[1] as f32 * TICK, sp[2] as f32 * TICK], b.y[p as usize] as f32 * TICK, d.3, d.4, [sq[0] as f32 * TICK, sq[1] as f32 * TICK, sq[2] as f32 * TICK], b.y[q as usize] as f32 * TICK, d.6, b.jarea[j as usize]);
+                if seen.len() >= 2 { break; }
+            }
+        }
+    }
+}
+// What a cut leaves: the 4-storey concrete frame with its ground storey shot away west of a line, solved at rest and
+// stepped dynamically (not a check; `cargo test --release what_a_cut_leaves -- --ignored --nocapture`).
+#[test] #[ignore] fn what_a_cut_leaves() {
+    for xmax in [-8.0f32, -6.0, -4.0] { for dynamic in [false, true] {
+        let mut g = Game::new_kind(4, 0); g.dynamic = dynamic; g.structure_step(64);
+        let mut x = -11.7f32; while x <= xmax { let mut z = -11.7f32; while z <= 11.7 { g.blast(v3(x, 1.6, z), 0.7); z += 0.8; } x += 0.8; }
+        let (mut yl, mut steps, mut peak) = (0, 0, 0.0f64);
+        for _ in 0..900 { if dynamic { g.struct_dt = 4.0 / 60.0; } let n = g.structure_step(64); steps += 1; peak = peak.max(disp(&g)); for s in g.dynst.values() { yl = yl.max(s.1.yielding); } if n == 0 && !g.moving { break; } }
+        println!("frame, ground storey gone west of {xmax} m, {}: {} joints failed, {} pieces (largest {} bricks), worst {:.3}, sag {:.0} mm (most {:.0}), most joints yielding {yl}, {steps} steps, moving {}", if dynamic { "dynamic" } else { "at rest" }, g.failed_total, g.pieces.len(), largest_piece(&g), g.max_ratio, disp(&g) * 1e3, peak * 1e3, g.moving);
+    } }
+}
+
+#[test] fn every_building_is_in_balance_at_rest() {
+    // The check that the calculation closes: after the solve a structure rests on, every cell's loads and the
+    // forces of its springs cancel, to what the tolerance leaves. Each kind at the heights the city builds it,
+    // under its own weight and what its floors carry; and the weight that reaches the ground is the building's.
+    for (kind, storeys) in [(0u8, 4), (0, 12), (1, 2), (1, 5), (2, 6), (3, 3), (3, 5), (4, 3), (4, 5)] {
+        let b = crate::tower::build_kind(storeys, 1, kind);
+        let set: Vec<u32> = (0..b.len() as u32).filter(|&i| b.alive(i)).collect();
+        let load: Vec<f32> = set.iter().map(|&i| crate::structure::weight(&b, i)).collect();
+        let sink: Vec<bool> = set.iter().map(|&i| b.y[i as usize] <= 0).collect();
+        let (mut w, mut d) = (crate::structure::Warm::default(), crate::structure::Dyn::default());
+        let a = crate::structure::analyse_dyn(&b, &set, &load, &[], &sink, v3(0.0, -1.0, 0.0), Some(&mut w), Some(&mut d));
+        // what the supports take: the forces of the joints between a brick on the ground and one above it
+        let on_ground = |i: u32| b.y[i as usize] <= 0;
+        let (mut up, mut total, mut free) = (0.0f64, 0.0f64, 0.0f64);
+        for (k, &i) in set.iter().enumerate() { total += load[k] as f64; if !on_ground(i) { free += load[k] as f64; } }
+        for &(j, f, _) in &a.forces { let (p, q) = (b.ja[j as usize], b.jb[j as usize]); if on_ground(p) != on_ground(q) && b.jaxis[j as usize] == 1 { up += -f[0]; } }
+        println!("kind {kind}, {storeys} storeys: {} cells, worst {:.3}; the most a cell is out of balance {:.1e} of the largest load on one; weight above the ground {:.0} kN (of {:.0} in all), carried into it through level joints {:.0} kN ({:+.2}%); {} iterations", a.nodes, a.max_ratio, d.residual, free * 1e-3, total * 1e-3, up * 1e-3, (up / free - 1.0) * 100.0, a.iterations);
+        assert!(a.failed.is_empty() && a.max_ratio < 0.9, "kind {kind}, {storeys}: it stands");
+        assert!(d.residual < 2e-3, "kind {kind}, {storeys}: every cell in balance: {}", d.residual);
+        // (the complex building stands on stones and braces whose joints are not level: its sum here is not all of it)
+        if kind != 4 { assert!((up / free - 1.0).abs() < 0.001, "kind {kind}, {storeys}: the ground carries the building: {up} / {free}"); }
+    }
+}

@@ -34,6 +34,10 @@ button:disabled { opacity: .5; cursor: default; }
 .settings h2 { font: 600 14px var(--sans); margin: 0; }
 .settings label { display: flex; flex-direction: column; gap: 3px; color: var(--mute); }
 .settings label b { color: var(--ink); font-weight: 500; }
+.settings details { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid rgba(255,255,255,.12); padding-top: 8px; }
+.settings details > * { margin-bottom: 10px; }
+.settings summary { cursor: pointer; color: var(--ink); font-size: 13px; margin-bottom: 10px; }
+.settings details:not([open]) > summary { margin-bottom: 0; }
 .settings input[type=range] { width: 100%; accent-color: var(--accent); }
 .settings select { font: inherit; background: #0e0f10; color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; padding: 4px; }
 .settings .hint { color: var(--mute); font-size: 11px; }
@@ -52,10 +56,13 @@ button:disabled { opacity: .5; cursor: default; }
   <h2>Settings</h2>
   <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option><option value="3">mixed: brick, steel, concrete, timber · 5 storeys</option><option value="4">complex: braced steel frame, timber roof, stone arcade · 2 storeys</option><option value="5">city: lots of every kind between streets</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
   <label>City size <select id="s-city"><option value="2">2 × 2 lots</option><option value="3">3 × 3 lots</option><option value="4">4 × 4 lots</option><option value="5">5 × 5 lots</option><option value="6">6 × 6 lots</option><option value="8">8 × 8 lots</option></select><span class="hint">for the city: 40 m lots, a building of every kind; larger cities cost more GPU time and structure checks (the benchmark finds the limit); changing it rebuilds the city</span></label>
-  <label>Quality <select id="s-preset"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">sets the debris budgets, physics sub-steps, solver colours and shadows; the sliders below fine-tune</span></label>
+  <label>Graphics <select id="s-gfx"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">how it is drawn: shadows and their sharpness, the resolution it is rendered at</span></label>
+  <label>Physics <select id="s-phys"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">how much is simulated: the most debris kept at once, crumbs and rubble per impact, physics sub-steps, solver colours</span></label>
+  <label>Engineer's view (V) <b id="v-view"></b><input type="range" id="s-view" min="0" max="1" step="1"><span class="hint">on: every brick is coloured by how near its worst joint is to its strength (blue unloaded, green a third, yellow 70%, red at strength), and the building is drawn where the structure's solution puts it</span></label>
+  <details id="s-adv"><summary>Advanced: every parameter</summary>
+  <label>Debris kept at once <b id="v-debris"></b><input type="range" id="s-debris" min="250" max="20000" step="250"><span class="hint">falling pieces and rubble particles together: past this many, the oldest are removed, crumbs before small pieces and small pieces (under 300 kg) before big ones; at the far end of the slider, no limit. The physics preset sets it</span></label>
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
-  <label>Engineer's view (V) <b id="v-view"></b><input type="range" id="s-view" min="0" max="1" step="1"><span class="hint">on: every brick is coloured by how near its worst joint is to its strength (blue unloaded, green a third, yellow 70%, red at strength), and the building is drawn where the structure's solution puts it</span></label>
   <label>Displacements drawn <b id="v-viewScale"></b><input type="range" id="s-viewScale" min="0" max="4" step="1"><span class="hint">in the engineer's view: a building sags millimetres, so its displacements are drawn this many times as large</span></label>
   <label>Dynamic structure <b id="v-dynamic"></b><input type="range" id="s-dynamic" min="0" max="1" step="1"><span class="hint">on: the standing building is stepped as a moving structure (it sags and sways, and answers a change in the step it happens, at a bounded cost); off: it is solved at rest after each change</span></label>
   <label>Rubble weighs on floors <b id="v-restLoads"></b><input type="range" id="s-restLoads" min="0" max="1" step="1"><span class="hint">on: once a second the weight of the debris lying on the building is sent to the structure check, and a floor heaped too high gives way</span></label>
@@ -69,6 +76,8 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Solver colours (max) <b id="v-colors"></b><input type="range" id="s-colors" min="8" max="31" step="1"><span class="hint">contacts beyond go to a parallel pass: fewer = faster, a little softer</span></label>
   <label>Ball speed <b id="v-bspeed"></b><input type="range" id="s-bspeed" min="20" max="300" step="10"></label>
   <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
+  </details>
+  <details id="s-tools"><summary>Benchmark, lab checks, diagnostics</summary>
   <h2>Benchmark</h2>
   <span class="hint">the same scripted destruction every run: the ground storey cut by 36 fixed blasts, the tower dropping and crushing down, three steel balls; 12 s of simulated time, then a report</span>
   <button id="bench-go" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run benchmark (reloads the page) · key K</button>
@@ -83,6 +92,7 @@ button:disabled { opacity: .5; cursor: default; }
   <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-events" checked> impact events (breaking)</label>
   <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-timing" checked> GPU timing queries</label>
   <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-indirect"> old indirect dispatches (for comparison)</label>
+  </details>
   <span class="hint">O or Esc closes · settings are remembered in this browser</span>
 </div>
 <div class="start" id="start">
@@ -143,6 +153,8 @@ const LAB_SCENARIOS = {
   // through the roof, which takes most of its speed, and stops inside on a floor (13 Nov; docs/LAB.md: at 25 m/s it
   // stays in a crater on the roof, at 80 m/s it bounces 20 m up and off the building)
   tallball: { kind: 0, storeys: 8, frames: 600, title: 'concrete frame, 8 storeys: a steel ball onto the roof at 45 m/s', script: [[10, 'ball', [7.5, 45, 7.5, 0, -1.5707, 45, 0.4]]], expect: { ballStops: { above: 3.0, top: 29.5, box: [-11.5, 11.5, -11.5, 11.5] } } },
+  // the debris budget (14 Nov): the collapse with at most 1,000 pieces and particles kept at once
+  debriscap: { kind: 0, storeys: 4, frames: 480, debris: 1000, title: 'concrete frame, 4 storeys: the collapse with a debris budget of 1,000', script: [[0, 'cut']], expect: { debrisCap: 1000, debrisHeaviest: 300, debrisShare: 30 } },   // (300 kg: `DEBRIS_SMALL`, no big piece goes while crumbs are left; 30%: all the particles this collapse makes are about 22% of the building, docs/LAB.md 14 November)
   // the complex building (kind 4, docs/PHASE2.md): steel frame with free-piece braces, a roof of rafters and boards
   // at 26 degrees, an arcade of stone arches; the ground storey and the arcade's piers cut
   complex: { kind: 4, storeys: 3, frames: 600, title: 'complex (braced steel frame, pitched timber roof, stone arcade): the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
@@ -388,6 +400,7 @@ function pullDebris() {
       pr.index = new Map(); list.forEach((i, k) => pr.index.set(pInfo[i].gen * 1048576 + i, k));
     }
     cleanFar(r);
+    capDebris(r, pr);
     if (LAB.on) labOnRead(r, pr);
     velHist.unshift({ v: r.vel, frame: r.frame }); if (velHist.length > 4) velHist.pop(); lastReadFrame = r.frame; lastBodies = r.body; lastVel = r.vel; lastAng = r.ang;
     drawTargets(r);
@@ -568,6 +581,63 @@ let partsMade = 0, partsCrushed = 0;
 // Clean-up distance: rubble particles and pieces carried farther than this from where they were first seen (where
 // they broke off, a read-back or two later) are removed: they no longer take part in the collapse, and cost steps
 // and drawing (a blast or a fall can throw crumbs a long way).
+// ---- The debris budget (setting "Debris kept at once", the physics preset): falling pieces and rubble particles
+// together are at most `debrisMax`; past it the ones that have been there longest go, oldest first. A piece's age
+// runs from the read-back that first shows it. Not counted: the building, parked spares, balls, and what stood
+// loose in the building from the start (furniture) until something has moved it half a metre.
+let debrisMax = Infinity, debrisSeq = 0, debrisCapped = 0, debrisLive = 0;
+const debrisBorn = new Map();   // body slot -> { gen, seq, p: where it was first seen, orig: there before anything was done }
+// What goes first when there is more debris than the budget: the smallest, and among those the oldest. Three
+// classes: crumbs (particles), pieces lighter than `DEBRIS_SMALL` kg, the rest. Strictly oldest first (tried, lab
+// `debriscap`, 14 Nov) took 89.7% of the collapsing building's volume out of the world: the upper storeys fall as a
+// few big bodies, made before the 13,000 crumbs of the cut and of their landing, and went first.
+const DEBRIS_SMALL = 300;   // kg: a 0.5 m cube of concrete
+function capDebris(r, pr) {
+  const live = [];
+  if (r.body) {
+    const nb = Math.min(gpu.bodies.length, r.body.length / 7), fresh = lastBlast === '' && balls === 0;
+    for (let b = 1; b <= nb; b++) {
+      const gb = gpu.bodies[b - 1]; if (!gb || gb.dead || gb.im === 0 || gb.ball || gb.labBall) { debrisBorn.delete(b); continue; }
+      const o = (b - 1) * 7, p = [r.body[o], r.body[o + 1], r.body[o + 2]], gen = gpu.genOf(b);
+      if (p[1] < -500) { debrisBorn.delete(b); continue; }
+      let f = debrisBorn.get(b);
+      if (!f || f.gen !== gen) { f = { gen, seq: ++debrisSeq, p, orig: fresh }; debrisBorn.set(b, f); }
+      if (f.orig) { if (Math.hypot(p[0] - f.p[0], p[1] - f.p[1], p[2] - f.p[2]) < 0.5) continue; f.orig = false; f.seq = ++debrisSeq; }
+      live.push([f.seq, b, o, 1 / gb.im < DEBRIS_SMALL ? 1 : 2]);
+    }
+  }
+  if (pr && pr.list) for (const i of pr.list) { const inf = pInfo[i]; if (!inf || inf.dead) continue; if (inf.born === undefined) inf.born = ++debrisSeq; live.push([inf.born, -1 - i, 0, 0]); }
+  debrisLive = live.length;
+  let over = live.length - debrisMax;
+  if (!(over > 0)) { if (LAB.on && debrisMax < Infinity) LAB.debrisPeak = Math.max(LAB.debrisPeak || 0, live.length); return; }
+  live.sort((a, b) => a[3] - b[3] || a[0] - b[0]);
+  const newest = [-1, -1, -1], taken = new Set();
+  window.__farKill = 'budget';   // (the lab's books: taken out on purpose, by the budget)
+  try {
+    for (let k = 0; k < live.length && over > 0; k++) {
+      const [, id, o, cls] = live[k];
+      if (id < 0) { const i = -1 - id; pInfo[i].dead = true; gpu.killParticle(i); }
+      else {
+        // (not a part the engine is still splitting, nor one with a split on the GPU waiting for it)
+        if (engineBroken.has(id) || snapPending.has(id)) continue;
+        if (LAB.on) LAB.debrisHeaviest = Math.max(LAB.debrisHeaviest || 0, 1 / gpu.bodies[id - 1].im);
+        gpu.breakBody(id, [], [r.body[o], r.body[o + 1], r.body[o + 2]], [r.body[o + 3], r.body[o + 4], r.body[o + 5], r.body[o + 6]], [], [], []);
+        bodyInfo.delete(id); debrisBorn.delete(id); farO.delete(id);
+      }
+      over--; debrisCapped++; newest[cls] = live[k][0]; taken.add(k);
+    }
+  } finally { window.__farKill = false; }
+  // (for the lab: what is left after the cut, and whether anything is left that should have gone before something
+  // that went: smaller, or as small and older; other than parts the engine is splitting)
+  if (LAB.on) {
+    const L = LAB; L.debrisPeak = Math.max(L.debrisPeak || 0, live.length - taken.size);
+    const top = newest[2] >= 0 ? 2 : newest[1] >= 0 ? 1 : 0;
+    for (let k = 0; k < live.length; k++) {
+      if (taken.has(k) || (live[k][1] > 0 && (engineBroken.has(live[k][1]) || snapPending.has(live[k][1])))) continue;
+      if (live[k][3] < top || (live[k][3] === top && live[k][0] < newest[top])) L.debrisOrder = false;
+    }
+  }
+}
 let farDist = 100, partsFar = 0, bodiesFar = 0;
 const farO = new Map();   // body slot -> { gen, p: where it was first seen }
 function cleanFar(r) {
@@ -1297,6 +1367,8 @@ const SETTINGS = {
   rubble: { el: 's-rubble', def: 64, fmt: v => `${v}`, apply: v => setParam(1, v) },
   substeps: { el: 's-substeps', def: 12, fmt: v => `${v}`, apply: v => { if (gpu) gpu.substeps = v; } },
   colors: { el: 's-colors', def: 16, fmt: v => `${v}`, apply: v => { if (gpu) { gpu.maxColors = v; gpu.colorLimit = Math.min(gpu.colorLimit, v); } } },
+  // the most debris kept at once (falling pieces and rubble particles): capDebris
+  debris: { el: 's-debris', def: 10000, fmt: v => (+v >= 20000 ? 'no limit' : `${v}`), apply: v => { debrisMax = +v >= 20000 ? Infinity : +v; } },
   far: { el: 's-far', def: 100, fmt: v => (+v > 500 ? 'off' : `${v} m`), apply: v => { farDist = +v > 500 ? Infinity : +v; } },
   bspeed: { el: 's-bspeed', def: 60, fmt: v => `${v} m/s`, apply: () => {} },
   bsize: { el: 's-bsize', def: 0.5, fmt: v => `${(+v).toFixed(2)} m`, apply: () => {} },
@@ -1333,26 +1405,49 @@ function initSettings() {
     el.addEventListener('input', () => { setting[k] = +el.value; $('v-' + k).textContent = d.fmt(el.value); d.apply(setting[k]); try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} });
   }
 }
+// Two presets. Physics: how much is simulated. Graphics: how it is drawn. Each sets the sliders it owns (the
+// advanced section shows them); a slider moved by hand makes its preset "custom".
 const PRESETS = {
-  low: { crumbs: 64, rubble: 16, substeps: 6, colors: 10, shadows: false },
-  medium: { crumbs: 192, rubble: 32, substeps: 8, colors: 12, shadows: true },
-  high: { crumbs: 384, rubble: 64, substeps: 12, colors: 16, shadows: true },
-  ultra: { crumbs: 1024, rubble: 192, substeps: 12, colors: 24, shadows: true },
+  low: { debris: 1500, crumbs: 64, rubble: 16, substeps: 6, colors: 10 },
+  medium: { debris: 4000, crumbs: 192, rubble: 32, substeps: 8, colors: 12 },
+  high: { debris: 10000, crumbs: 384, rubble: 64, substeps: 12, colors: 16 },
+  ultra: { debris: 20000, crumbs: 1024, rubble: 192, substeps: 12, colors: 24 },
 };
+const PHYS_KEYS = ['debris', 'crumbs', 'rubble', 'substeps', 'colors'];
+// (shadows; the sun's shadow map, pixels a side; the most device pixels to a CSS pixel)
+const GFX = {
+  low: { shadows: false, map: 1024, px: 1 },
+  medium: { shadows: true, map: 1024, px: 1.5 },
+  high: { shadows: true, map: 2048, px: 2 },
+  ultra: { shadows: true, map: 4096, px: 3 },
+};
+function saveSettings() { try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} }
 function applyPreset(name) {
   const pr = PRESETS[name]; if (!pr) return;
-  for (const k of ['crumbs', 'rubble', 'substeps', 'colors']) { const el = $(SETTINGS[k].el); el.value = pr[k]; el.dispatchEvent(new Event('input')); }
-  const sh = $('d-shadows'); if (sh.checked !== pr.shadows) { sh.checked = pr.shadows; sh.dispatchEvent(new Event('change')); }
-  setting.preset = name; try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {}
+  for (const k of PHYS_KEYS) { const el = $(SETTINGS[k].el); el.value = pr[k]; el.dispatchEvent(new Event('input')); }
+  setting.phys = name; saveSettings();
+}
+function applyGfx(name) {
+  const g = GFX[name]; if (!g) return;
+  const sh = $('d-shadows'); if (sh.checked !== g.shadows) { sh.checked = g.shadows; sh.dispatchEvent(new Event('change')); }
+  renderer.setPixelRatio(Math.min(g.px, window.devicePixelRatio || 1));
+  if (sun.shadow.mapSize.x !== g.map) { sun.shadow.mapSize.set(g.map, g.map); if (sun.shadow.map) { sun.shadow.map.dispose(); sun.shadow.map = null; } }
+  setting.gfx = name; saveSettings();
 }
 function initPreset() {
-  const el = $('s-preset');
   let saved = {}; try { saved = JSON.parse(localStorage.getItem('sf-settings') || '{}'); } catch (e) {}
-  el.value = saved.preset || 'high';
-  if (saved.preset === 'low') applyPreset('low');   // shadows are not a slider: re-apply them
-  el.addEventListener('change', () => { if (el.value) applyPreset(el.value); });
+  // (settings saved before 14 Nov had one preset, "quality", for both)
+  const ph = $('s-phys'), gf = $('s-gfx');
+  const p0 = saved.phys !== undefined ? saved.phys : (saved.preset !== undefined ? saved.preset : 'high');
+  const g0 = saved.gfx !== undefined ? saved.gfx : (saved.preset || 'high');
+  ph.value = PRESETS[p0] ? p0 : ''; setting.phys = ph.value;
+  gf.value = GFX[g0] ? g0 : ''; setting.gfx = gf.value;
+  if (gf.value) applyGfx(gf.value);   // (graphics are not sliders: applied again at start)
+  ph.addEventListener('change', () => { if (ph.value) applyPreset(ph.value); else { setting.phys = ''; saveSettings(); } });
+  gf.addEventListener('change', () => { if (gf.value) applyGfx(gf.value); else { setting.gfx = ''; saveSettings(); } });
   // a slider moved by hand makes it a custom setting
-  for (const k of ['crumbs', 'rubble', 'substeps', 'colors']) $(SETTINGS[k].el).addEventListener('input', (e) => { if (e.isTrusted) { el.value = ''; setting.preset = ''; try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (er) {} } });
+  for (const k of PHYS_KEYS) $(SETTINGS[k].el).addEventListener('input', (e) => { if (e.isTrusted) { ph.value = ''; setting.phys = ''; saveSettings(); } });
+  $('d-shadows').addEventListener('change', (e) => { if (e.isTrusted) { gf.value = ''; setting.gfx = ''; saveSettings(); } });
 }
 function toggleSettings(on) {
   const p = $('settings'); p.hidden = on === undefined ? !p.hidden : !on;
@@ -1371,7 +1466,8 @@ function fireBall() {
   const r = setting.bsize / 2, v = setting.bspeed;
   const c = [cam.position.x + d.x * (r + 0.6), cam.position.y + d.y * (r + 0.6), cam.position.z + d.z * (r + 0.6)];
   if (gpu.roomBodies() < 1 || gpu.roomShapes() < 4) return;
-  gpu.addBodies([{ shapes: ballShapes(c, r), v: [d.x * v, d.y * v, d.z * v], w: [0, 0, 0] }]);
+  const made = gpu.addBodies([{ shapes: ballShapes(c, r), v: [d.x * v, d.y * v, d.z * v], w: [0, 0, 0] }]);
+  for (const b of made || []) { const gb = gpu.bodies[b - 1]; if (gb) gb.ball = true; }   // (a ball is not debris: capDebris)
   lastActive = clock();
   balls++;
   lastBlast = `steel ball ${(2 * r).toFixed(2)} m at ${v} m/s`;
@@ -1469,7 +1565,7 @@ function benchShow(done) {
   lines.push(`${navigator.userAgent}`);
   if (BENCH.dispatchUs != null) lines.push(`one compute dispatch: ${BENCH.dispatchUs} µs`);
   if (window.__gpuInfo) lines.push(`GPU: ${[window.__gpuInfo.vendor, window.__gpuInfo.architecture, window.__gpuInfo.device, window.__gpuInfo.description].filter(Boolean).join(' · ') || 'not told'}`);
-  lines.push(`settings: quality ${setting.preset || 'custom'} · crush depth ${setting.crush} m · crumbs ${setting.crumbs} (${setting.particles ? 'particles' : 'rigid'}) · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
+  lines.push(`settings: physics ${setting.phys || 'custom'}, graphics ${setting.gfx || 'custom'} · debris kept ${debrisMax < Infinity ? debrisMax : 'no limit'} (${debrisCapped} removed over it) · crush depth ${setting.crush} m · crumbs ${setting.crumbs} (${setting.particles ? 'particles' : 'rigid'}) · rubble ${setting.rubble} · sub-steps ${setting.substeps} · colours ${setting.colors}`);
   lines.push(`cut: 36 blasts in ${(BENCH.cutMs / 1000).toFixed(1)} s`);
   lines.push('');
   lines.push('  sim s  wall s   fps  steps/s  GPU ms   broad  bodies*  rubble*  bodies  awake  contacts  particles  p.awake  sub  breaks   dust  roof m  bad poses  vanished  jumps');

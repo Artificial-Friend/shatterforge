@@ -335,10 +335,15 @@ fn paint_storey(s: &mut Storey, k: i32, storeys: i32) {
     }
     // columns on the grid (inside the exterior wall at the perimeter); painted last so they win
     for &gx in &GRID { for &gz in &GRID {
-        let cx = if gx == -HALF { -HALF + 2 } else if gx == HALF { HALF - 7 } else { gx - 2 };
-        let cz = if gz == -HALF { -HALF + 2 } else if gz == HALF { HALF - 7 } else { gz - 2 };
+        // (0.625 m square; the masonry building's brick piers 1.125 m since 14 Nov. Brick is a sixth as stiff as
+        // the concrete core beside it: at 0.625 m the piers of a 5-storey building shortened enough against the core
+        // to load the top floor to 0.68 of its strength under its own weight, 0.50 at 0.875 m; with what a floor
+        // carries and concrete's shear at 3 MPa, 0.79 at 0.875 m and 0.54 at 1.125 m: dyn_tests' standing margins)
+        let w = if s.kind == 1 { 9 } else { 5 };
+        let cx = if gx == -HALF { -HALF + 2 } else if gx == HALF { HALF - 2 - w } else { gx - w / 2 };
+        let cz = if gz == -HALF { -HALF + 2 } else if gz == HALF { HALF - 2 - w } else { gz - w / 2 };
         if gx.abs() == CORE_H && gz.abs() == CORE_H { continue; }   // the core corners are core wall
-        s.fill((cx, cx + 5), (floor, top), (cz, cz + 5), COLUMN);
+        s.fill((cx, cx + w), (floor, top), (cz, cz + w), COLUMN);
     } }
     // the stair: flight A north along x in STAIR_X (8 steps), landing, flight B south in STAIR_X2 (7 steps)
     stair(s, floor);
