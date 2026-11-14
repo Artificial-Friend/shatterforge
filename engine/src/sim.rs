@@ -1457,14 +1457,14 @@ mod tests {
         std::println!("after cutting the perimeter: {} joints failed in {rounds} rounds, biggest falling piece {biggest} bricks, worst ratio now {:.2}", g.failed_total, g.max_ratio);
         assert!(biggest > 300, "the floors above come down");
     }
-    #[test] fn a_building_left_near_its_limit_wears_and_comes_down_over_time() { wears(false); }
-    // Out of the default run since 14 Nov (docs/LAB.md, "The buildings re-sized"): that the worn frame comes down in
-    // several rounds. With what a floor carries and concrete's shear at 3 MPa the frame stands at 0.60; nibbled in
-    // rows of 0.4 m it reaches 0.90 before the next row brings it down at once, and from 0.90 one joint wears
-    // through in 41 s (56 joints crack with it), the rest is relieved, and nothing more goes in the 450 s watched.
-    // Before: from 0.99, failures in checks [1, 5, 47, 59, 121].
-    #[test] #[ignore] fn a_worn_building_comes_down_in_several_rounds() { wears(true); }
-    fn wears(gate: bool) {
+    // One test again since 14 Nov (second commit): that it wears, and that it comes down in several rounds. With
+    // what a floor carries and concrete's shear at 3 MPa the frame stands at 0.60, and the band between "wears" and
+    // "falls at once" is narrow. Nibbled in rows of 0.4 m to 0.90, one joint wore through in 41 s (56 cracked
+    // with it), the rest was relieved and nothing more went in 450 s: failures in checks [82] only, and the
+    // several-rounds gate was out of the default run for a day. Nibbled in rows of 0.1 m to 0.93 (it reaches
+    // 0.97) the wear shows as it should: failures in checks [2, 3, 4 ... 17], 271 joints, 137 cracked.
+    #[test] fn a_building_left_near_its_limit_wears_and_comes_down_over_time() { wears(); }
+    fn wears() {
         // the ground storey taken away row by row (0.7 m blasts at 1.6 m, from one side) until the worst joint is
         // past SUSTAINED but under strength, as a player nibbling at it. Without wear (dt 0) it then stands for
         // ever, unchanged: the "floating" building. With wear (0.5 s between checks) its joints crack over the
@@ -1477,12 +1477,11 @@ mod tests {
                 let mut z = -11.6f32; while z <= 11.7 { g.blast(v3(x, 1.6, z), 0.7); z += 0.8; }
                 let mut n = 1; let mut k = 0; while n > 0 && k < 200 { n = g.structure_step(64); k += 1; }
                 if g.failed_total > 400 { return None; }
-                // (0.90: well into the band where concrete wears, which starts at 0.75. It was 0.75, and with what a
-                // floor carries, 14 Nov, the frame stands at 0.60 and the first row took it to 0.77, where a joint
-                // lasts longer than the 120 s this test watches)
-                if g.max_ratio >= 0.90 { return Some(g); }
+                // (0.93, in rows of 0.1 m: well into the band where concrete wears, which starts at 0.75; see the
+                // note above the test)
+                if g.max_ratio >= 0.93 { return Some(g); }
                 if std::env::var("SF_TR").is_ok() { std::println!("  row {x:.1}: worst {:.3}, {} failed", g.max_ratio, g.failed_total); }
-                x += 0.4;
+                x += 0.1;
             }
             None
         };
@@ -1505,7 +1504,7 @@ mod tests {
             // joint that goes first stands at 0.96 to 0.99, and the wear rule, (r - 0.7)^2 a second, takes it in the
             // second check, 1 s after the cut.)
             assert!(rounds_with[0] >= 1, "kind {kind}: not at once");
-            if gate { assert!(rounds_with.len() >= 4, "kind {kind}: in several rounds, not one"); }
+            assert!(rounds_with.len() >= 4, "kind {kind}: in several rounds, not one");
         }
     }
     #[test] #[ignore] fn explore_failures_far_from_the_cut() {

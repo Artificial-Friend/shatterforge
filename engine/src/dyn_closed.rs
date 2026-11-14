@@ -172,10 +172,17 @@ fn strip() -> (Rig, f64, f64, f64) {
 #[test] fn a_mass_arriving_at_speed_peaks_as_a_mass_dropped() {
     // a concrete block of 4.8 t on the end of a timber strip 7 m long, which hangs level without weight: one mass on
     // one spring, 3 Hz. Its weight let go (a drop from no height) takes it to twice its rest deflection, and the
-    // strip's worst joint to twice its rest force. The block's
-    // weight comes on with the speed of a fall from height h (as a load of m v / step in the first step, which is
-    // how a hit reaches the structure: DYNPLAN stage 5): the strip's end goes down by
-    // delta (1 + sqrt(1 + 2 h / delta)), delta its deflection at rest under the block.
+    // strip's worst joint to twice its rest force (with the structure's damping: 1.8 to 2.0). The block's
+    // weight comes on with the speed of a fall from height h, as a hit in the first step (`Dyn::kicks`, how a hit
+    // reaches the structure: DYNPLAN stage 5): the strip's end goes down by delta (1 + sqrt(1 + k 2 h / delta)),
+    // delta its deflection at rest under the block, k = m / (m + 33/140 m_strip) the share of the block's energy
+    // left once it has brought the strip with it (a cantilever struck at its end; 0.926 here).
+    // Changed on 14 Nov, with the reason: until then the hit went in as a load in a first step that was implicit
+    // Euler, and the step after counted that step's acceleration again: 7/6 of the block's momentum arrived. That
+    // error, the strip's mass left out of the formula (it lowers it by 2 to 3%) and the structure's damping (the
+    // formula has none) cancelled to within 10%. With the hit at its true size the arrival cases are compared
+    // without damping, against the formula with the strip's mass: 3.00 against 3.17 (-5.3%) and 4.11 against 4.48
+    // (-8.3%) at 1/60 s. With the structure's damping the first of them peaks at 2.78, 12% under.
     // (g is 1 m/s^2 here, to stay in the linear range: `DYN_TURN`.)
     let build = || {
         let mut b = Bricks::new();
@@ -193,14 +200,18 @@ fn strip() -> (Rig, f64, f64, f64) {
     for ratio in [0.0, 4.0, 12.0] {
         let drop = 0.5 * ratio * delta;
         let v = (2.0 * g * drop).sqrt();
-        let theory = 1.0 + (1.0 + ratio).sqrt();
+        let keep = w / g / (w / g + 33.0 / 140.0 * beam);
+        let theory = 1.0 + (1.0 + keep * ratio).sqrt();
         for (h, name) in [(H, "1/60"), (H / 4.0, "1/240")] {
             let (mut r, m) = build();
+            r.d.undamped = ratio > 0.0;
             r.step(0.0, 0.0, &[]);
             let (mut peak, mut rmax) = (0.0f64, 0.0f64);
             let mut first = true;
             while r.t < 1.5 {
-                let kick = if first { mass(&r.b, m) as f64 * v / h } else { 0.0 };
+                let kick = 0.0;
+                // (the arrival: the block's momentum at v, as a hit in this one step, the way the game's hits come)
+                if first && v > 0.0 { let c = r.cells.iter().find(|c| c.0[0] == m as i32).unwrap().1; r.d.kicks.push(([c[0] as f64, c[1] as f64, c[2] as f64], [0.0, -(mass(&r.b, m) as f64) * v * crate::structure::KICK_TIME as f64 / h, 0.0], h)); }
                 first = false;
                 let a = r.step(h, 0.0, &[(m, (w + kick) as f32)]);
                 peak = peak.max(-r.of(m)[1]); if !first || kick == 0.0 { rmax = rmax.max(a.max_ratio as f64); }
@@ -303,10 +314,9 @@ fn loaded_strip(m: u8) -> (Rig, u32) { let r = cantilever(m, 8, 4, 2); (r, 7) }
         println!("free steel strip of {total:.0} kg hit in the middle with {:.2} kN s (to leave at {v} m/s), {}: after {:.2} s its {} cells carry {:.3} of the impulse (damping on mass alone would leave {:.3}); it has gone {:.1} mm; the middle led the ends by {:.2} mm at most; {failed} joints failed", j * 1e-3, if undamped { "no damping" } else { "the structure's damping" }, r.t, r.cells.len(), p / j, lost, -r.of(5)[1] * 1e3, lead * 1e3);
         assert_eq!(r.cells.len(), 12);
         assert!(failed == 0 && lead > 0.0);
-        // (37/36 of it: the first step from rest is implicit Euler, which gives that step's force whole, and the
-        // next step counts the same acceleration again as the old one, by 1 - gamma = 1/6: a sixth of one of the
-        // hit's six steps. 2.8% of a hit that wakes a structure at rest, less if it is already moving.)
-        let over = 37.0 / 36.0;
+        // (all of it: 37/36 before 14 Nov, when the step after the first, implicit Euler one counted the first
+        // step's acceleration again by 1 - gamma = 1/6)
+        let over = 1.0;
         if undamped { assert!((p / j - over).abs() < 0.005, "it leaves with the impulse: {}", p / j); }
         else { assert!((p / j - lost * over).abs() < 0.03, "slowed as the damping on mass says: {} against {}", p / j, lost * over); }
     }

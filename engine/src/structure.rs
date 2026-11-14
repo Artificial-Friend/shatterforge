@@ -716,7 +716,12 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
     // cells that their joints hold stiffly, a motion far too fast for the step, and Euler damps all of it. Started
     // with the acceleration the imbalance gives, a = (f - K x) / M, the cell over a lost column, 234 kg let go by
     // 966 kN, left its first step at 4.4 m/s and 56 joints failed round it; it moves 0.2 mm.)
-    let first = dynamic && dy.as_ref().unwrap().vel.is_empty();
+    // (not when the first step is a hit on a structure at rest: nothing is let go, the cells are in balance with no
+    // acceleration, which is the state the step needs, and Euler would take a part of the hit's energy with it.
+    // With Euler there too, and the first step's acceleration kept, a hit on a structure at rest was 37/36 of its
+    // impulse and a hit in one step 7/6: the step after counted the first one's acceleration again by 1 - gamma.
+    // dyn_closed: a_free_strip_hit_in_the_middle_leaves_with_the_impulse, a_mass_arriving_at_speed_peaks_as_a_mass_dropped.)
+    let first = dynamic && dy.as_ref().unwrap().vel.is_empty() && dy.as_ref().unwrap().kicks.is_empty();
     // (the damping: the material's, or none for a test of the step itself)
     let (damp_m, damp_k) = if dy.as_ref().map_or(false, |d| d.undamped) { (0.0, 0.0) } else { (DYN_DAMP, DYN_DAMP_K) };
     // (the step's length: a settling step is `DYN_SETTLE_H`)
@@ -963,7 +968,10 @@ pub fn analyse_dyn(b: &Bricks, set: &[u32], load: &[f32], point: &[(u32, f32, f3
             if s2 > d.speed * d.speed { d.speed = sqrt64(s2); }
             d.kinetic_lin += 0.5 * m6[k][0] * s2;
             d.kinetic += 0.5 * m6[k][0] * s2 + 0.5 * (m6[k][3] * v[3] * v[3] + m6[k][4] * v[4] * v[4] + m6[k][5] * v[5] * v[5]);
-            vel.insert(key(k), v); acc.insert(key(k), a);
+            // (after a first step that was implicit Euler no acceleration is kept: Euler has given the step's force
+            // whole, and the next step, taking this one's acceleration as the old one, would give 1 - gamma = 1/6
+            // of it again)
+            vel.insert(key(k), v); acc.insert(key(k), if first { [0.0; 6] } else { a });
         } }
         let mass: f64 = (0..n).map(|k| m6[k][0]).sum();
         d.rms = if mass > 0.0 { sqrt64(d.kinetic_lin * 2.0 / mass) } else { 0.0 };
