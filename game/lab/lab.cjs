@@ -41,6 +41,7 @@ const names = args.length ? args.flatMap(a => a.startsWith('=') ? [a.slice(1)] :
     await p.addInitScript((d) => { if (d) window.__shots = d.split(',').map(Number); }, process.env.SF_SHOTS || '');
     await p.addInitScript((d) => { if (d) window.__shotView = d.split(',').map(Number); }, process.env.SF_SHOT_VIEW || '');
     await p.addInitScript((d) => { if (d) window.__pinch = true; }, !!process.env.SF_PINCH);
+    await p.addInitScript((d) => { if (d) window.__noPinch = true; }, !!process.env.SF_NOPINCH);
     // (SF_NOBOUND: the solver without the velocity bound and the pinch test, as before 14 Nov: docs/GPU.md)
     await p.addInitScript((d) => { if (d) window.__noBound = true; }, !!process.env.SF_NOBOUND);
     await p.addInitScript((d) => { if (d) window.__oldMasonry = true; }, !!process.env.SF_OLD_MASONRY);

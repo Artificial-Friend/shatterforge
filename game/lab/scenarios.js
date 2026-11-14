@@ -3,7 +3,7 @@ const LAB_SCENARIOS = {
   collapse: { kind: 0, storeys: 4, frames: 600, title: 'concrete frame, 4 storeys: the ground storey cut, collapse, settle', script: [[0, 'cut']], expect: { roofDrop: 2, settle: true } },
   ball: { kind: 0, storeys: 3, frames: 360, title: 'concrete frame, 3 storeys: two steel balls into the facade', script: [[10, 'ball', [-4, 4, -30, 0.15, 0.02]], [130, 'ball', [3, 2.5, -30, -0.1, 0.0]]], expect: {} },
   masonry: { kind: 1, storeys: 3, frames: 600, title: 'masonry, 3 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
-  timber: { kind: 2, storeys: 3, frames: 600, title: 'mass timber, 3 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
+  timber: { kind: 2, storeys: 3, frames: 600, title: 'mass timber, 3 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, roofDropMax: 6, settle: true } },   // (at most 6 m: the cut storey is 3.75 m, and the timber walls above crush some as they land; before the pinch test's fault of 14 Nov, 3.23 m)
   mixed: { kind: 3, storeys: 5, frames: 600, title: 'mixed (brick, steel, concrete, timber), 5 storeys: the ground storey cut', script: [[0, 'cut']], expect: { roofDrop: 3, settle: true } },
   // the mixed building's ground storey eaten away with the 0.7 m tool, as a player does: the west wall shot through
   // spot by spot, then the west halves of the south and north fronts. It must crack and give way progressively

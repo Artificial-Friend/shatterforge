@@ -206,12 +206,13 @@ A light piece pressed by a body at least 20 times heavier is crushed on the GPU 
 
 GPU test `crush`: a 7,700 t block landing on 24 pieces of 11 t crushes all 24 and comes down to the ground; a piece rammed from the side by a 600 t block is not crushed. In the lab's collapse (150 frames), launches went from 14 to 1 and bounces from 11 to 7.
 
-**Pinching (tried, off by default; `GpuWorld.pinching = true`).** The crush test looks at one contact at a time and needs an approach of 1 m/s. A piece pressed between two bodies, or between a body and the ground, at almost no approach speed is never crushed by it. In the lab collapse a 49 kg piece took 76,000 N s in one step between the ground and a 773 kg body, spun at 30 rad/s, then flew up at 7 m/s.
+**Pinching (on by default since 14 November, with the velocity bound; `GpuWorld.pinching = false` turns it off).** The crush test looks at one contact at a time and needs an approach of 1 m/s. A piece pressed between two bodies, or between a body and the ground, at almost no approach speed is never crushed by it. In the lab collapse a 49 kg piece took 76,000 N s in one step between the ground and a 773 kg body, spun at 30 rad/s, then flew up at 7 m/s.
 
 Kernels `pinch_acc` and `pinch` sum each body's normal impulses as vectors and as magnitudes (fixed point, so in any order); the part that cancels is the squeeze. A piece is crushed when:
 - it is at least 20 times lighter than what squeezes it (the static world counts as infinitely heavy);
 - the squeeze is more than 3 m/s of its own momentum;
-- the squeeze over the step, over its largest contact patch, passes the crushing strength.
+- the squeeze over the step, over all its contact patches (the largest one alone until 14 November), passes the crushing strength;
+- something that moves and is at least twice its mass is among what presses it (14 November: the static world is the anvil, something has to be the hammer). Without that, the day the test went on by default, lab `timber` lost its whole upper building: one body of 7,500 boxes, wedged on the stumps it was cut from and pushed from all sides by them and by the cut's crumbs, read as squeezed and was crushed to 29,277 crumbs 0.3 s into its fall; the roof went from 15 m to 1.5. The scenario now has an upper limit on its roof's fall (6 m) beside the lower one, which alone took that for a pass.
 
 GPU test `pinch` turns it on and passes, but it passes with it off too, because the crush test crushes those pieces once the block reaches them. In the lab collapse (150 frames, seeds 0 / 7 / 8, before shock propagation): rebounds 13 / 26 / 16 → 12 / 11 / 15, launches 7 / 6 / 8 → 4 / 2 / 2, but one energy gain in each run (0 before). With shock propagation: rebounds 10 / 6 / 11 → 9 / 17 / 16, launches 5 / 2 / 0 → 3 / 1 / 0. Three runs do not tell it apart from luck, and it adds energy gains on its own, so it stays off.
 

@@ -1520,17 +1520,18 @@ const CRUSH_MPA = array<f32, 8>(30.0, 10.0, 250.0, 50.0, 8.0, 1.0, 1e9, 10.0);
 // moving body sums the normal impulses on it as vectors and as magnitudes (fixed point: the same sums in any
 // order); the part that cancels is the squeeze. A piece is crushed when it is light against what squeezes it
 // (P.crush_ratio, the static world counting as infinitely heavy), the squeeze is more than P.crush_dv of its
-// own momentum, and the stress, the squeeze over the step over the largest contact patch, passes the weakest
+// own momentum, and the stress, the squeeze over the step over all its contact patches, passes the weakest
 // crushing strength among its shapes in those contacts.
 // Per body (8 words): sum of impulse vectors (3 x i32, 1/16 N s), sum of magnitudes (u32, 1/16 N s), heaviest
-// partner's mass (f32 bits, max), largest patch radius (f32 bits, max), 1 / crushing strength (f32 bits, max).
+// partner's mass (f32 bits, max), the contact patches' area (u32, cm2, summed), 1 / crushing strength (f32 bits,
+// max), the heaviest moving partner's mass (f32 bits, max).
 const PINCH_FX = 16.0;
-fn pinch_add(i: u32, n: vec3f, j: f32, heavy: f32, rad: f32, mat: u32) {
+fn pinch_add(i: u32, n: vec3f, j: f32, heavy: f32, rad: f32, mat: u32, mover: f32) {
   let o = P.o_pinch + i * 8u; let jj = n * j * PINCH_FX;
   atomicAdd(&ints[o], bitcast<u32>(i32(round(jj.x)))); atomicAdd(&ints[o + 1u], bitcast<u32>(i32(round(jj.y))));
   atomicAdd(&ints[o + 2u], bitcast<u32>(i32(round(jj.z)))); atomicAdd(&ints[o + 3u], u32(round(j * PINCH_FX)));
-  atomicMax(&ints[o + 4u], bitcast<u32>(heavy)); atomicMax(&ints[o + 5u], bitcast<u32>(rad));
-  atomicMax(&ints[o + 6u], bitcast<u32>(1.0 / CRUSH_MPA[min(mat, 7u)]));
+  atomicMax(&ints[o + 4u], bitcast<u32>(heavy)); atomicAdd(&ints[o + 5u], u32(round(min(3.14159 * rad * rad, 100.0) * 10000.0)));
+  atomicMax(&ints[o + 6u], bitcast<u32>(1.0 / CRUSH_MPA[min(mat, 7u)])); atomicMax(&ints[o + 7u], bitcast<u32>(mover));
 }
 @compute @workgroup_size(64) fn pinch_acc(@builtin(global_invocation_id) g: vec3u) {
   let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
@@ -1542,8 +1543,9 @@ fn pinch_add(i: u32, n: vec3f, j: f32, heavy: f32, rad: f32, mat: u32) {
   // (mass of each side: the static world and sleeping bodies as infinitely heavy)
   let ma = select(3e38, 1.0 / max(B(a, F_P).w, 1e-30), moving(a)); let mb = select(3e38, 1.0 / max(B(b, F_P).w, 1e-30), moving(b));
   // (the normal points from a to b: the impulse pushes b along it and a against it)
-  if (moving(b) && !crushed(b)) { pinch_add(b, n, j, ma, rad, u32(Hs(u32(cold[m * CS + 5u].w), H_ID).y)); }
-  if (moving(a) && !crushed(a)) { pinch_add(a, -n, j, mb, rad, u32(Hs(u32(cold[m * CS + 4u].w), H_ID).y)); }
+  // (and the heaviest of them that moves: the static world is the anvil, something has to be the hammer)
+  if (moving(b) && !crushed(b)) { pinch_add(b, n, j, ma, rad, u32(Hs(u32(cold[m * CS + 5u].w), H_ID).y), select(0.0, ma, moving(a))); }
+  if (moving(a) && !crushed(a)) { pinch_add(a, -n, j, mb, rad, u32(Hs(u32(cold[m * CS + 4u].w), H_ID).y), select(0.0, mb, moving(b))); }
 }
 @compute @workgroup_size(64) fn pinch(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i == 0u || i >= P.n1 || !moving(i) || crushed(i)) { return; }
@@ -1553,9 +1555,15 @@ fn pinch_add(i: u32, n: vec3f, j: f32, heavy: f32, rad: f32, mat: u32) {
   let squeeze = 0.5 * max(tot - length(net), 0.0);
   let im = B(i, F_P).w;
   if (bitcast<f32>(ld(o + 4u)) * im < P.crush_ratio) { return; }
+  // (pressed by something that moves and is at least twice its mass. With the static world alone counting, a
+  // whole building wedged on the stumps it was cut from, pushed from all sides by them and by the crumbs of the
+  // cut, read as squeezed: lab timber, 14 Nov, the upper storeys, one body of 7,500 boxes, crushed to 29,277
+  // crumbs 0.3 s into their fall, the roof from 15 m to 1.5.)
+  if (bitcast<f32>(ld(o + 7u)) * im < 2.0) { return; }
   if (squeeze * im < P.crush_dv) { return; }
-  let rad = bitcast<f32>(ld(o + 5u));
-  if (squeeze / P.dt / (3.14159 * rad * rad) * bitcast<f32>(ld(o + 6u)) < 1e6) { return; }
+  // (over all its contact patches, added up, not the largest one alone)
+  let area = max(f32(ld(o + 5u)) * 1e-4, 0.0078);
+  if (squeeze / P.dt / area * bitcast<f32>(ld(o + 6u)) < 1e6) { return; }
   if (atomicExchange(&ints[P.o_crushed + i], 1u) != 0u) { return; }
   let v = S(i, S_V).xyz; crush_stop(i);
   let k = atomicAdd(&ints[C_NCRUSH], 1u); if (k >= MAX_CRUSH) { return; }

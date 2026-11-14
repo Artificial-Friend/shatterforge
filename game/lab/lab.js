@@ -381,6 +381,10 @@ function labReport(wallS) {
     checks.push({ name: 'removed past the clean-up distance (bodies + particles)', value: (L.farBodies || 0) + (L.farParts || 0), limit: '>= 1', pass: (L.farBodies || 0) + (L.farParts || 0) >= 1, what: 'the clean-up distance works' });
     checks.push({ name: 'farthest past the clean-up distance, still in the world (m)', value: +(L.farOver || 0).toFixed(2), limit: 1, pass: (L.farOver || 0) <= 1, what: 'nothing stays far out' });
   }
+  // (and no further than the scenario says: the building comes down by its cut storey, it does not turn to crumbs.
+  // Lab timber, 14 Nov: the pinch test crushed the whole upper building, one body, 0.3 s into its fall; the roof
+  // fell 13.5 m of 15, which the lower limit alone took for a pass.)
+  if (S.expect && S.expect.roofDropMax) checks.push({ name: 'roof fall, at most (m)', value: +(roof0 - (last.roof || 0)).toFixed(2), limit: `<= ${S.expect.roofDropMax}`, pass: roof0 - (last.roof || 0) <= S.expect.roofDropMax, what: 'the upper storeys come down as a building, not as dust' });
   if (S.expect && S.expect.roofDrop) checks.push({ name: 'roof fall (m)', value: +(roof0 - (last.roof || 0)).toFixed(2), limit: `>= ${S.expect.roofDrop}`, pass: roof0 - (last.roof || 0) >= S.expect.roofDrop, what: 'the cut storey brings the building down' });
   // (a building left alone stands: nothing of it fails, its roof stays where it is)
   if (S.expect && S.expect.stand) checks.push({ name: 'joints failed with nothing done to it', value: failedJoints, limit: 0, pass: failedJoints === 0, what: 'a building left alone stands' });
@@ -460,6 +464,7 @@ async function labRun() {
   setting.adaptive = 0; gpu.substeps = setting.substeps;
   Math.random = seededRandom(window.__seed || 20261104);   // (SF_SEED: another run of the same scenario, to tell a trend from one run's luck)
   if (window.__pinch && gpu) gpu.pinching = true;
+  if (window.__noPinch && gpu) gpu.pinching = false;
   if (window.__noBound && gpu) { gpu.velocityBound = false; gpu.pinching = false; }   // (as before 14 Nov: neither the bound nor the pinch test)
   if (window.__oldMasonry) E.set_param(6, 1);   // (SF_OLD_MASONRY: masonry in falling parts parts at once, for comparison)   // (SF_PINCH: crushing of pinched pieces, off by default)
   fly = true; E.player_set(-20, 8, -30); yaw = Math.PI + 0.62; pitch = -0.12;
