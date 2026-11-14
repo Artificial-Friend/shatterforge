@@ -161,7 +161,16 @@ function labFrameChecks() {
       const j = prev.map.get(key);
       if (j !== undefined) {
         const dx = d.pos[k * 3] - prev.pos[j * 3], dy = d.pos[k * 3 + 1] - prev.pos[j * 3 + 1], dz = d.pos[k * 3 + 2] - prev.pos[j * 3 + 2];
-        const m = Math.hypot(dx, dy, dz), lim = 0.25 + 2 * Math.max(d.bound[k], prev.bound[j]) / 60;
+        const m = Math.hypot(dx, dy, dz); let lim = 0.25 + 2 * Math.max(d.bound[k], prev.bound[j]) / 60;
+        // (a particle is carried by a body that lands on it: it goes at the body's speed while pushed, and its own
+        // velocity, read before and after, is that of rest. The speed that counts is then the fastest shape's
+        // within 3 m (a brick is at most 2 m), over the 3 steps a read-back can span. Lab collapse, frame 52: the
+        // upper storeys land at 8.5 m/s on crumbs lying since the cut, which go down 0.25 to 0.28 m to the
+        // ground, with speed 0 before and after: 4 "jumps" against a limit of 0.25 m.)
+        if (m > lim && key < 0) {
+          let vn = 0; for (let q = 0; q < d.n; q++) { if (d.keys[q] < 0 || d.bound[q] <= vn) continue; if (Math.hypot(d.pos[q * 3] - d.pos[k * 3], d.pos[q * 3 + 1] - d.pos[k * 3 + 1], d.pos[q * 3 + 2] - d.pos[k * 3 + 2]) < 3) vn = d.bound[q]; }
+          lim = Math.max(lim, 0.25 + 3 * vn / 60);
+        }
         if (m > lim) { L.teleports++; const sh = key >= 0 ? gpu.shapes[(key % 1048576) - 1] : null, gb = sh ? gpu.bodies[sh.body - 1] : null; labEvent('teleport', f, { key, moved_m: +m.toFixed(2), limit_m: +lim.toFixed(2), speed_was: +prev.bound[j].toFixed(2), speed_now: +d.bound[k].toFixed(2), part: key < 0 ? (() => { const pi = (-key - 1) % 1048576, inf = pInfo[pi]; let best = null, bd = 1e9; for (let q = 0; q < d.n; q++) { if (d.keys[q] < 0) continue; const dd = Math.hypot(d.pos[q * 3] - d.pos[k * 3], d.pos[q * 3 + 1] - d.pos[k * 3 + 1], d.pos[q * 3 + 2] - d.pos[k * 3 + 2]); if (dd < bd) { bd = dd; best = q; } } const sh = best !== null ? gpu.shapes[(d.keys[best] % 1048576) - 1] : null, gb = sh ? gpu.bodies[sh.body - 1] : null; const pd = snapCur && snapCur.parts ? snapCur.parts.data : null; return inf ? { made: inf.labF, why: inf.labWhy, v0: inf.labV, h: inf.h, state: pd ? pd[pi * 12 + 10] : null, v: pd ? [pd[pi * 12 + 3], pd[pi * 12 + 4], pd[pi * 12 + 5]].map(x => +x.toFixed(2)) : null, nearest_shape_m: +bd.toFixed(2), nearest_speed: best !== null ? +d.bound[best].toFixed(2) : null, nearest_body: sh ? sh.body : null, nearest_size: gb && gb.labH, nearest_made: gb && gb.labF, nearest_at: best !== null ? [d.pos[best * 3], d.pos[best * 3 + 1], d.pos[best * 3 + 2]].map(x => +x.toFixed(2)) : null } : null; })() : undefined, body: sh ? sh.body : null, made: gb && gb.labF, size: gb && gb.labH, from: [prev.pos[j * 3], prev.pos[j * 3 + 1], prev.pos[j * 3 + 2]].map(v => +v.toFixed(2)), to: [d.pos[k * 3], d.pos[k * 3 + 1], d.pos[k * 3 + 2]].map(v => +v.toFixed(2)) }); }
       } else {
         const gone = L.goneAt.get(key);
