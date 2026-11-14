@@ -33,9 +33,9 @@ middle across its length with 0.94 kN s (to leave at 0.5 m/s), stepped 0.22 s at
 
 | | No damping | The structure's damping |
 | --- | --- | --- |
-| Share of the impulse the strip carries after 0.22 s | 1.028 | 0.871 |
-| Expected | 1 (the step gives 37/36 = 1.028, below) | 0.846 × 37/36 = 0.870 |
-| Distance gone | 85.5 mm | 78.5 mm |
+| Share of the impulse the strip carries after 0.22 s | 1.000 (1.028 before the fix below) | 0.848 (0.871) |
+| Expected | 1 | 0.846 |
+| Distance gone | 82.9 mm | 76.2 mm |
 | The middle ahead of the ends, at most | 0.38 mm | 0.38 mm |
 | Joints failed | 0 | 0 |
 
@@ -43,7 +43,8 @@ What this says:
 
 1. **The step carries a free body.** The same network, the same joints, the same solver; the piece leaves with
    the impulse and its middle goes first (it bends, elastically at this size of hit).
-2. **Three things in the step are wrong for a piece in flight**, each found by this test:
+2. **Two things in the step are wrong for a piece in flight, and one was**, each found by this test (they are
+   stage 1 below: `Dyn::free` is not used by the game, so nothing in the game is affected yet):
    - *Damping on mass slows flight.* Rayleigh damping (`DYN_DAMP` = 1 /s) acts on a cell's whole velocity: a
      piece loses 13% of its speed in 0.17 s. For a standing structure the whole velocity is the vibration; for
      a piece it must be the velocity *within* the piece.
@@ -52,10 +53,10 @@ What this says:
    - *Displacements are measured from where the piece was built.* The springs are small-turn springs and the
      leaving rule ends at 0.25 m and 0.03 rad: a free piece can be followed for a few centimetres of flight and
      no tumbling. The test stops at 86 mm for that reason.
-3. **A hit on a structure at rest is 2.8% too strong** (37/36): the first step from rest is implicit Euler,
-   which gives that step's force whole, and the next step counts the same acceleration again as the "old" one
-   by 1 − γ = 1/6. A sixth of one of a hit's six steps. Small, known, and it applies to the standing structure's
-   hits as well; the test holds the step to that number so that a change shows.
+3. **A hit on a structure at rest was 2.8% too strong** (37/36): the first step from rest is implicit Euler,
+   which gives that step's force whole, and the next step counted the same acceleration again as the "old" one
+   by 1 − γ = 1/6. Fixed the same day: no acceleration is kept after the first step. The strip now carries 1.000
+   of its impulse (0.848 with the structure's damping, 0.846 expected), and the test holds the step to that.
 
 ## The options
 
@@ -109,7 +110,7 @@ whose gate fails stops the plan there, with the result written down.
 mass-weighted) is taken out before the step and put back after; the network sees only the deformation.
 Damping acts on the velocity within the piece. Displacements are measured from the piece's own pose, so
 flight and tumbling of any length cost nothing and the leaving rule does not apply.
-- Gate a: the free strip keeps its impulse to 0.5% with the structure's damping on (0.871 today).
+- Gate a: the free strip keeps its impulse to 0.5% with the structure's damping on (0.848 today).
 - Gate b: hit off-centre, linear *and* angular momentum to 1% (J and J × r).
 - Gate c: the first free-free bending period of the strip against 2π / (4.730² √(E I / (ρ A L⁴))), within 5%
   (the cantilever's period is within that today, `dyn_closed`).

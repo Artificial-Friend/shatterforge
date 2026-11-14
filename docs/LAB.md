@@ -790,3 +790,70 @@ A collapse makes a few big bodies first (the storeys above the cut) and thousand
 
 - **Every failed check in this table is a falling pieces' check** (rebounds, launches, crumbling, drawing lag, settling): the part of the engine this day did not touch, and where docs/DYNPLAN.md stage 7 and docs/DEFORM.md point. The structure's own checks (nothing fails standing, the cut buildings come down, the shot column and keystone are carried) pass in every scenario.
 - `collapse`'s 12 energy gains are one body: the 719 m³ upper part of the frame (1,084 boxes), lying at 9.35 m, starting to move at 0.01 to 0.02 m/s from frame 305. Not traced further.
+
+## 14 November, second part: the leftovers of the morning, the menu, engine and game apart
+
+Asked for, after the first part: the problems listed as left over are to be fixed, not listed; the menu on Esc with a level reset; a window each for graphics and physics with their advanced parameters; engine and game in separate directories (README.md has the layout; the move changed no behaviour: the lab's collapse over 150 frames was the same before and after in every number but the timings).
+
+### What was left over, and what became of each
+
+| Left over in the first part | Now |
+| --- | --- |
+| A hit on a structure at rest 2.8% too strong | **Fixed.** A first step that is a hit is no longer implicit Euler (nothing is let go, so there is nothing for Euler to damp), and after an Euler first step no acceleration is kept. The free strip carries 1.000 of its impulse (1.028). `dyn_closed::a_mass_arriving_at_speed_peaks_as_a_mass_dropped` had passed with the error's help: a hit in one step was 7/6 of its size, which made up for the strip's mass (left out of the formula) and the structure's damping (the formula has none). It now compares the arrival cases without damping against the formula with the strip's mass: 3.00 against 3.17 (−5.3%) and 4.11 against 4.48 (−8.3%), limit 10% as before. With the structure's damping the first peaks at 2.78, 12% under: that is the damping, and the test says so. |
+| "A worn building comes down in several rounds" out of the default run | **Back in, one test.** Nibbled in rows of 0.1 m to 0.93 (it reaches 0.97), wear shows as it should: failures in checks 2, 3, 4 … 17, 271 joints, 137 cracked. In rows of 0.4 m the band between "wears" and "falls at once" was stepped over. |
+| Rebounds, launches and energy gains in every collapse | **The velocity bound** (docs/GPU.md): a step cannot leave a body faster, or going up faster, than its contacts can have made it. With it the pinch test, tried on 9 November and left off as "not told apart from luck", is on: pieces that stay squeezed (they used to be thrown out) are crushed by the stress on them. Numbers below. |
+| 2 frames drawn below what exists in `collapse`, more elsewhere | **Fixed: a wrong shape for a frame or two.** A read-back took each shape's kind (box, or which convex chunk) from the slot as it was when the read *arrived*; a slot given to another piece meanwhile was drawn with the old pose and size as the new kind. The read-back now carries the kind (`readPose`: `hulls`, `balls`). Found with the lab's new body-by-body diff of what is drawn (`labDrawDiff`). |
+| The split gate failing when the machine is busy | **Fixed:** it times the thread's own processor time (0.11 ms p99 with the lab running beside it; by the wall, over 1 ms three times in a row). |
+| The three faults found for a piece stepped free (damping in flight, displacements from where it was built, no rest to place new cells at) | **Not a fault of anything in the game:** `Dyn::free` is not used by it. They are stage 1 of docs/DEFORM.md, the next task, and stay there. |
+| The presets' numbers are choices, not measurements | **Unchanged, and it cannot change here:** no real GPU has run this build. The benchmark names both presets in its report so that a run on your machine settles it. |
+
+### Three limits of the lab changed, each in its own commit, each for a physical reason (rule 3)
+
+- **"Pieces moving further than their speed allows", for particles.** The limit took the particle's own speed, read before and after. A crumb that a body lands on is carried at the body's speed while it is pushed, and reads as at rest both times. The speed that counts for a particle is now also the fastest shape's within 3 m, over the 3 steps a read-back can span. `collapse`, frame 52: the upper storeys land at 8.5 m/s on crumbs lying since the cut, which go 0.25 to 0.28 m down to the ground: 4 "jumps" against 0.25 m.
+- **"Energy gains over 5%".** The check allowed 5% of the kinetic energy and 2 kJ, whatever the body. The solver holds a resting body's place to millimetres, and for the upper part of a collapsed frame, 1,673 t, 1.2 mm of height is 20 kJ: "20,193 J gained from 1 J" at frame 579 of `collapse`, the part lying still on its heap (and the 12 gains of the first part: the 1,563 t part rising 5 mm in 17 frames). Each body's gain now counts beyond its weight over 2 mm. For a 50 kg piece that is 1 J: a launch is still a launch.
+- **"Settled".** It wanted everything asleep at the end. The remains of a structure wear under the heap lying on them and give way later: in `collapse` every body was asleep from 7.8 s, and at 8.6, 9.0 and 9.9 s joints wore through (2, 1 and 2) and woke the heap, 0.1 s before the run ends. The check now also passes when every body had been asleep within 2 s before the structure lost joints in the run's last second, and its value says so. A heap awake at the end with no such cause still fails.
+
+### The velocity bound, with and without (240 frames, seeds 0 / 7 / 8, software GPU)
+
+docs/GPU.md, "The velocity bound", has the rule and the full table. Over the six pairs of runs (`collapse` and `masonry`, three seeds, the bound and the pinch test against neither): rebounds over half the impact speed 18 → 3, pieces thrown up faster than 5 m/s 8 → 0, the worst crumbled share of a big part 0.29 → 0.12.
+
+### Every scenario on this build, against the morning's (software GPU, full length, 14 November)
+
+`tools/check.sh lab` and then each scenario by name; docs/STATUS.md has the rows. Engine 99 passed (98 engine, 1 demo), 14 ignored; GPU suite 41 of 41; page checks `rest`, `debris`, `view`, `settings` pass; `collapse` over 150 frames the same twice.
+
+Added up over the 16 scenarios:
+
+| Check | Morning | Now | |
+| --- | --- | --- | --- |
+| Frames drawn below what exists | 34 | **0** | the shape's kind carried in the read-back |
+| Frames drawn above what exists | 40 | **1** | the same (the one left: `debriscap`, a crumb the budget removed, drawn until the next read-back) |
+| Rebounds over half the impact speed | 121 | **33** | the velocity bound and the pinch test |
+| Pieces thrown up faster than 5 m/s | 21 | **2** | the same |
+| Energy gains | 15 | 2 | the bound; and the limit (a body's weight over 2 mm) |
+| Pieces moving further than their speed allows | 68 | 31 | the bound (the distance gone in a step); and the limit (a crumb carried by a body) |
+| Scenarios not settled by their end | 5 | 6 | below |
+| Scenarios failing at least one check | 9 | 10 | `ball` passed in the morning and fails now on one crumb |
+
+Scenario by scenario (what fails; nothing listed means it passes):
+
+| Scenario | Morning | Now |
+| --- | --- | --- |
+| `collapse` | 2 below, 4 jumps, 12 energy gains | 1 rebound (−2.0 → +1.02 m/s, a 25-box piece); not settled: 10 bodies of 375 still awake at 10 s (48 at 7 s, 23 at 9 s) |
+| `ball` | – | 1 jump: a crumb at rest 0.27 m lower a frame later |
+| `masonry` | 2 above, 7 jumps, 9 rebounds, 3 launches, 1 energy gain, not settled | 5 jumps (crumbs); not settled |
+| `mixed` | 6 below, 6 jumps, 17 rebounds, 3 launches, not settled | 7 jumps, 9 rebounds, not settled |
+| `timber` | 2 below, 4 jumps, 7 rebounds, not settled | 4 jumps, 1 rebound, 1 energy gain, not settled; roof fall 2.94 m against "at least 3" (3.23 in the morning) |
+| `complex` | 4 below, 1 jump, crumbled 0.80, 14 rebounds, 1 launch, not settled | 5 jumps, crumbled 0.69, 3 rebounds, 1 energy gain, not settled |
+| `city` | 7 below, 20 above, 28 jumps, crumbled 0.92, 19 rebounds, 6 launches, 1 energy gain, not settled | 6 jumps, crumbled 0.88, 9 rebounds, 2 launches, not settled |
+| `nibble` | 12 below, 14 above, 14 jumps, 45 rebounds, 7 launches, 1 energy gain | 2 jumps |
+| `tallball` | 2 jumps | 1 jump |
+| `debriscap` | 1 below, 4 above, 2 jumps, 10 rebounds, 1 launch | 1 above, 10 rebounds |
+| `complexstand`, `complexcol`, `complexroom`, `keystone`, `far`, `citystand` | pass | pass |
+
+**What is still open, plainly** (each is in docs/GPU.md, "Still to do", or below):
+- **Crumbs that hop.** Two to seven crumbs a collapse (of 20,000) are drawn 0.3 to 0.5 m from where they were a frame before, with a velocity that does not say so. It is every "jump" left in the table. The same with and without today's changes. Tried: the separation limit per particle and not per shape; taken back out when GPU test `particles` left a particle inside a body. Not found.
+- **Rebounds: 33 where there were 121**, not none. `mixed` and `city` have 9 each, `debriscap` 10 (at a budget of 1,000 crumbs do not stay to bed the pieces: the morning's note). The three looked at in `masonry` over three seeds: one is a part broken off a tumbling piece, which leaves with the spin's motion at its own centre; two are pieces of 6 and 10 boxes, not traced.
+- **Settling.** Six collapses still have bodies awake at 10 s. In `collapse` it is a tail that is still falling (48 → 23 → 10 bodies awake at 7, 9, 10 s), not a heap that jitters; whether the others are the same was not measured (a run to 20 s takes 40 minutes on this GPU, and was not made).
+- **`timber`'s roof falls 2.94 m, against a lower limit of 3** (3.23 in the morning): the pieces under the upper storeys are no longer thrown out from under them. Not changed: the limit is one number, and one run.
+- **Crumbled share**, `complex` 0.69 and `city` 0.88: the part that breaks at frame 77 of `complex` is 66 m³, 13% of it masonry, and 69% of the rest goes to crumbs. What the rest is made of (the building has a timber roof, a steel frame and concrete floors) was not looked at; the lab now records the masonry share of every big break, and the other materials are the next thing to record. By the page's rule a loose brick of 0.5 m or less is a particle, so a part built of small bricks crumbles by that rule alone. Not settled.
+- **The presets' numbers** are still choices: no real GPU has run this build.
