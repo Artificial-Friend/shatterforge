@@ -4,7 +4,7 @@
 
 The first of the 12 tower storeys is the lobby; the roof carries a stair penthouse. There are 2,244 bricks and 6,809 joints. They take 84.7 B per brick as records and joints, and 91.3 B per brick including the spatial index. The tower builds in about 55 ms natively.
 
-## The tower (`engine/src/tower.rs`)
+## The tower (`game/src/tower.rs`)
 
 The tower follows the SPEC scale standard.
 
@@ -37,7 +37,7 @@ The mesh is each brick face minus the parts covered by touching neighbours. This
 
 The tower is 10,732 quads, meshed per storey. A blast remeshes only the storeys it touched: a 0.6 m blast in a slab took 0.4 ms natively, including the refine.
 
-## Walker (`engine/src/player.rs`)
+## Walker (`game/src/player.rs`)
 
 The walker is a 0.6 × 1.8 m body with gravity and a 0.35 m step-up.
 
@@ -48,7 +48,7 @@ Later (phase 2, 9 November):
 - Debris that moves into the player does not trap it.
 - The player jumps out of debris it stands in. Going up, what it is already in does not stop it; only what it newly meets above does. In a heap 0.4 m deep, the jump used to reach only the heap's top, 0.40 m; it now rises 0.86 m, as on open ground. A slab over its head still stops it (`jumps_out_of_debris_it_stands_in`).
 
-## Blasts (`engine/src/game.rs`)
+## Blasts (`engine/src/sim.rs`)
 
 A blast works in four steps:
 
@@ -59,7 +59,7 @@ A blast works in four steps:
    - static shapes to set or remove in the GPU world
    - new bodies, each with its boxes
 
-## Playground (`dist/tower.html`, built by `game/build_tower.py`)
+## Playground (`dist/tower.html`, built by `game/build.py`)
 
 - **World:** the tower at 1:1 scale, with shadows, a walk mode and a fly mode.
 - **Blasting:** click to blast at the crosshair.
@@ -75,7 +75,7 @@ GPU engine changes:
 
 ## Collapse under load and breaking on impact
 
-### Standing structure (`structure::analyse`, `Game::structure_step`)
+### Standing structure (`structure::analyse`, `Sim::structure_step`)
 
 After a blast, the page runs one structural round per frame until nothing more fails.
 
@@ -97,7 +97,7 @@ After a blast, the page runs one structural round per frame until nothing more f
 
 One round over the whole tower takes about 60 ms native and 90–190 ms in wasm.
 
-### Impacts (`Game::impacts`)
+### Impacts (`Sim::impacts`)
 
 Every frame, the page sends the engine the GPU's hard contacts, from both sides of each contact: up to 32 per falling piece and 96 for the standing structure. Each contact is passed in the tower frame with its point, the direction it pushes the body, its impulse J, its approach speed v and the material on the other side.
 

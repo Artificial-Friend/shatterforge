@@ -2,7 +2,7 @@
 // Usage: node bench/node_bench.mjs [path/to/sf_engine.wasm]
 import { readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
-const path = process.argv[2] || new URL('../engine/target/wasm32-unknown-unknown/release/sf_engine.wasm', import.meta.url);
+const path = process.argv[2] || new URL('../../target/wasm32-unknown-unknown/release/sf_demo.wasm', import.meta.url);
 const { instance } = await WebAssembly.instantiate(readFileSync(path), {});
 const e = instance.exports;
 const pct = (a, p) => { const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor(s.length * p))]; };

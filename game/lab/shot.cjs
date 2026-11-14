@@ -4,7 +4,7 @@ const NM = process.env.SF_NODE_MODULES;
 const { chromium } = require('playwright');
 const [kind, out, wait, ev] = process.argv.slice(2);
 (async () => {
-  const page0 = fs.readFileSync('/home/claude/shatterforge/dist/tower.html', 'utf8');
+  const page0 = fs.readFileSync(path.join(__dirname, '..', '..', 'dist/tower.html'), 'utf8');
   const html = path.join(path.dirname(out), 'shot_page.html');
   fs.writeFileSync(html, '<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0">' + page0 + '</body></html>');
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });

@@ -12,9 +12,7 @@
 use crate::brick::{Bricks, F_ALIVE, F_DYNAMIC, NONE, TICK};
 use crate::math::*;
 use crate::mesh::{self, Mesh};
-use crate::player::Player;
 use crate::structure;
-use crate::tower;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -26,7 +24,7 @@ pub const VIEW_BEND: f64 = 0.02;
 /// structure as rubble's does.
 pub const KICK_SPEED: f32 = 1.0;
 pub const DYN_MAX_DT: f32 = 0.1;
-pub struct Game {
+pub struct Sim {
     pub b: Bricks,
     /// weight resting on the structure (rubble lying on floors), for the next structure_step: (x, y, z m, N)
     pub rest: Vec<[f32; 4]>,
@@ -43,7 +41,6 @@ pub struct Game {
     pub panel_ratio: f32,
     /// joints cracked (reinforced concrete, masonry) and still holding
     pub cracked_total: usize,
-    pub player: Player,
     pub chunks: Vec<Mesh>,
     pub out: Vec<f32>,
     /// a free piece's shape for the page (`piece_shape`), apart from `out` so it can be read while `out` is
@@ -206,24 +203,21 @@ impl Tiles {
         let f = |v: i32| (v + self.n * self.tile / 2).div_euclid(self.tile).clamp(0, self.n - 1);
         f(z) * self.n + f(x)
     }
-    pub fn chunk(&self, x: i32, y: i32, z: i32) -> i32 { self.tile_of(x, z) * self.slices + y.div_euclid(tower::STOREY).clamp(0, self.slices - 1) }
+    pub fn chunk(&self, x: i32, y: i32, z: i32) -> i32 { self.tile_of(x, z) * self.slices + y.div_euclid(BAND).clamp(0, self.slices - 1) }
     /// is a brick with min corner (x, y, z) in chunk k
     pub fn holds(&self, k: i32, x: i32, y: i32, z: i32) -> bool { self.chunk(x, y, z) == k }
 }
 
-impl Game {
-    pub fn new(storeys: i32) -> Self { Self::new_kind(storeys, 0) }
-    /// A tower of `storeys` storeys built as `kind` (see `tower::element_in`).
-    pub fn new_kind(storeys: i32, kind: u8) -> Self {
-        let b = tower::build_kind(storeys, 1, kind);
-        // (the city: storeys is its size, n x n lots; the slices reach its tallest building)
-        let tiles = if kind == 5 {
-            let top = (0..b.len() as u32).filter(|&i| b.alive(i)).map(|i| b.tbox(i).max[1]).max().unwrap_or(0);
-            Tiles { tile: crate::city::pitch(), n: crate::city::layout(storeys).n, slices: top / tower::STOREY + 2 }
-        } else { Tiles { tile: 0, n: 1, slices: storeys + 2 } };
+/// The height of a mesh slice and of a band of floors, in ticks: 3.75 m, a storey of the demo's buildings
+/// (game/src/tower.rs `STOREY`, which must equal it: one mesh chunk a storey).
+pub const BAND: i32 = 30;
+
+impl Sim {
+    /// A simulation of the bricks `b`, meshed in `tiles` (see `Tiles`). What the bricks are is the caller's: the
+    /// demo game builds its levels in game/src (tower.rs, complex.rs, city.rs).
+    pub fn from_bricks(b: Bricks, tiles: Tiles) -> Self {
         let n = tiles.count();
-        let start = if kind == 5 { let l = crate::city::layout(storeys); let x = if l.n % 2 == 1 { crate::city::PITCH_M / 2.0 } else { 0.0 }; v3(x, 0.26, 0.0) } else { v3(0.0, 0.26, -14.0) };
-        let mut g = Game { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, player: Player::new(start), tiles, active: vec![true; (tiles.n * tiles.n) as usize], tile_ratio: vec![0.0; (tiles.n * tiles.n) as usize], chunks: (0..n).map(|_| Mesh::default()).collect(),
+        let mut g = Sim { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, tiles, active: vec![true; (tiles.n * tiles.n) as usize], tile_ratio: vec![0.0; (tiles.n * tiles.n) as usize], chunks: (0..n).map(|_| Mesh::default()).collect(),
                            out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), view_bend: false, view_vel: Vec::new(), kicks: Vec::new(), motion: [0.0; 12], struct_dt: 0.0, rest_fresh: false, rest_kept: Vec::new(), dynamic: false, dynst: Default::default(), moving: false, dyn_speed: 0.0, dyn_its: 0, dyn_kinetic: 0.0, dyn_left: 0, dyn_cut: 0, dyn_capped: false, view: Default::default(), view_want: false, view_out: Vec::new(), view_in: Vec::new(), view_bricks: Vec::new(), view_chunks: Vec::new(), wearing: 0, wearing_at: Vec::new(), worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
         for k in 0..n as i32 { g.remesh(k); }
         g.loose_pending = (0..g.b.len()).any(|i| g.b.flags[i] & crate::brick::F_LOOSE != 0);
@@ -414,7 +408,7 @@ impl Game {
         for &i in &stat {
             let t = self.b.tbox(i);
             let tile = self.tiles.tile_of(t.min[0], t.min[2]) as usize; if tile < self.active.len() { self.active[tile] = true; }
-            for y in [t.min[1], t.min[1] - tower::STOREY, t.max[1]] { let k = self.tiles.chunk(t.min[0], y, t.min[2]); klo = klo.min(k); khi = khi.max(k); }
+            for y in [t.min[1], t.min[1] - BAND, t.max[1]] { let k = self.tiles.chunk(t.min[0], y, t.min[2]); klo = klo.min(k); khi = khi.max(k); }
             let alive = self.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE;
             out.extend_from_slice(&[i as f32, if alive { 1.0 } else { 0.0 }]);
             Self::push_box(&mut out, &self.b, i);
@@ -686,7 +680,7 @@ impl Game {
     /// the last check and with the square of how far the load is past SUSTAINED; a joint worn through fails as if
     /// over strength (cracks first where it would), its wear starts again from zero, and a worn joint is softer
     /// (see `structure::spring`), so its load moves to its neighbours. Each material has its own share (`sustained`:
-    /// steel does not wear). Game time is compressed (real creep rupture takes hours): concrete at 90% wears through
+    /// steel does not wear). Sim time is compressed (real creep rupture takes hours): concrete at 90% wears through
     /// in about 2 s, at 80% in about 17 s (WEAR_RATE). At 0.5 /s, the lab's nibble scenario, its ground storey eaten
     /// to the core, wore through 2 joints. A building left near its limit then cracks and comes down progressively instead
     /// of standing unchanged until one more cut fails it all at once.
@@ -1060,7 +1054,7 @@ impl Game {
                 let ax = if comps[0] >= comps[1] && comps[0] >= comps[2] { 0 } else if comps[1] >= comps[2] { 1 } else { 2 };
                 let sg = if [dn.x, dn.y, dn.z][ax] >= 0.0 { 1 } else { -1 };
                 if f_req > 0.0 {
-                    let band = if squeezed { i32::MAX / 4 } else { tower::STOREY + 4 };
+                    let band = if squeezed { i32::MAX / 4 } else { BAND + 4 };
                     let from: Vec<f32> = if squeezed { set.iter().map(|&i| { let t = self.b.tbox(i); if sg > 0 { t.min[ax] as f32 } else { t.max[ax] as f32 } }).collect() } else { mine.iter().map(|h| h.p[ax]).collect() };
                     if let Some((at, cap, epm)) = weakest_section(&self.b, &set, ax, sg, &from, band) {
                         if f_req > cap {
@@ -1098,7 +1092,7 @@ let accel = jl / (total_mass * dt);
                     // carry on and meet the crushed zone again (a crush-down, storey by storey)
                     let dn = jd * (1.0 / jl);
                     let s0 = mine.iter().map(|h| dn.dot(v3(h.p[0], h.p[1], h.p[2]))).fold(f32::MAX, f32::min);
-                    let band = tower::STOREY as f32 + 4.0;
+                    let band = BAND as f32 + 4.0;
                     let up = |b: &Bricks, i: u32| { let c = centre(b, i); dn.dot(v3(c[0], c[1], c[2])) - s0 };
                     let b = &self.b;
                     a.failed.retain(|&(j, _)| { let (p, q) = (b.ja[j as usize], b.jb[j as usize]); p != NONE && 0.5 * (up(b, p) + up(b, q)) <= band });
@@ -1429,7 +1423,7 @@ mod tests {
         v
     }
     #[test] fn blast_through_a_slab_edge_drops_debris() {
-        let mut g = Game::new(3);
+        let mut g = crate::tower::new(3);
         let q0: usize = g.chunks.iter().map(|m| m.quads).sum();
         let nb = g.blast(v3(-2.0, 3.875, -2.0), 0.6);
         assert!(nb > 10, "crumbs");
@@ -1439,7 +1433,7 @@ mod tests {
         assert!(g.b.detached().is_empty());
     }
     #[test] fn raycast_hits_the_facade() {
-        let mut g = Game::new(2);
+        let mut g = crate::tower::new(2);
         let t = g.raycast(v3(5.0, 1.0, -30.0), v3(0.0, 0.0, 1.0), 100.0);
         assert!((t - (30.0 - 11.25)).abs() < 0.01, "{t}");
     }
@@ -1447,7 +1441,7 @@ mod tests {
         // cut the ground storey's columns and walls at 1.6 m, except the core: the core alone cannot carry
         // the floors (shear at the slab-core joints), so the structure check fails joints until the upper
         // tower detaches
-        let mut g = Game::new(6);
+        let mut g = crate::tower::new(6);
         assert_eq!(g.structure_step(64), 0, "intact tower stands");
         let mut x = -11.6f32;
         while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 {
@@ -1475,8 +1469,8 @@ mod tests {
         // past SUSTAINED but under strength, as a player nibbling at it. Without wear (dt 0) it then stands for
         // ever, unchanged: the "floating" building. With wear (0.5 s between checks) its joints crack over the
         // following seconds, round after round, before it comes down.
-        let prep = |kind: u8| -> Option<Game> {
-            let mut g = Game::new_kind(4, kind);
+        let prep = |kind: u8| -> Option<Sim> {
+            let mut g = crate::tower::new_kind(4, kind);
             assert_eq!(g.structure_step(64), 0);
             let mut x = -11.6f32;
             while x <= 11.7 {
@@ -1518,7 +1512,7 @@ mod tests {
         // (exploring: cut a few ground-storey columns; where in height do joints fail, with and without wear)
         for kind in [0u8, 1, 2, 3] {
             let storeys = if kind == 3 { 5 } else { 4 };
-            let mut g = Game::new_kind(storeys, kind);
+            let mut g = crate::tower::new_kind(storeys, kind);
             g.struct_dt = 0.25; let n0 = g.structure_step(64);
             std::println!("kind {kind}: intact worst {:.2}, {} joints wearing, {n0} failures", g.max_ratio, g.wearing);
             // the west row of the ground storey cut over 6 m
@@ -1528,7 +1522,7 @@ mod tests {
                 let f0 = g.failed_total;
                 let a = { let n = g.structure_step(64); n };
                 let _ = a;
-                for &(p, q, r) in &g.last_failed.clone() { let st = ((g.b.y[p as usize] as i32).max(g.b.y[q as usize] as i32) / tower::STOREY) as usize; by[st.min(15)] += 1; if st >= 2 && far.len() < 12 { let c = centre(&g.b, p); far.push((step, st, (c[0] * TICK * 10.0).round() / 10.0, (c[2] * TICK * 10.0).round() / 10.0, (r * 100.0).round() / 100.0, g.b.mat[p as usize], g.b.mat[q as usize])); } }
+                for &(p, q, r) in &g.last_failed.clone() { let st = ((g.b.y[p as usize] as i32).max(g.b.y[q as usize] as i32) / BAND) as usize; by[st.min(15)] += 1; if st >= 2 && far.len() < 12 { let c = centre(&g.b, p); far.push((step, st, (c[0] * TICK * 10.0).round() / 10.0, (c[2] * TICK * 10.0).round() / 10.0, (r * 100.0).round() / 100.0, g.b.mat[p as usize], g.b.mat[q as usize])); } }
                 let _ = f0;
             }
             std::println!("  after the cut: {} failed; failures by storey {:?}; first far ones (check, storey, x, z, ratio, mats) {:?}", g.failed_total, &by[..storeys as usize + 1], far);
@@ -1547,9 +1541,9 @@ mod tests {
         // roof beam left at 77% at the cut's edge wore through at 14 s and the top storey came down in pieces, 70
         // failures from the fourth storey up, while the storeys below stood: reported from the playground as "parts of the
         // fourth floor start falling without any reason". Steel does not creep: now 0 there.
-        let mut g = Game::new_kind(5, 3);
+        let mut g = crate::tower::new_kind(5, 3);
         assert_eq!(g.structure_step(64), 0);
-        let settle = |g: &mut Game| { let mut n = 1; let mut k = 0; while n > 0 && k < 300 { n = g.structure_step(64); k += 1; } };
+        let settle = |g: &mut Sim| { let mut n = 1; let mut k = 0; while n > 0 && k < 300 { n = g.structure_step(64); k += 1; } };
         let mut z = -10.8f32; while z <= 10.9 { g.blast(v3(-11.2, 1.3, z), 0.7); z += 0.9; } settle(&mut g);
         let mut x = -10.8f32; while x <= 0.1 { g.blast(v3(x, 1.3, -11.2), 0.7); g.blast(v3(x, 1.3, 11.2), 0.7); x += 0.9; } settle(&mut g);
         g.struct_dt = 0.25;
@@ -1557,16 +1551,16 @@ mod tests {
         for _ in 0..80 {
             let nf = g.structure_step(64);
             if std::env::var("SF_TR").is_ok() { std::println!("  step: failed {nf} its {} worst {:.3} wearing {}", g.last_iterations, g.max_ratio, g.wearing); }
-            for &(p, q, _) in &g.last_failed { if (g.b.y[p as usize] as i32).max(g.b.y[q as usize] as i32) >= 3 * tower::STOREY { high += 1 } else { low += 1 } }
+            for &(p, q, _) in &g.last_failed { if (g.b.y[p as usize] as i32).max(g.b.y[q as usize] as i32) >= 3 * BAND { high += 1 } else { low += 1 } }
         }
         std::println!("20 s after the cut: {low} failures in storeys 1-3, {high} above");
         assert_eq!(high, 0, "nothing gives way two storeys and more above the cut on its own");
     }
     #[test] #[ignore] fn explore_the_nibbled_mixed_building() {
         // (exploring: the lab's nibble cuts, in the engine: what holds the upper storeys, and what fails first)
-        let mut g = Game::new_kind(5, 3);
+        let mut g = crate::tower::new_kind(5, 3);
         assert_eq!(g.structure_step(64), 0);
-        let settle = |g: &mut Game| { let mut n = 1; let mut k = 0; while n > 0 && k < 300 { n = g.structure_step(64); k += 1; } };
+        let settle = |g: &mut Sim| { let mut n = 1; let mut k = 0; while n > 0 && k < 300 { n = g.structure_step(64); k += 1; } };
         let mut z = -10.8f32; while z <= 10.9 { g.blast(v3(-11.2, 1.3, z), 0.7); z += 0.9; } settle(&mut g);
         let mut x = -10.8f32; while x <= 0.1 { g.blast(v3(x, 1.3, -11.2), 0.7); g.blast(v3(x, 1.3, 11.2), 0.7); x += 0.9; } settle(&mut g);
         if std::env::var("NIB_STAGE").map(|v| v == "1").unwrap_or(false) { std::println!("(stage 1: the west wall and the west halves of the fronts)"); } else {
@@ -1577,9 +1571,9 @@ mod tests {
         }
         std::println!("after the cuts: worst {:.2}, {} failed, {} cracked", g.max_ratio, g.failed_total, g.cracked_total);
         // standing above the ground storey, by storey and material
-        let report = |g: &Game, what: &str| {
+        let report = |g: &Sim, what: &str| {
             let mut by = [[0usize; 5]; 6];
-            for i in 0..g.b.len() as u32 { if g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) != F_ALIVE { continue; } let st = (g.b.y[i as usize] as i32 / tower::STOREY).clamp(0, 5) as usize; by[st][(g.b.mat[i as usize] as usize).min(4)] += 1; }
+            for i in 0..g.b.len() as u32 { if g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) != F_ALIVE { continue; } let st = (g.b.y[i as usize] as i32 / BAND).clamp(0, 5) as usize; by[st][(g.b.mat[i as usize] as usize).min(4)] += 1; }
             std::println!("  {what}: standing bricks by storey [concrete, masonry, steel, glass, timber]: {:?}", by);
         };
         report(&g, "after the cuts");
@@ -1588,7 +1582,7 @@ mod tests {
             let n = g.structure_step(64);
             if n > 0 {
                 let mut st = [0usize; 6];
-                for &(p, q, _) in &g.last_failed { let s2 = ((g.b.y[p as usize] as i32).max(g.b.y[q as usize] as i32) / tower::STOREY).clamp(0, 5) as usize; st[s2] += 1; }
+                for &(p, q, _) in &g.last_failed { let s2 = ((g.b.y[p as usize] as i32).max(g.b.y[q as usize] as i32) / BAND).clamp(0, 5) as usize; st[s2] += 1; }
                 let w: std::vec::Vec<_> = g.last_failed.iter().take(6).map(|&(p, q, r)| { let c = centre(&g.b, p); ((c[0] * TICK).round(), (c[1] * TICK * 10.0).round() / 10.0, (c[2] * TICK).round(), g.b.mat[p as usize], g.b.mat[q as usize], (r * 100.0).round() / 100.0) }).collect();
                 std::println!("  check {step}: {n} failures, by storey {:?}, worst {:.2}; first (x, y, z, mats, ratio) {:?}", st, g.max_ratio, w);
             }
@@ -1599,7 +1593,7 @@ mod tests {
         // (exploring: how much of the mixed building's ground storey can go before it comes down)
         for (name, cut) in [("all but the core", (|x: f32, z: f32| !(x.abs() < 4.4 && z.abs() < 4.4)) as fn(f32, f32) -> bool),
                             ("west half", |x, _z| x < 0.0), ("the perimeter walls", |x, z| x.abs() > 10.0 || z.abs() > 10.0)] {
-            let mut g = Game::new_kind(5, 3);
+            let mut g = crate::tower::new_kind(5, 3);
             assert_eq!(g.structure_step(64), 0);
             let r0 = g.max_ratio;
             let mut x = -11.6f32;
@@ -1623,7 +1617,7 @@ mod tests {
         // preset's budget of 64 crumbs: the crushed storey beyond it was removed as dust, whole floors vanishing
         // (lab collapse: 489 of 1,211 m3 in 240 frames). With spill on, it comes out as spill (id -2) instead.
         let run = |spill: bool| -> (usize, usize, usize) {
-            let mut g = Game::new(4);
+            let mut g = crate::tower::new(4);
             g.crumb_keep = 64; g.spill_on = spill;
             let mut x = -11.6f32; let mut piece = -1i32;
             while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 { g.blast(v3(x, 1.6, z), 0.7); for (id, sz) in bodies_in(&g.out) { if id >= 0 && sz > 100 { piece = id; } } z += 0.8; } x += 0.8; }
@@ -1657,7 +1651,7 @@ mod tests {
     #[test] fn a_tower_left_on_one_column_comes_down() {
         // the ground storey blasted away except one column: the upper building must not stand on it.
         for (kind, keep) in [(0u8, (-10.7f32, -10.7f32)), (0, (-3.7, -3.7)), (0, (-3.7, -10.7)), (1, (-3.7, -3.7)), (2, (-3.7, -3.7)), (1, (-10.7, -10.7))] {
-            let mut g = Game::new_kind(4, kind);
+            let mut g = crate::tower::new_kind(4, kind);
             assert_eq!(g.structure_step(64), 0, "intact building stands");
             let mut x = -11.6f32;
             while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 {
@@ -1681,7 +1675,7 @@ mod tests {
         // what it carries. Before resting loads the floor never felt rubble; with them spread over the whole
         // 22 m slab brick, 0.59 of strength; at their points through the cell graph, 0.70.
         for (kpa, expect) in [(3.0f32, false), (60.0, true)] {
-            let mut g = Game::new_kind(4, 0);
+            let mut g = crate::tower::new_kind(4, 0);
             assert_eq!(g.structure_step(64), 0);
             let (mut x, mut pts) = (-10.25f32, 0);
             while x <= -4.25 { let mut z = -10.25f32; while z <= -4.25 { g.rest.push([x, 7.9, z, kpa * 1000.0 * 0.25]); pts += 1; z += 0.5; } x += 0.5; }
@@ -1706,7 +1700,7 @@ mod tests {
         // the standing building's solve starts from its last solution: unchanged, the second check of the
         // 12-storey tower needs no iterations and gives the same worst ratio; a small change (one column gone)
         // needs fewer than from zero
-        let mut g = Game::new_kind(12, 0);
+        let mut g = crate::tower::new_kind(12, 0);
         let t = std::time::Instant::now();
         g.structure_step(64);
         let (cold, r1, t1) = (g.last_iterations, g.max_ratio, t.elapsed().as_secs_f64() * 1e3);
@@ -1715,7 +1709,7 @@ mod tests {
         let (again, r2, t2) = (g.last_iterations, g.max_ratio, t.elapsed().as_secs_f64() * 1e3);
         // the ground storey blasted away but one column (as `a_tower_left_on_one_column_comes_down`): the first
         // round of failures must be the same from the last solution as from zero
-        let mut cold_g = Game::new_kind(12, 0);
+        let mut cold_g = crate::tower::new_kind(12, 0);
         let mut x = -11.6f32;
         while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 {
             if (x + 3.7).abs() > 1.3 || (z + 3.7).abs() > 1.3 { g.blast(v3(x, 1.6, z), 0.7); cold_g.blast(v3(x, 1.6, z), 0.7); }
@@ -1734,17 +1728,17 @@ mod tests {
         // shared between midspan and the section over the beam) is not: 1.55 of strength at its worst joist section
         // (3 kPa: 0.59, the building's own worst joint elsewhere)
         for (kpa, expect) in [(3.0f32, false), (40.0, true)] {
-            let mut g = Game::new_kind(5, 3);
+            let mut g = crate::tower::new_kind(5, 3);
             assert_eq!(g.structure_step(64), 0, "the mixed building stands");
             let y = 3.0 * 3.75 + 0.3;
-            let push = |g: &mut Game| { let mut x = -10.75f32; while x <= -7.75 { let mut z = -10.75f32; while z <= -7.75 { g.rest.push([x, y, z, kpa * 1000.0 * 0.25]); z += 0.5; } x += 0.5; } };
+            let push = |g: &mut Sim| { let mut x = -10.75f32; while x <= -7.75 { let mut z = -10.75f32; while z <= -7.75 { g.rest.push([x, y, z, kpa * 1000.0 * 0.25]); z += 0.5; } x += 0.5; } };
             let mut fell = 0;
             for _ in 0..40 { push(&mut g); let n = g.structure_step(64); for (id, sz) in bodies_in(&g.out) { if id >= 0 { fell += sz; } } if n == 0 { break; } }
             std::println!("mixed, timber floor bay with {kpa} kPa: panel ratio {:.2}, {fell} bricks fell", g.panel_ratio);
             assert_eq!(fell > 0, expect, "{kpa} kPa on the timber floor");
         }
         // a hit on a brick pier of the second storey: the mortar cracks first
-        let mut g = Game::new_kind(5, 3);
+        let mut g = crate::tower::new_kind(5, 3);
         g.inp = vec![-1.0, -7.5, 5.5, -11.2, 0.0, 0.0, 1.0, 6000.0, 6.0, 0.0, 0.0];
         g.impacts(1.0 / 60.0);
         std::println!("mixed, sideways hit on a brick pier: {} cracked, {} failed sideways", g.cracked_total, g.side_failed);
@@ -1754,7 +1748,7 @@ mod tests {
         // a 1 t piece swinging into a masonry pier of the second storey at 6 m/s (J = 6 kN s over a frame):
         // 360 kN sideways on a few bricks of mortar (0.3 MPa in tension, 0.5 in shear). Before, only the
         // downward part of a contact force loaded the structure, so a sideways hit only crushed what it touched.
-        let mut g = Game::new_kind(4, 1);
+        let mut g = crate::tower::new_kind(4, 1);
         assert_eq!(g.structure_step(64), 0);
         // contact on the south facade (z = -11.25 m) at 5.5 m up, pushing the wall north (into the building)
         // The mortar cracks first and the pier still stands (it bears in compression); a second hit where it is
@@ -1775,7 +1769,7 @@ mod tests {
         // a blast in a wall: the bricks round the crater that are left standing are split into the convex cells of
         // their fracture patterns, and one or two cells of each spall off as crumbs; none bigger than 2 m or
         // smaller than 0.25 m a side. The cells are in the engine's mesh and carry their hull ids to the page.
-        let mut g = Game::new_kind(3, 1);
+        let mut g = crate::tower::new_kind(3, 1);
         g.blast(v3(-6.0, 5.0, -11.2), 1.2);
         let cells: std::vec::Vec<u32> = (0..g.b.len() as u32).filter(|&i| g.b.alive(i) && g.b.hull[i as usize] != 0 && g.b.flags[i as usize] & F_DYNAMIC == 0).collect();
         let mut parents: std::vec::Vec<crate::brick::TBox> = cells.iter().map(|&i| g.b.tbox(i)).collect();
@@ -1800,7 +1794,7 @@ mod tests {
         // outputs bit for bit. (The maps' hasher is fixed, crate::Map: the default one is seeded per process, so two
         // page loads could walk a map in different orders; within one process, as here, the seed is shared.)
         let run = || {
-            let mut g = Game::new_kind(4, 3);
+            let mut g = crate::tower::new_kind(4, 3);
             let mut outs: Vec<f32> = Vec::new();
             let mut x = -11.0f32;
             while x <= 11.0 { g.blast(v3(x, 1.6, -11.2), 0.9); outs.extend_from_slice(&g.out); x += 1.5; }
@@ -1819,7 +1813,7 @@ mod tests {
         // under its own weight on its underside; the impulse that breaks it there (M g dt / ratio); the part that
         // comes away lighter than the part kept. Snapping by the plan parts it there into two pieces with no joint
         // between them; a second snap of the same piece finds no plan.
-        let mut g = Game::new_kind(4, 0);
+        let mut g = crate::tower::new_kind(4, 0);
         let mut x = -11.6f32;
         while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 { g.blast(v3(x, 1.6, z), 0.7); z += 0.8; } x += 0.8; }
         for _ in 0..20 { if g.structure_step(64) == 0 { break; } }
@@ -1842,7 +1836,7 @@ mod tests {
     }
     #[test] fn a_falling_slab_cracks_on_impact() {
         // a free piece: a 4 m x 4 m slab of 1 m x 0.25 m planks joined edge to edge, hitting the ground on a corner
-        let mut g = Game::new(1);
+        let mut g = crate::tower::new(1);
         let base = g.b.len() as u32;
         for i in 0..4 { for k in 0..4 { g.b.add([200 + i * 8, 100, k * 8], [8, 2, 8], crate::brick::mat::CONCRETE, 0, 2); } }
         let mut set = std::vec::Vec::new();
@@ -1857,7 +1851,7 @@ mod tests {
     }
     #[test] fn a_dropped_tower_crushes_its_stumps_and_its_lowest_storey() {
         // cut the whole ground storey at 1.6 m: the tower above falls 1.4 m and lands at 5.2 m/s on the stumps
-        let mut g = Game::new(8);
+        let mut g = crate::tower::new(8);
         let mut x = -11.6f32;
         let mut piece = -1i32;
         while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 {
@@ -1947,7 +1941,7 @@ mod tests {
         assert!(total_free_cuts >= 2, "the crush-down goes on storey by storey");
     }
     #[test] fn a_blast_on_a_falling_piece_crumbles_it_and_splits_the_rest() {
-        let mut g = Game::new(3);
+        let mut g = crate::tower::new(3);
         // cut the ground storey all round: the upper floors come loose as a piece
         let mut x = -11.6f32; let mut piece = -1i32;
         while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 { g.blast(v3(x, 1.6, z), 0.7); for (id, sz) in bodies_in(&g.out) { if id >= 0 && sz > 100 { piece = id; } } z += 0.8; } x += 0.8; }
@@ -1959,7 +1953,7 @@ mod tests {
     }
     #[test] fn each_kind_of_building_stands_at_its_height() {
         for (kind, storeys, name) in [(0u8, 12, "concrete frame"), (1, 5, "masonry"), (2, 6, "timber"), (3, 5, "mixed")] {
-            let mut g = Game::new_kind(storeys, kind);
+            let mut g = crate::tower::new_kind(storeys, kind);
             {
                 let set: std::vec::Vec<u32> = (0..g.b.len() as u32).filter(|&i| g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).collect();
                 let load: std::vec::Vec<f32> = set.iter().map(|&i| structure::mass(&g.b, i) * 9.81).collect();

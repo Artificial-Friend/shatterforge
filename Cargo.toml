@@ -1,11 +1,19 @@
-[package]
-name = "shatterforge"
-version = "0.1.0"
-edition = "2021"
-[lib]
-crate-type = ["cdylib"]
+# Shatterforge: the engine (the future SDK) and its demo game.
+#   engine/   sf-engine: bricks, structure, falling pieces' records, meshes (Rust, no_std on wasm); the GPU world
+#             (engine/gpu) and the page runtime (engine/web)
+#   game/     sf-demo: the demo's levels, player, wasm exports, page and lab
+#   legacy/   the retired first engine (its own Cargo.toml, not in this workspace)
+[workspace]
+members = ["engine", "game"]
+exclude = ["legacy"]
+resolver = "2"
+
 [profile.release]
 opt-level = 3
 lto = true
-panic = "abort"
 codegen-units = 1
+panic = "abort"
+debug = false
+
+[profile.test]
+opt-level = 3

@@ -2,23 +2,14 @@
 name = "sf-engine"
 version = "0.1.0"
 edition = "2021"
-description = "Shatterforge engine: adaptive real-size bricks, box rigid bodies, structural solver"
+description = "Shatterforge engine: adaptive real-size bricks, structural solver (at rest and dynamic), break plans, meshes"
+build = "build.rs"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 hashbrown = "0.15"
 
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-dlmalloc = { version = "0.2", features = ["global"] }
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-panic = "abort"
-debug = false
-
-[profile.test]
-opt-level = 3
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(sf_engine)'] }

@@ -1,8 +1,8 @@
 // Checks of the page itself, as a player uses it (not the lab, which reads back every frame and so never rests):
-//   node game/page_check.cjs rest     the world at rest, then a click: the ball must fly and be read back
-//   node game/page_check.cjs debris   the player dropped onto a slab on the GPU (debris): it must stand on it
-//   node game/page_check.cjs view     the engineer's view (key V): the worker's structure step must send it, with cells
-// SF_NODE_MODULES: a node_modules folder with three (and Playwright installed), as for game/lab.cjs.
+//   node game/lab/page_check.cjs rest     the world at rest, then a click: the ball must fly and be read back
+//   node game/lab/page_check.cjs debris   the player dropped onto a slab on the GPU (debris): it must stand on it
+//   node game/lab/page_check.cjs view     the engineer's view (key V): the worker's structure step must send it, with cells
+// SF_NODE_MODULES: a node_modules folder with three (and Playwright installed), as for game/lab/lab.cjs.
 //
 // rest: the complex building (kind 4) has furniture that falls asleep while the page still steps; the GPU then skips
 // its steps, no read-backs are issued, and the page, which steps at most 3 past the newest read-back, stopped
@@ -10,7 +10,7 @@
 // at 39.6 s the same way). Before the fix: 3 steps skipped, no read-back in the 20 s after the click; after: read-backs
 // resume and the ball hits the arcade.
 const { chromium } = require(process.env.PW || 'playwright'); const fs = require('fs'), path = require('path');
-const root = path.resolve(__dirname, '..');
+const root = path.resolve(__dirname, '..', '..');
 const which = process.argv[2] || 'rest';
 (async () => {
   const html = path.join(root, 'lab-results', 'page_check.html');

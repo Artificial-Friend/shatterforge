@@ -1,6 +1,6 @@
 // Compare a lab scenario with the dynamic structure and solved at rest (docs/DYNPLAN.md, stage 0).
 //   node tools/compare.cjs <scenario> [--frames n] [--keep]     (--keep: use the reports already in lab-results/cmp)
-// Runs game/lab.cjs twice (the second with SF_STATIC=1), into lab-results/cmp/{dyn,static}, and prints the table
+// Runs game/lab/lab.cjs twice (the second with SF_STATIC=1), into lab-results/cmp/{dyn,static}, and prints the table
 // "better than at rest" is measured by. Software-GPU times compare only with each other.
 const { spawnSync } = require('child_process'), fs = require('fs'), path = require('path');
 const args = process.argv.slice(2), name = args[0], keep = args.includes('--keep');
@@ -9,7 +9,7 @@ const root = path.join(__dirname, '..'), rest = args.slice(1).filter(a => a !== 
 const R = {};
 for (const mode of ['dyn', 'static']) {
   const out = path.join(root, 'lab-results', 'cmp', mode);
-  if (!keep) spawnSync('node', [path.join(root, 'game', 'lab.cjs'), name, ...rest, '--out', out], { env: { ...process.env, ...(mode === 'static' ? { SF_STATIC: '1' } : {}) }, stdio: 'ignore' });
+  if (!keep) spawnSync('node', [path.join(root, 'game', 'lab', 'lab.cjs'), name, ...rest, '--out', out], { env: { ...process.env, ...(mode === 'static' ? { SF_STATIC: '1' } : {}) }, stdio: 'ignore' });
   R[mode] = JSON.parse(fs.readFileSync(path.join(out, name + '.json'), 'utf8'));
 }
 const row = (r) => {

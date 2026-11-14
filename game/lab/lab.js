@@ -383,7 +383,7 @@ function labSummary(rep) {
   for (const [k, e] of Object.entries(rep.events)) lines.push(`  events ${k}: ${e.n} · first ${JSON.stringify(e.first.slice(0, 3))}`);
   return lines.join('\n');
 }
-// A frame's state as one number, to compare two runs of a scenario (node game/lab.cjs --twice): the poses read
+// A frame's state as one number, to compare two runs of a scenario (node game/lab/lab.cjs --twice): the poses read
 // back (what is drawn), the engine's bricks and joints, the bodies and breaks. Two runs of the same build agree
 // frame for frame or the lab is not deterministic.
 function labDigest() {

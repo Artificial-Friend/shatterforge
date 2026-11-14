@@ -139,16 +139,16 @@ The complex building's worst joint, standing and with its corner column shot out
 ## Where it is
 
 - `engine/src/structure.rs`: `Dyn` (velocities, resting places, beds between steps), `analyse_dyn`, and `solve_network` with a cap on its iterations.
-- `engine/src/game.rs`: `Game::dynamic`, `Game::dynst` (a `Warm` and a `Dyn` per lot), `structure_step` (each lot stepped on its own; a lot still moving stays active), `Game::moving`.
-- `engine/src/wasm.rs`: `set_param(7, on)`, `structure_dyn(f)`.
+- `engine/src/sim.rs`: `Sim::dynamic`, `Sim::dynst` (a `Warm` and a `Dyn` per lot), `structure_step` (each lot stepped on its own; a lot still moving stays active), `Sim::moving`.
+- `game/src/wasm.rs`: `set_param(7, on)`, `structure_dyn(f)`.
 - The page: setting "Dynamic structure" (on by default); a structure step that reports the structure still moving asks for the next; the HUD shows the sag and the fastest cell.
-- The lab: `SF_STATIC=1 node game/lab.cjs ...` runs a scenario with it off.
+- The lab: `SF_STATIC=1 node game/lab/lab.cjs ...` runs a scenario with it off.
 
 ## The engineer's view (key V)
 
 Every brick is coloured by how near its worst joint or section is to its strength (blue unloaded, green at a third, yellow at 0.7 where joints begin to wear, red at strength), and the building is drawn where the structure's solution puts it, its displacements 1, 10, 100 or 1,000 times as large (setting "Displacements drawn"; a building sags millimetres).
 
-- The engine writes it with each structure step when asked (`set_param(8, on)`; `Game::view_out`): each analysed brick's ratio, and every free cell with its centre, displacement and rotation. Switching it on has every lot analysed once.
+- The engine writes it with each structure step when asked (`set_param(8, on)`; `Sim::view_out`): each analysed brick's ratio, and every free cell with its centre, displacement and rotation. Switching it on has every lot analysed once.
 - The page's copy of the engine takes it (`view_in`, `view_apply`) and remeshes the chunks of the bricks it names (`mesh::build_view`): faces are cut along a brick's cells, so that a slab drawn sagging bends, and each vertex moves by the mean of the cells that hold it.
 - It needs the dynamic structure for the displacements; with it off the colours alone are drawn.
 - A lot is written when the view is first asked for and when its step changed something; the page remeshes only the chunks of the bricks named. Before (reported from a real machine: the 8 × 8 city at 3 frames a second with the view on): every analysed lot was written at every step, the lots with furniture or rubble on their floors every second, and the page remeshed from the first chunk named to the last. Test `the_view_of_a_city_at_rest_is_written_once` (native): the first step writes 3,240,610 numbers, drawn in 640 ms (960 chunks); a step at rest writes nothing; a column shot out on one lot writes 13,674, drawn in 2–3 ms (3 chunks).
@@ -258,7 +258,7 @@ docs/LAB.md, 11 November, has the runs and the tables. In short, `tools/compare.
 - **Detached parts leave with the structure's velocity there** (`view_motion`, 13 November), not with its bend.
 - **A hit is a load of the step** (an impulse over `KICK_TIME`), and it is the rigid stop's impulse: the GPU stops a body against the structure before the engine breaks what was hit, so a hit bounces first and breaks second (docs/LAB.md, 13 November, the ball). A hit that wakes a structure at rest is 2.8% too strong (docs/DEFORM.md, measured).
 - **The frame rate changes which joints fail on the way down**, by 9 to 36% between 1/60 and 1/30 s, though not what falls (the piece within 2.3%).
-- **No warning in a building already falling.** Left on one column, the first part is gone 0.02–0.05 s after the first joint passes 0.7: it is in free fall, 5 cm down in 0.1 s. Warning time exists where a building is near its limit and wears (seconds: `game::tests::a_building_left_near_its_limit...`), and that is where creaks and visible sag belong.
+- **No warning in a building already falling.** Left on one column, the first part is gone 0.02–0.05 s after the first joint passes 0.7: it is in free fall, 5 cm down in 0.1 s. Warning time exists where a building is near its limit and wears (seconds: `sim::tests::a_building_left_near_its_limit...`), and that is where creaks and visible sag belong.
 - **A building at its limit is not predictable.** The mixed building cut on two sides stands at 0.91–0.99 of strength, and whether wear brings its upper storeys down in the next 20 s turns on the solve's last digits (docs/LAB.md, 11 November).
 - **Not on a real GPU yet.** Every timing here is native or the software GPU.
 

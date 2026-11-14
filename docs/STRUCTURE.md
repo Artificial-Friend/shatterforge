@@ -4,7 +4,7 @@
 
 **11 November 2026: the solve changed** (docs/DYNAMIC.md, The solve; docs/LAB.md of that day). Tolerance 1e-7 for 1e-5, the coarsest multigrid level factored, coarse blocks that follow the joints' stiffness, and no weak spring to the ground on cells their joints hold. Iteration counts, times and worst joints quoted below are the solve's as it was when each was written; the worst joints of buildings with stones or cracked joints were up to 2.2 times off (the complex building standing: 0.917 as then solved, 0.416 solved out, 0.415 now).
 
-The engine (`engine/src/structure.rs`, `game.rs`) checks the standing building as a rigid-body-spring network. Numbers below come from the engine tests (`cd engine && cargo test --release -- --nocapture --test-threads 1`), native, on the cloud machine.
+The engine (`engine/src/structure.rs`, `sim.rs`) checks the standing building as a rigid-body-spring network. Numbers below come from the engine tests (`cd engine && cargo test --release -- --nocapture --test-threads 1`), native, on the cloud machine.
 
 ## The model
 
@@ -211,7 +211,7 @@ Every cell is a brick of its own (`Bricks::hull`, its pattern cell mapped into t
   - With a neighbour, a joint is where the cell's polygon on its box face overlaps the neighbour's (`contact_poly`). Its area is exact, and the cells' faces on a box face tile it.
 - **Structure.** A cell is one node at its centroid. A polygon face is a section of its own: area, second moments and extreme fibres from the polygon, and a frame along its normal for a face at an angle.
 - **Mesh.** The engine draws a cell's faces, except those shared with a cell still joined to it.
-- **Outputs.** The box records carry the hull id (code / 512). The page collides each cell as a hull shape of the GPU's library, which is the same library: `node gpu/test_hulls.cjs` checks all 63 cells' boxes, volumes and centroids against the GPU's, to 3e-16.
+- **Outputs.** The box records carry the hull id (code / 512). The page collides each cell as a hull shape of the GPU's library, which is the same library: `node engine/gpu/test_hulls.cjs` checks all 63 cells' boxes, volumes and centroids against the GPU's, to 3e-16.
 - **Spalled cells** fall as particles, drawn as their own cell.
 
 The page's separate skin of cells over whole bricks, and its bookkeeping, are gone.

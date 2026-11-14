@@ -157,7 +157,7 @@ impl Player {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, sf_engine))]   // (run by the engine's tests, which take this file as a fixture: engine/src/lib.rs)
 mod tests {
     use super::*;
     use crate::tower;

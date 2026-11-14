@@ -1,0 +1,17 @@
+[package]
+name = "sf-demo"
+version = "0.1.0"
+edition = "2021"
+description = "Shatterforge demo game: levels (towers, the complex building, the city), the player, the wasm the page loads"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sf-engine = { path = "../engine" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+dlmalloc = { version = "0.2", features = ["global"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(sf_engine)'] }

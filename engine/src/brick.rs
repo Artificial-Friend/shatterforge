@@ -1117,7 +1117,7 @@ mod tests {
 #[cfg(test)]
 mod snap_tests {
     #[test] fn save_and_load_round_trip() {
-        let mut g = crate::game::Game::new(3);
+        let mut g = crate::tower::new(3);
         g.blast(crate::math::v3(-2.0, 3.875, -2.0), 0.6);
         let mut buf = alloc::vec::Vec::new();
         g.b.save(&mut buf);

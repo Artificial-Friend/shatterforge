@@ -64,7 +64,7 @@ Three foundation changes, in this order, before scaling to a city. Each keeps th
 - **In the worker (lab collapse).** 4–8 ms median, 50–370 ms at p95.
 
 **2. Convex cells as the primitive: done.**
-- A fractured brick becomes its cells as engine bricks, with real mass and centroids, polygon joints, sections from the polygons, and a mesh. They go to the page and the GPU as hull ids from one library (checked identical, `gpu/test_hulls.cjs`).
+- A fractured brick becomes its cells as engine bricks, with real mass and centroids, polygon joints, sections from the polygons, and a mesh. They go to the page and the GPU as hull ids from one library (checked identical, `engine/gpu/test_hulls.cjs`).
 - The page's skin and its bookkeeping are gone.
 - Lab comparison (docs/LAB.md): fewer rebounds than with boxes, and 1–4 short hole frames left.
 

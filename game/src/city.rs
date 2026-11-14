@@ -58,7 +58,7 @@ pub fn build_layout(l: &Layout) -> Bricks {
 }
 pub fn build(n: i32) -> Bricks { build_layout(&layout(n)) }
 
-#[cfg(test)]
+#[cfg(all(test, sf_engine))]   // (run by the engine's tests, which take this file as a fixture: engine/src/lib.rs)
 mod tests {
     use super::*;
     extern crate std;
@@ -88,7 +88,7 @@ mod tests {
         // Cities of 1, 3 and 5 lots a side: their lots, each building on its own (nothing joins two lots), every
         // brick held up, and the first structure step: nothing fails under its own weight. (Analysed all at once, the
         // 5 x 5 city failed 2 joints, arches of two of its complex buildings at 2.25 and 1.19, in 5.6 s; each lot on
-        // its own, Game::structure_step: none, worst 0.831, in 1.7 s.)
+        // its own, Sim::structure_step: none, worst 0.831, in 1.7 s.)
         for n in [1, 3, 5] {
             let l = layout(n);
             let t = std::time::Instant::now();
@@ -105,7 +105,7 @@ mod tests {
             // the loose contents of the complex building are its only detached bricks
             let det = b.detached();
             assert!(det.iter().all(|d| d.iter().all(|&i| b.flags[i as usize] & crate::brick::F_LOOSE != 0)), "only loose contents are detached");
-            let mut g = crate::game::Game::new_kind(n, 5);
+            let mut g = crate::tower::new_kind(n, 5);
             let t = std::time::Instant::now();
             let f = g.structure_step(64);
             let t1 = t.elapsed().as_secs_f64() * 1e3;
@@ -123,7 +123,7 @@ mod tests {
         // (by hand: cargo test --release bigger_cities -- --ignored --nocapture)
         for n in [5, 8] {
             let t = std::time::Instant::now();
-            let mut g = crate::game::Game::new_kind(n, 5);
+            let mut g = crate::tower::new_kind(n, 5);
             let built = t.elapsed().as_secs_f64();
             let t = std::time::Instant::now(); let f = g.structure_step(64); let s1 = t.elapsed().as_secs_f64();
             std::println!("city {n} x {n}: {} bricks, {} B, game made in {built:.1} s (meshes included), first structure step {s1:.1} s, {f} failed, worst {:.3}", g.b.alive_count(), (g.b.total_bytes_per_brick() * g.b.alive_count() as f32) as u64, g.max_ratio);

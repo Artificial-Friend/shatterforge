@@ -1,0 +1,126 @@
+<title>Shatterforge Tower</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;600&display=swap">
+<style>
+/* A game view: one deliberate dark look, set explicitly */
+:root { color-scheme: dark; --bg: #0e0f10; --ink: #ece8e1; --mute: #a39d93; --accent: #f08a4b; --panel: rgba(14, 15, 16, 0.78); --rule: rgba(236, 232, 225, 0.16);
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); overflow: hidden; }
+#cv { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+.hud { position: fixed; top: calc(10px + env(safe-area-inset-top, 0px)); left: max(12px, env(safe-area-inset-left, 0px)); background: var(--panel); border: 1px solid var(--rule); border-radius: 6px;
+  padding: 8px 10px; font: 12px/1.5 var(--mono); color: var(--ink); pointer-events: none; min-width: 230px; }
+.hud b { color: var(--accent); font-weight: 600; }
+.hud .k { color: var(--mute); }
+.cross { position: fixed; left: 50%; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; pointer-events: none; }
+.cross::before, .cross::after { content: ""; position: absolute; background: rgba(255, 255, 255, 0.85); }
+.cross::before { left: 8px; top: 0; width: 2px; height: 18px; } .cross::after { top: 8px; left: 0; height: 2px; width: 18px; }
+.tool { position: fixed; bottom: calc(14px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%); display: flex; gap: 6px; pointer-events: none; }
+.tool span { background: var(--panel); border: 1px solid var(--rule); border-radius: 4px; padding: 5px 9px; font: 12px var(--mono); color: var(--mute); }
+.tool span.on { color: var(--ink); border-color: var(--accent); }
+.start { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(8, 9, 10, 0.72); padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.card { max-width: 560px; background: #15171a; border: 1px solid var(--rule); border-radius: 8px; padding: 22px 24px; display: flex; flex-direction: column; gap: 12px; }
+.eyebrow { font: 500 12px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+h1 { font: 600 24px/1.2 var(--sans); margin: 0; text-wrap: balance; }
+.card p { margin: 0; color: var(--mute); }
+.keys { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font: 13px/1.5 var(--mono); }
+.keys dt { color: var(--ink); } .keys dd { margin: 0; color: var(--mute); }
+button { font: 600 15px var(--sans); padding: 11px 18px; border-radius: 5px; border: 0; background: var(--accent); color: #1a120c; cursor: pointer; align-self: flex-start; }
+button:disabled { opacity: .5; cursor: default; }
+.warn { color: #f1786c; font: 12px var(--mono); }
+.settings { position: fixed; right: max(12px, env(safe-area-inset-right, 0px)); top: calc(10px + env(safe-area-inset-top, 0px)); width: min(320px, calc(100vw - 24px)); max-height: calc(100vh - 20px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); overflow-y: auto; overscroll-behavior: contain; background: #15171a; border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; font: 12px/1.4 var(--mono); }
+.settings h2 { font: 600 14px var(--sans); margin: 0; }
+.settings label { display: flex; flex-direction: column; gap: 3px; color: var(--mute); }
+.settings label b { color: var(--ink); font-weight: 500; }
+.settings details { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid rgba(255,255,255,.12); padding-top: 8px; }
+.settings details > * { margin-bottom: 10px; }
+.settings summary { cursor: pointer; color: var(--ink); font-size: 13px; margin-bottom: 10px; }
+.settings details:not([open]) > summary { margin-bottom: 0; }
+.settings input[type=range] { width: 100%; accent-color: var(--accent); }
+.settings select { font: inherit; background: #0e0f10; color: var(--ink); border: 1px solid var(--rule); border-radius: 4px; padding: 4px; }
+.settings .hint { color: var(--mute); font-size: 11px; }
+</style>
+
+<canvas id="cv"></canvas>
+<div class="cross"></div>
+<div class="hud" id="hud">loading…</div>
+<div class="tool" id="tool"><span data-r="0.4">1 · 0.4 m</span><span data-r="0.7">2 · 0.7 m</span><span data-r="1.2">3 · 1.2 m</span><span data-r="ball">4 · steel ball</span><span class="o">O · settings</span></div>
+<div class="settings" id="bench" hidden style="left:max(12px, env(safe-area-inset-left, 0px));right:auto;width:min(560px, calc(100vw - 24px));max-height:calc(100vh - 40px);overflow:auto">
+  <h2 id="bench-title">Benchmark</h2>
+  <pre id="bench-out" style="margin:0;white-space:pre-wrap;font:11px/1.45 var(--mono);color:var(--ink)"></pre>
+  <div style="display:flex;gap:8px"><button id="bench-copy" type="button" style="font-size:13px;padding:8px">Copy report</button><button id="bench-close" type="button" style="font-size:13px;padding:8px;background:#2a2d31;color:var(--ink)">Close</button></div>
+</div>
+<div class="settings" id="settings" hidden>
+  <h2>Settings</h2>
+  <label>Building <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option><option value="3">mixed: brick, steel, concrete, timber · 5 storeys</option><option value="4">complex: braced steel frame, timber roof, stone arcade · 2 storeys</option><option value="5">city: lots of every kind between streets</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
+  <label>City size <select id="s-city"><option value="2">2 × 2 lots</option><option value="3">3 × 3 lots</option><option value="4">4 × 4 lots</option><option value="5">5 × 5 lots</option><option value="6">6 × 6 lots</option><option value="8">8 × 8 lots</option></select><span class="hint">for the city: 40 m lots, a building of every kind; larger cities cost more GPU time and structure checks (the benchmark finds the limit); changing it rebuilds the city</span></label>
+  <label>Graphics <select id="s-gfx"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">how it is drawn: shadows and their sharpness, the resolution it is rendered at</span></label>
+  <label>Physics <select id="s-phys"><option value="">custom</option><option value="low">low · laptops, older GPUs</option><option value="medium">medium</option><option value="high">high (default)</option><option value="ultra">ultra · high-end GPUs</option></select><span class="hint">how much is simulated: the most debris kept at once, crumbs and rubble per impact, physics sub-steps, solver colours</span></label>
+  <label>Engineer's view (V) <b id="v-view"></b><input type="range" id="s-view" min="0" max="1" step="1"><span class="hint">on: every brick is coloured by how near its worst joint is to its strength (blue unloaded, green a third, yellow 70%, red at strength), and the building is drawn where the structure's solution puts it</span></label>
+  <details id="s-adv"><summary>Advanced: every parameter</summary>
+  <label>Debris kept at once <b id="v-debris"></b><input type="range" id="s-debris" min="250" max="20000" step="250"><span class="hint">falling pieces and rubble particles together: past this many, the oldest are removed, crumbs before small pieces and small pieces (under 300 kg) before big ones; at the far end of the slider, no limit. The physics preset sets it</span></label>
+  <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
+  <label>Crumbs kept per impact <b id="v-crumbs"></b><input type="range" id="s-crumbs" min="32" max="1024" step="32"><span class="hint">crushed material beyond this goes as dust (faster)</span></label>
+  <label>Displacements drawn <b id="v-viewScale"></b><input type="range" id="s-viewScale" min="0" max="4" step="1"><span class="hint">in the engineer's view: a building sags millimetres, so its displacements are drawn this many times as large</span></label>
+  <label>Dynamic structure <b id="v-dynamic"></b><input type="range" id="s-dynamic" min="0" max="1" step="1"><span class="hint">on: the standing building is stepped as a moving structure (it sags and sways, and answers a change in the step it happens, at a bounded cost); off: it is solved at rest after each change</span></label>
+  <label>Rubble weighs on floors <b id="v-restLoads"></b><input type="range" id="s-restLoads" min="0" max="1" step="1"><span class="hint">on: once a second the weight of the debris lying on the building is sent to the structure check, and a floor heaped too high gives way</span></label>
+  <label>Irregular chunks <b id="v-chunks"></b><input type="range" id="s-chunks" min="0" max="1" step="1"><span class="hint">on: loose bricks too big for particles break into convex chunks (real shapes, they tumble and pile); off: they stay boxes</span></label>
+  <label>Crumbs as particles <b id="v-particles"></b><input type="range" id="s-particles" min="0" max="1" step="1"><span class="hint">on: loose bricks up to 0.5 m are granular particles (pile and slide, much cheaper; they do not push larger pieces); off: every crumb is a rigid body</span></label>
+  <label>Rubble fragments kept per impact <b id="v-rubble"></b><input type="range" id="s-rubble" min="8" max="256" step="8"></label>
+  <label>Clean-up distance <b id="v-far"></b><input type="range" id="s-far" min="25" max="525" step="25"><span class="hint">rubble and pieces carried this far from where they broke off are removed (less to simulate and draw); at the far end of the slider, never</span></label>
+  <label>Physics sub-steps <b id="v-substeps"></b><input type="range" id="s-substeps" min="4" max="16" step="1"><span class="hint">per 1/60 s step: more = stiffer, more accurate stacks, slower</span></label>
+  <label>Real-time steps <b id="v-realtime"></b><input type="range" id="s-realtime" min="0" max="1" step="1"><span class="hint">on: when the GPU cannot keep up even at the fewest sub-steps, steps cover 1/30 s with twice the sub-steps (same accuracy, less work per second); the HUD's time ×0.xx says how far behind real time physics runs</span></label>
+  <label>Adaptive sub-steps <b id="v-adaptive"></b><input type="range" id="s-adaptive" min="0" max="1" step="1"><span class="hint">on: when physics falls behind real time, sub-steps drop (to 8 at least) and come back when the GPU has room</span></label>
+  <label>Solver colours (max) <b id="v-colors"></b><input type="range" id="s-colors" min="8" max="31" step="1"><span class="hint">contacts beyond go to a parallel pass: fewer = faster, a little softer</span></label>
+  <label>Ball speed <b id="v-bspeed"></b><input type="range" id="s-bspeed" min="20" max="300" step="10"></label>
+  <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
+  </details>
+  <details id="s-tools"><summary>Benchmark, lab checks, diagnostics</summary>
+  <h2>Benchmark</h2>
+  <span class="hint">the same scripted destruction every run: the ground storey cut by 36 fixed blasts, the tower dropping and crushing down, three steel balls; 12 s of simulated time, then a report</span>
+  <button id="bench-go" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run benchmark (reloads the page) · key K</button>
+  <button id="lab-quick" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run lab checks, quick (2 scenarios, reloads)</button>
+  <button id="lab-full" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run lab checks, full (5 scenarios, reloads)</button>
+  <h2>Diagnostics</h2>
+  <span class="hint">switch parts off one at a time while debris moves; the one that brings the frame rate back is the cause</span>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-physics" checked> step the physics</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-readback" checked> read debris back from the GPU</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-draw" checked> draw debris</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-shadows" checked> shadows</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-events" checked> impact events (breaking)</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-timing" checked> GPU timing queries</label>
+  <label style="flex-direction:row;gap:8px"><input type="checkbox" id="d-indirect"> old indirect dispatches (for comparison)</label>
+  </details>
+  <span class="hint">O or Esc closes · settings are remembered in this browser</span>
+</div>
+<div class="start" id="start">
+  <div class="card">
+    <div class="eyebrow">Shatterforge · phase 1</div>
+    <h1 id="title">A 12-storey office tower at real scale</h1>
+    <p>Every wall, slab, column and stair is a real-size brick: storeys are 3.75 m, doors 0.875 × 2.125 m, corridors 1.75 m, steps 0.25 m. Walk in through the lobby, take the stair in the core, and knock holes in it. What falls off is simulated on the GPU as rigid pieces.</p>
+    <dl class="keys">
+      <dt>Mouse</dt><dd>look (click the view first)</dd>
+      <dt>W A S D</dt><dd>walk · Shift to run · Space to jump</dd>
+      <dt>F</dt><dd>fly mode on/off · Q / E down / up while flying</dd>
+      <dt>V</dt><dd>engineer's view: load against strength as colour, and the building's sag drawn larger</dd>
+      <dt>Click</dt><dd>blast at the crosshair</dd>
+      <dt>1 2 3</dt><dd>blast radius 0.4 / 0.7 / 1.2 m</dd>
+      <dt>4</dt><dd>fire a steel ball instead (it hits the walls for real)</dd>
+      <dt>O</dt><dd>settings: building, collapse energy, debris budget, ball (scrolls)</dd>
+      <dt>K</dt><dd>run the benchmark (reloads the page, then reports)</dd>
+    </dl>
+    <div class="warn" id="warn"></div>
+    <button id="go" disabled>Loading…</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+__GPU_WORLD_JS__
+</script>
+<script>
+const WASM_B64 = "__WASM_B64__";
+__JS__
+</script>

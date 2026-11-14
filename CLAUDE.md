@@ -1,12 +1,14 @@
 # Rules for working on Shatterforge
 
+Layout: `engine/` is the engine (the future SDK: the Rust crate `sf-engine`, the GPU world, the page runtime); `game/` is its demo game (levels, player, wasm exports, page, lab). The engine never depends on the game, except that its tests take the game's level files as fixtures. `legacy/` is the retired first engine. See README.md.
+
 These hold for every change, by anyone (people or Claude).
 
 ## Tests follow the code
 1. **Run the checks that cover what you changed, before you commit.**
-   - `engine/` (Rust): `cd engine && cargo test --release`, then rebuild the wasm and the page.
-   - `gpu/gpu_world.js`: `node gpu/test_gpu.cjs` (all scenes; `tools/check.sh` does both).
-   - `game/` (the page, the lab): `python3 game/build_tower.py`, then at least `node game/lab.cjs collapse --frames 150`.
+   - `engine/src/` or `game/src/` (Rust): `cargo test --release` at the root (both crates), then rebuild the wasm and the page.
+   - `engine/gpu/gpu_world.js`: `node engine/gpu/test_gpu.cjs` (all scenes; `tools/check.sh` does both).
+   - `engine/web/`, `game/web/`, `game/lab/` (the page, the lab): `python3 game/build.py`, then at least `node game/lab/lab.cjs collapse --frames 150`.
    - Anything that changes physics, breaking, read-backs or drawing: `tools/check.sh lab` (the lab's quick suite) before publishing a build.
 2. **Every bug fixed gets a check that would have caught it**: a GPU test scene, an engine test, or a lab check or scenario. Say in the test what it reproduces and the numbers before and after the fix.
 3. **Never loosen a limit to make a check pass.** If a limit was wrong, change it in its own commit and give the physical reason in the code next to it and in docs/LAB.md or docs/GPU.md.
@@ -20,4 +22,4 @@ These hold for every change, by anyone (people or Claude).
 
 ## Practical
 - The lab runs on a virtual clock: a slow GPU changes only the wall time. On the software GPU a 4-storey collapse step takes ~4 s, so use `--frames` for quick runs and the full length before publishing.
-- `SF_NODE_MODULES` must point to a `node_modules` folder with `three` for `game/lab.cjs`; Playwright must be installed.
+- `SF_NODE_MODULES` must point to a `node_modules` folder with `three` for `game/lab/lab.cjs`; Playwright must be installed.

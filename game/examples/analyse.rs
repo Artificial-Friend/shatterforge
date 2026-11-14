@@ -1,4 +1,4 @@
-use sf_engine::{tower, structure, math::*};
+use sf_demo::{tower, structure, math::*};
 fn main() {
     let b = tower::build(12, 1);
     let set: Vec<u32> = (0..b.len() as u32).filter(|&i| b.alive(i)).collect();

@@ -403,7 +403,7 @@ pub fn build_kind(storeys: i32, structure: u16, kind: u8) -> Bricks {
     b
 }
 
-#[cfg(test)]
+#[cfg(all(test, sf_engine))]   // (run by the engine's tests, which take this file as a fixture: engine/src/lib.rs)
 mod tests {
     use super::*;
     extern crate std;
@@ -439,3 +439,22 @@ mod tests {
         assert_eq!(b.size(slab)[1], SLAB_T);
     }
 }
+
+
+/// The simulation of a level: a tower of `storeys` storeys built as `kind` (see `element_in`), or the city
+/// (`kind` 5: `storeys` is its size, n x n lots; the mesh slices reach its tallest building).
+pub fn new_kind(storeys: i32, kind: u8) -> crate::sim::Sim {
+    let b = build_kind(storeys, 1, kind);
+    let tiles = if kind == 5 {
+        let top = (0..b.len() as u32).filter(|&i| b.alive(i)).map(|i| b.tbox(i).max[1]).max().unwrap_or(0);
+        crate::sim::Tiles { tile: crate::city::pitch(), n: crate::city::layout(storeys).n, slices: top / STOREY + 2 }
+    } else { crate::sim::Tiles { tile: 0, n: 1, slices: storeys + 2 } };
+    crate::sim::Sim::from_bricks(b, tiles)
+}
+/// A concrete frame of `storeys` storeys.
+pub fn new(storeys: i32) -> crate::sim::Sim { new_kind(storeys, 0) }
+/// Where the player starts in a level.
+pub fn start(storeys: i32, kind: u8) -> crate::math::V3 {
+    if kind == 5 { let l = crate::city::layout(storeys); let x = if l.n % 2 == 1 { crate::city::PITCH_M / 2.0 } else { 0.0 }; crate::math::v3(x, 0.26, 0.0) } else { crate::math::v3(0.0, 0.26, -14.0) }
+}
+const _: () = assert!(STOREY == crate::sim::BAND);

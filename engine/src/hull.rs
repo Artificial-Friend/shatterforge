@@ -1,5 +1,5 @@
 //! The library of fracture patterns: Voronoi cells of 2-6 seeds in the cube [-1,1]^3, each cell convex. The same
-//! library as the GPU's (`hullLibrary` in gpu/gpu_world.js: the same generator, seed and limits), so a cell's hull
+//! library as the GPU's (`hullLibrary` in engine/gpu/gpu_world.js: the same generator, seed and limits), so a cell's hull
 //! id means the same shape in the engine, on the page and on the GPU. Hull 0 is the whole cube.
 //!
 //! Everything here is in the cube's coordinates; a cell of a brick is the cell mapped into the brick's box

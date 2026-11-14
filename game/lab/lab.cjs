@@ -1,16 +1,16 @@
-// The lab, headless: node game/lab.cjs [quick|full|scenario ...] [--read-lag N] [--job-lag N] [--out DIR]
-// Runs each scenario of the page's lab (game/lab.js) in headless Chrome on the software GPU, on the lab's
+// The lab, headless: node game/lab/lab.cjs [quick|full|scenario ...] [--read-lag N] [--job-lag N] [--out DIR]
+// Runs each scenario of the page's lab (game/lab/lab.js) in headless Chrome on the software GPU, on the lab's
 // virtual clock (so slowness changes nothing but the wall time), prints the checks and writes the full reports
 // (events, time series) as JSON. Exit code 1 when a check fails.
 const { chromium } = require('playwright');
 const fs = require('fs'), path = require('path');
 const args = process.argv.slice(2);
 const opt = (k, d) => { const i = args.indexOf(k); if (i < 0) return d; const v = args[i + 1]; args.splice(i, 2); return v; };
-const readLag = +opt('--read-lag', 2), jobLag = +opt('--job-lag', 4), outDir = path.resolve(opt('--out', path.join(__dirname, '..', 'lab-results')));
+const readLag = +opt('--read-lag', 2), jobLag = +opt('--job-lag', 4), outDir = path.resolve(opt('--out', path.join(__dirname, '..', '..', 'lab-results')));
 const frames = opt('--frames', null), trace = opt('--trace', null);
 // --twice: run each scenario twice and compare them frame by frame (the lab must be deterministic)
 const twice = args.includes('--twice'); if (twice) args.splice(args.indexOf('--twice'), 1);
-const root = path.join(__dirname, '..');
+const root = path.join(__dirname, '..', '..');
 const page0 = fs.readFileSync(path.join(root, 'dist/tower.html'), 'utf8');
 const SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complexstand', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'], city: ['citystand', 'city'] };
 const names = args.length ? args.flatMap(a => a.startsWith('=') ? [a.slice(1)] : SUITES[a] || [a]) : SUITES.quick;   // (=name: the scenario, where a suite has its name)

@@ -397,7 +397,7 @@ pub fn build_parts_n(storeys: usize) -> (Bricks, Parts) {
     (b, parts)
 }
 
-#[cfg(test)]
+#[cfg(all(test, sf_engine))]   // (run by the engine's tests, which take this file as a fixture: engine/src/lib.rs)
 mod tests {
     use super::*;
     extern crate std;
@@ -434,7 +434,7 @@ mod tests {
         for (ai, a) in p.arches.iter().enumerate() { for (k, w) in a.windows(2).enumerate() { assert!(joined(w[0], w[1]), "arch {ai}: stones {k} and {} joined ({:?} {:?})", k + 1, b.centroid(w[0]), b.centroid(w[1])); } }
         for (k, &s) in p.keystones.iter().enumerate() { assert!(joined(s, p.loggia), "keystone {k} carries the loggia"); }
         for r in &p.rafters { assert!(joined(*r.last().unwrap(), p.ridge) || joined(r[0], p.ridge), "rafter on the ridge"); }
-        let mut g = crate::game::Game::new_kind(3, 4);
+        let mut g = crate::tower::new_kind(3, 4);
         let n = g.structure_step(64);
         let made = g.pieces.iter().filter(|p| !p.is_empty()).count();
         std::println!("first structure step: {made} pieces made (the furniture)");
@@ -486,9 +486,9 @@ mod tests {
         // the brace's 0.238 (0.68). Cut down like boxes, only what is inside goes: 0.127 m^3 (0.53; a 1.5 m sphere
         // covers about 3 of the brace's 6 m), and the brace is left in more, smaller pieces.
         let (b, p) = build_parts();
-        let mut g = crate::game::Game::new_kind(3, 4);
+        let mut g = crate::tower::new_kind(3, 4);
         g.structure_step(64);
-        let braces = |g: &crate::game::Game| -> std::vec::Vec<u32> { (0..g.b.len() as u32).filter(|&i| g.b.alive(i) && g.b.piece(i).is_some() && g.b.mat[i as usize] == mat::STEEL && g.b.flags[i as usize] & crate::brick::F_DYNAMIC == 0).collect() };
+        let braces = |g: &crate::sim::Sim| -> std::vec::Vec<u32> { (0..g.b.len() as u32).filter(|&i| g.b.alive(i) && g.b.piece(i).is_some() && g.b.mat[i as usize] == mat::STEEL && g.b.flags[i as usize] & crate::brick::F_DYNAMIC == 0).collect() };
         let (n0, v0): (usize, f64) = { let s = braces(&g); (s.len(), s.iter().map(|&i| g.b.volume(i)).sum()) };
         // the room shot's hit point: 9.88 m along the shot from (-6, 5.5, -16) to the north
         g.blast(crate::math::v3(-6.0, 5.5, -16.0 + 9.88 + 0.05), 1.5);
@@ -507,7 +507,7 @@ mod tests {
         // room). (The arches as they were, the floor on a stone beam over the crowns: the stones fell, 7 of 8, and two
         // arches to the west with them.) The arch with nothing over it is in docs/PHASE2.md (still to do).
         let (_, p) = build_parts();
-        let mut g = crate::game::Game::new_kind(3, 4);
+        let mut g = crate::tower::new_kind(3, 4);
         g.structure_step(64);
         let arch = p.arches[2].clone(); let key = p.keystones[2];
         g.b.remove(key);
@@ -528,7 +528,7 @@ mod tests {
         // with them, and the test removed another brick in the keystone's slot: the crowns of all six arches failed,
         // 90 joints. It was the test, not the analysis.)
         let (_, p) = build_parts();
-        let mut g = crate::game::Game::new_kind(3, 4);
+        let mut g = crate::tower::new_kind(3, 4);
         g.structure_step(64);
         // (taken off quietly: a removal marks what it touched as a fracture surface, and the next step spalled the
         // stones' tops, keystones and all)
@@ -551,9 +551,9 @@ mod tests {
         // (the floor over them holds the rest: an_arch_under_the_loggia_stands_without_its_keystone).
         let (b0, p) = build_parts();
         let kb = b0.tbox(p.keystones[2]);
-        let mut g = crate::game::Game::new_kind(3, 4);
+        let mut g = crate::tower::new_kind(3, 4);
         g.structure_step(64);
-        let inside = |g: &crate::game::Game| -> f64 { (0..g.b.len() as u32).filter(|&i| g.b.alive(i) && g.b.flags[i as usize] & crate::brick::F_DYNAMIC == 0 && { let c = g.b.centroid(i); let t = |v: i32| v as f64 * crate::brick::TICK as f64; c[0] > t(kb.min[0]) && c[0] < t(kb.max[0]) && c[1] > t(kb.min[1]) && c[1] < t(kb.max[1]) && c[2] > t(kb.min[2]) && c[2] < t(kb.max[2]) }).map(|i| g.b.volume(i)).sum() };
+        let inside = |g: &crate::sim::Sim| -> f64 { (0..g.b.len() as u32).filter(|&i| g.b.alive(i) && g.b.flags[i as usize] & crate::brick::F_DYNAMIC == 0 && { let c = g.b.centroid(i); let t = |v: i32| v as f64 * crate::brick::TICK as f64; c[0] > t(kb.min[0]) && c[0] < t(kb.max[0]) && c[1] > t(kb.min[1]) && c[1] < t(kb.max[1]) && c[2] > t(kb.min[2]) && c[2] < t(kb.max[2]) }).map(|i| g.b.volume(i)).sum() };
         let v0 = inside(&g);
         g.blast(crate::math::v3(-1.5, 3.4, -9.5 + 0.05), 0.75);
         let v1 = inside(&g);

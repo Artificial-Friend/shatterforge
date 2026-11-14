@@ -1,14 +1,14 @@
 //! The standing structure as a dynamic model (structure::Dyn, docs/DYNAMIC.md): what a game sees of it.
 extern crate std;
-use crate::game::Game;
+use crate::sim::Sim;
 use crate::math::v3;
 use std::{println, time::Instant, vec::Vec};
 
 const DT: f32 = 1.0 / 60.0;
-fn largest_piece(g: &Game) -> usize { g.pieces.iter().map(|p| p.len()).max().unwrap_or(0) }
-fn disp(g: &Game) -> f64 { g.dynst.values().map(|s| s.0.max_disp()).fold(0.0, f64::max) }
+fn largest_piece(g: &Sim) -> usize { g.pieces.iter().map(|p| p.len()).max().unwrap_or(0) }
+fn disp(g: &Sim) -> f64 { g.dynst.values().map(|s| s.0.max_disp()).fold(0.0, f64::max) }
 /// the ground storey blasted away except round (kx, kz)
-fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
+fn cut_but(g: &mut Sim, keep: Option<(f32, f32)>) {
     let mut x = -11.6f32;
     while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 {
         if keep.map_or(true, |k| (x - k.0).abs() > 1.3 || (z - k.1).abs() > 1.3) { g.blast(v3(x, 1.6, z), 0.7); }
@@ -18,7 +18,7 @@ fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
 #[test] fn a_standing_building_costs_no_iterations_and_does_not_drift() {
     // the 12-storey tower, solved at rest, then 600 dynamic steps (10 s): no step needs an iteration, nothing
     // moves and nothing fails
-    let mut g = Game::new_kind(12, 0);
+    let mut g = crate::tower::new_kind(12, 0);
     g.dynamic = true;
     assert_eq!(g.structure_step(64), 0, "the tower stands");
     let (d0, r0) = (disp(&g), g.max_ratio);
@@ -36,8 +36,8 @@ fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
     // a corner column of the 4-storey concrete frame blasted out. Solved at rest (round after round until nothing
     // fails) and stepped dynamically (2 s of steps): the same joints give way, and the worst joint left ends the
     // same. Every dynamic step is bounded.
-    let run = |dynamic: bool| -> (Game, Vec<(usize, f32, usize, f32)>, f64) {
-        let mut g = Game::new_kind(4, 0);
+    let run = |dynamic: bool| -> (Sim, Vec<(usize, f32, usize, f32)>, f64) {
+        let mut g = crate::tower::new_kind(4, 0);
         g.dynamic = dynamic;
         assert_eq!(g.structure_step(64), 0);
         for y in [0.8f32, 1.6, 2.4] { g.blast(v3(10.7, y, -10.7), 0.8); }
@@ -66,13 +66,13 @@ fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
 }
 
 #[test] fn a_tower_on_one_column_comes_down_in_bounded_steps() {
-    // game::tests::a_tower_left_on_one_column_comes_down, stepped dynamically. At rest the first solve of this
+    // sim::tests::a_tower_left_on_one_column_comes_down, stepped dynamically. At rest the first solve of this
     // mechanism takes 340 iterations on the 12-storey tower (docs/STRUCTURE.md); a dynamic step is bounded, and the
     // floors come down all the same.
     for (storeys, kind, keep) in [(4, 0u8, (-10.7f32, -10.7f32)), (4, 1, (-3.7, -3.7)), (12, 0, (-3.7, -3.7))] {
         let mut out = Vec::new();
         for dynamic in [false, true] {
-            let mut g = Game::new_kind(storeys, kind);
+            let mut g = crate::tower::new_kind(storeys, kind);
             g.dynamic = dynamic;
             assert_eq!(g.structure_step(64), 0);
             cut_but(&mut g, Some(keep));
@@ -104,10 +104,10 @@ fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
     // step every 4 frames). The complex building's stones stand on open and hinged beds: with the beds started
     // closed at every step, no step found it at rest (70 steps in 280 frames, each re-opening them, and the lab's
     // settled check failed); kept between steps, it rests.
-    let shoot = |g: &mut Game| { let (o, d) = (v3(16.0, 1.5, 6.0), v3(-1.0, 0.0, 0.0)); let t = g.raycast(o, d, 100.0); if t < 100.0 { g.blast(o + d * t, 0.7); } };
+    let shoot = |g: &mut Sim| { let (o, d) = (v3(16.0, 1.5, 6.0), v3(-1.0, 0.0, 0.0)); let t = g.raycast(o, d, 100.0); if t < 100.0 { g.blast(o + d * t, 0.7); } };
     let mut out = Vec::new();
     for dynamic in [false, true] {
-        let mut g = Game::new_kind(3, 4);
+        let mut g = crate::tower::new_kind(3, 4);
         g.dynamic = dynamic;
         g.structure_step(64);
         let r0 = g.max_ratio;
@@ -133,11 +133,11 @@ fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
     // the 4-storey frame, its structure step asked for the view; the page's copy takes it (here the same game) and
     // draws the displacements 100 times as large, coloured by load. The roof comes down by 100 times what the top
     // cells moved, faces are cut along the cells (a slab drawn sagging bends), and bricks take their load's colour.
-    let mut g = Game::new_kind(4, 0);
+    let mut g = crate::tower::new_kind(4, 0);
     g.dynamic = true; g.view_want = true;
     assert_eq!(g.structure_step(64), 0);
-    let top = |g: &Game| g.chunks.iter().flat_map(|m| m.v.chunks(9).map(|v| v[1])).fold(f32::MIN, f32::max);
-    let quads = |g: &Game| g.chunks.iter().map(|m| m.quads).sum::<usize>();
+    let top = |g: &Sim| g.chunks.iter().flat_map(|m| m.v.chunks(9).map(|v| v[1])).fold(f32::MIN, f32::max);
+    let quads = |g: &Sim| g.chunks.iter().map(|m| m.quads).sum::<usize>();
     for k in 0..g.chunks.len() as i32 { g.remesh(k); }
     let (top0, q0) = (top(&g), quads(&g));
     let cells = g.view_out[1 + 2 * g.view_out[0] as usize] as usize;
@@ -163,7 +163,7 @@ fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
 #[test] fn a_city_is_stepped_lot_by_lot() {
     // the 3 x 3 city: solved at rest lot by lot, then stepped dynamically. At rest nothing moves or fails; the
     // complex building's corner column shot out moves its lot only, and the city rests again.
-    let mut g = Game::new_kind(3, 5);
+    let mut g = crate::tower::new_kind(3, 5);
     g.dynamic = true; g.view_want = true;
     let t = Instant::now();
     assert_eq!(g.structure_step(64), 0, "the city stands");
@@ -203,7 +203,7 @@ fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
     // last, most of the city's 960 (672 ms of meshing, native). Now a lot at rest is written once, and only the
     // chunks of the bricks named are remeshed: a step at rest writes nothing, and a column shot out on one lot
     // remeshes that lot's chunks.
-    let mut g = Game::new_kind(8, 5);
+    let mut g = crate::tower::new_kind(8, 5);
     g.dynamic = true;
     g.structure_step(48);
     g.view_want = true; for a in g.active.iter_mut() { *a = true; } for st in g.dynst.values_mut() { st.1.viewed = false; }
@@ -237,10 +237,10 @@ fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
     // worst joint from the solve as the game runs it against the same solved to 1e-12. As it was (r z down by 1e-5,
     // every cell held to the ground by a weak spring, blocks rigid across open beds) the game's solve read 0.917
     // standing and 0.855 without the column; solved out they are 0.416 and 0.817.
-    let shoot = |g: &mut Game| { let (o, d) = (v3(16.0, 1.5, 6.0), v3(-1.0, 0.0, 0.0)); let t = g.raycast(o, d, 100.0); if t < 100.0 { g.blast(o + d * t, 0.7); } };
+    let shoot = |g: &mut Sim| { let (o, d) = (v3(16.0, 1.5, 6.0), v3(-1.0, 0.0, 0.0)); let t = g.raycast(o, d, 100.0); if t < 100.0 { g.blast(o + d * t, 0.7); } };
     let run = |tol: f64| {
         crate::structure::TOL_TEST.with(|t| t.set(tol));
-        let mut g = Game::new_kind(3, 4);
+        let mut g = crate::tower::new_kind(3, 4);
         g.structure_step(64);
         let (r0, i0) = (g.max_ratio, g.last_iterations);
         for _ in 0..4 { shoot(&mut g); }
@@ -260,8 +260,8 @@ fn cut_but(g: &mut Game, keep: Option<(f32, f32)>) {
 /// a building of `kind` stepped dynamically at `dt` after `cut`, for `secs` at most: (joints failed, biggest
 /// falling piece, time of the first joint over 0.7 of strength, time of the first failure, time the first part
 /// left the structure, worst joint left, steps)
-fn fall(storeys: i32, kind: u8, dt: f32, secs: f32, cut: &dyn Fn(&mut Game)) -> (usize, usize, f32, f32, f32, f32, usize) {
-    let mut g = Game::new_kind(storeys, kind);
+fn fall(storeys: i32, kind: u8, dt: f32, secs: f32, cut: &dyn Fn(&mut Sim)) -> (usize, usize, f32, f32, f32, f32, usize) {
+    let mut g = crate::tower::new_kind(storeys, kind);
     g.dynamic = true;
     assert_eq!(g.structure_step(64), 0);
     cut(&mut g);
@@ -287,7 +287,7 @@ fn same_fall(gate: bool) {
     // twice the same: the same numbers to the last joint. (At a step of 1/30 s for 1/60 s, a frame rate halved,
     // the joints and the piece within 5%: the test below, not in the default run.)
     for (storeys, kind, keep) in [(4, 0u8, (-10.7f32, -10.7f32)), (4, 1, (-3.7, -3.7)), (12, 0, (-3.7, -3.7))] {
-        let cut = move |g: &mut Game| cut_but(g, Some(keep));
+        let cut = move |g: &mut Sim| cut_but(g, Some(keep));
         let (a, b, c) = (fall(storeys, kind, DT, 10.0, &cut), fall(storeys, kind, DT, 10.0, &cut), fall(storeys, kind, 2.0 * DT, 10.0, &cut));
         println!("{storeys} storeys, kind {kind}, left on one column: at 1/60 s {} joints failed, biggest piece {} bricks, {} steps (again: {} and {}, {}); at 1/30 s {} joints, biggest piece {}, {} steps", a.0, a.1, a.6, b.0, b.1, b.6, c.0, c.1, c.6);
         assert_eq!((a.0, a.1, a.6), (b.0, b.1, b.6), "twice the same");
@@ -299,12 +299,12 @@ fn same_fall(gate: bool) {
 // Out of the default run (docs/LAB.md, 11 Nov, "Stage 6"): 0.05, 0.017 and 0.017 s. A building whose ground storey
 // is gone but one column is falling from the first step, and a falling part is 5 cm down in 0.1 s: there is no
 // 0.3 s to have. The gate was wrong for this case; warning belongs to a building near its limit that wears
-// (game::tests::a_building_left_near_its_limit_wears_and_comes_down_over_time: 1 s and more).
+// (sim::tests::a_building_left_near_its_limit_wears_and_comes_down_over_time: 1 s and more).
 #[test] #[ignore] fn a_building_warns_before_it_goes() {
     // left on one column: between the first joint past 0.7 of strength (what a creak or a crack shown would be
     // tied to) and the first part leaving the structure, at least 0.3 s
     for (storeys, kind, keep) in [(4, 0u8, (-10.7f32, -10.7f32)), (4, 1, (-3.7, -3.7)), (12, 0, (-3.7, -3.7))] {
-        let cut = move |g: &mut Game| cut_but(g, Some(keep));
+        let cut = move |g: &mut Sim| cut_but(g, Some(keep));
         let a = fall(storeys, kind, DT, 10.0, &cut);
         println!("{storeys} storeys, kind {kind}, left on one column: first joint past 0.7 at {:.3} s, first failure at {:.3} s, first part gone at {:.3} s: {:.3} s of warning", a.2, a.3, a.4, a.4 - a.2);
         assert!(a.2 > 0.0 && a.4 > 0.0);
@@ -324,11 +324,11 @@ fn same_fall(gate: bool) {
         let kind = (case % 5) as u8;
         let storeys = if kind == 4 { 3 } else { 4 };
         let shots: Vec<(f32, f32, f32)> = (0..1 + (rnd() * 3.0) as usize).map(|_| (-11.0 + 22.0 * rnd(), 0.8 + 4.5 * rnd(), -11.0 + 22.0 * rnd())).collect();
-        let mut s = Game::new_kind(storeys, kind);
+        let mut s = crate::tower::new_kind(storeys, kind);
         assert_eq!(s.structure_step(64), 0);
         for &(x, y, z) in &shots { s.blast(v3(x, y, z), 0.7); }
         let mut fs = 0; for _ in 0..60 { let n = s.structure_step(64); fs += n; if n == 0 { break; } }
-        let cut = |g: &mut Game| { for &(x, y, z) in &shots { g.blast(v3(x, y, z), 0.7); } };
+        let cut = |g: &mut Sim| { for &(x, y, z) in &shots { g.blast(v3(x, y, z), 0.7); } };
         let d = fall(storeys, kind, DT, 3.0, &cut);
         let stands = fs == 0 && s.max_ratio < 0.8;
         if stands { stood += 1; if d.0 == 0 { both += 1; worst_gap = worst_gap.max((d.5 - s.max_ratio).abs()); } else { bad.push((case, kind, s.max_ratio, d.0)); } }
@@ -347,11 +347,11 @@ fn same_fall(gate: bool) {
     // structure steps at the cap, never settled). Kept between lists, and with a settling step's tolerance measured
     // against the loads as every step's is, the building rests within a few steps of each list. This test before:
     // 60 of 90 steps moving, 60 at the cap, 4 rests forced; after: 3, 0, 0.
-    let shoot = |g: &mut Game| { let (o, d) = (v3(16.0, 1.5, 6.0), v3(-1.0, 0.0, 0.0)); let t = g.raycast(o, d, 100.0); if t < 100.0 { g.blast(o + d * t, 0.7); } };
-    let mut g = Game::new_kind(3, 4);
+    let shoot = |g: &mut Sim| { let (o, d) = (v3(16.0, 1.5, 6.0), v3(-1.0, 0.0, 0.0)); let t = g.raycast(o, d, 100.0); if t < 100.0 { g.blast(o + d * t, 0.7); } };
+    let mut g = crate::tower::new_kind(3, 4);
     g.dynamic = true;
     g.structure_step(64);
-    let step = |g: &mut Game| { g.struct_dt = 4.0 / 60.0; g.structure_step(48) };
+    let step = |g: &mut Sim| { g.struct_dt = 4.0 / 60.0; g.structure_step(48) };
     for k in 0..60 { if k < 4 { shoot(&mut g); } step(&mut g); }
     assert!(!g.moving, "at rest after the shots");
     let (mut moving, mut capped, mut failed, mut applied, mut longest, mut run) = (0, 0, 0, 0.0f32, 0, 0);
@@ -370,7 +370,7 @@ fn same_fall(gate: bool) {
 
 /// a player at the west side shooting through the ground storey: `per` shots along each of the lines z, each
 /// at whatever stands first in the way
-fn player_shots(g: &mut Game, k: usize, zs: &[f32], reach: f32) -> bool {
+fn player_shots(g: &mut Sim, k: usize, zs: &[f32], reach: f32) -> bool {
     let z = zs[k % zs.len()];
     let (o, d) = (v3(-40.0, 1.5 + 0.9 * ((k / zs.len()) % 2) as f32, z), v3(1.0, 0.0, 0.0));
     let t = g.raycast(o, d, 40.0 + reach);
@@ -384,11 +384,11 @@ fn player_shots(g: &mut Game, k: usize, zs: &[f32], reach: f32) -> bool {
     // held against 4.65 times its own load. Now no rest is forced and no cell is relieved of more than 3% of its
     // load (and 763 joints fail for 984: more of it comes down).
     let zs: Vec<f32> = (0..36).map(|i| -17.5 + i as f32).collect();
-    let mut g = Game::new_kind(3, 4);
+    let mut g = crate::tower::new_kind(3, 4);
     g.dynamic = true;
     g.structure_step(64);
     let (mut shots, mut worst, mut moving, mut capped, mut its, mut slow) = (0, 0.0f64, 0, 0, 0, 0.0f64);
-    let mut go = |g: &mut Game| { let t = Instant::now(); g.struct_dt = 4.0 / 60.0; g.structure_step(64); slow = slow.max(t.elapsed().as_secs_f64() * 1e3); its += g.dyn_its; if g.moving { moving += 1; } if g.dyn_capped { capped += 1; } for s in g.dynst.values() { worst = worst.max(s.1.bias_share); } };
+    let mut go = |g: &mut Sim| { let t = Instant::now(); g.struct_dt = 4.0 / 60.0; g.structure_step(64); slow = slow.max(t.elapsed().as_secs_f64() * 1e3); its += g.dyn_its; if g.moving { moving += 1; } if g.dyn_capped { capped += 1; } for s in g.dynst.values() { worst = worst.max(s.1.bias_share); } };
     for k in 0..700 { if player_shots(&mut g, k, &zs, 8.0) { shots += 1; if shots % 2 == 0 { go(&mut g); } } }
     for _ in 0..150 { go(&mut g); }
     let forced: usize = g.dynst.values().map(|s| s.1.forced).sum();
@@ -405,9 +405,9 @@ fn player_shots(g: &mut Game, k: usize, zs: &[f32], reach: f32) -> bool {
     // building's wall: joints break and none yields. 3 kN s on the column: nothing yields or breaks.
     // (scanned, SF_SCAN: at 60 kN s the frame has no joint yielding, at 100 3, at 150 9 with 31 broken, at 200 it
     // comes down.)
-    let hit = |g: &mut Game, p: crate::math::V3, j: f32| { g.inp.extend_from_slice(&[-1.0, p.x, p.y, p.z, 1.0, 0.0, 0.0, j, 12.0, 3.0, 0.0]); g.impacts(1.0 / 60.0); };
+    let hit = |g: &mut Sim, p: crate::math::V3, j: f32| { g.inp.extend_from_slice(&[-1.0, p.x, p.y, p.z, 1.0, 0.0, 0.0, j, 12.0, 3.0, 0.0]); g.impacts(1.0 / 60.0); };
     let run = |storeys: i32, kind: u8, o: crate::math::V3, j: f32| {
-        let mut g = Game::new_kind(storeys, kind);
+        let mut g = crate::tower::new_kind(storeys, kind);
         g.dynamic = true;
         g.structure_step(64);
         let t = g.raycast(o, v3(1.0, 0.0, 0.0), 60.0); assert!(t < 60.0);
@@ -432,13 +432,13 @@ fn player_shots(g: &mut Game, k: usize, zs: &[f32], reach: f32) -> bool {
 }
 
 /// the complex building with the ground columns of some grid lines shot out (each at 1 and 2.5 m up)
-fn columns_out(g: &mut Game, xs: &[f32]) { for &x in xs { for &z in &[-6.0f32, 0.0, 6.0] { for &y in &[1.0f32, 2.5] { g.blast(v3(x, y, z), 0.7); } } } }
+fn columns_out(g: &mut Sim, xs: &[f32]) { for &x in xs { for &z in &[-6.0f32, 0.0, 6.0] { for &y in &[1.0f32, 2.5] { g.blast(v3(x, y, z), 0.7); } } } }
 #[test] fn a_frame_that_lost_columns_hangs_bent() {
     // the complex building built 5 storeys tall, the ground columns of its two western grid lines shot out. Part of
     // it comes down; what is left hangs over the gap on steel that has yielded, sagged by centimetres, and stays so.
     // (13 Nov. Before plastic joints a joint over its strength broke: nothing sagged more than the millimetres of
     // its elastic bending, and a part either stood as built or fell. Solved at rest, 0 mm, by the same cut.)
-    let mut g = Game::new_kind(5, 4); g.dynamic = true; g.structure_step(64);
+    let mut g = crate::tower::new_kind(5, 4); g.dynamic = true; g.structure_step(64);
     columns_out(&mut g, &[-9.0, -3.0]);
     let (mut yl, mut steps) = (0, 0);
     for _ in 0..900 { g.struct_dt = DT; let n = g.structure_step(64); steps += 1; for s in g.dynst.values() { yl = yl.max(s.1.yielding); } if n == 0 && !g.moving && steps > 4 { break; } }
@@ -449,7 +449,7 @@ fn columns_out(g: &mut Game, xs: &[f32]) { for &x in xs { for &z in &[-6.0f32, 0
 }
 // The design table: every kind of building at the heights the city builds it, standing under its own weight and
 // what its floors carry: its worst joint or section, and the two worst kinds of joint. Not a check (the checks are
-// `game::tests` and `city::tests`); run it when a building, a strength or a load changes:
+// `sim::tests` and `city::tests`); run it when a building, a strength or a load changes:
 //   cargo test --release standing_margins -- --ignored --nocapture      (SF_KIND=n for one kind;
 //   SF_IMPOSED=N/m2 and SF_SHEAR=MPa try a floor load and a concrete shear strength; SF_NOCM=1 bonds concrete to brick)
 #[test] #[ignore] fn the_buildings_standing_margins() {
@@ -484,7 +484,7 @@ fn columns_out(g: &mut Game, xs: &[f32]) { for &x in xs { for &z in &[-6.0f32, 0
 // stepped dynamically (not a check; `cargo test --release what_a_cut_leaves -- --ignored --nocapture`).
 #[test] #[ignore] fn what_a_cut_leaves() {
     for xmax in [-8.0f32, -6.0, -4.0] { for dynamic in [false, true] {
-        let mut g = Game::new_kind(4, 0); g.dynamic = dynamic; g.structure_step(64);
+        let mut g = crate::tower::new_kind(4, 0); g.dynamic = dynamic; g.structure_step(64);
         let mut x = -11.7f32; while x <= xmax { let mut z = -11.7f32; while z <= 11.7 { g.blast(v3(x, 1.6, z), 0.7); z += 0.8; } x += 0.8; }
         let (mut yl, mut steps, mut peak) = (0, 0, 0.0f64);
         for _ in 0..900 { if dynamic { g.struct_dt = 4.0 / 60.0; } let n = g.structure_step(64); steps += 1; peak = peak.max(disp(&g)); for s in g.dynst.values() { yl = yl.max(s.1.yielding); } if n == 0 && !g.moving { break; } }

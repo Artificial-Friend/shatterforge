@@ -2,12 +2,12 @@
 // gpu_world.js): the same cells, boxes, volumes and centroids. (The GPU keeps a cell's volume as a share of its
 // own box, the engine as a share of the cube.) A cell's hull id must mean the same shape in the
 // engine (which splits fractured bricks into cells) and on the GPU (which collides them).
-//   node gpu/test_hulls.cjs      (after the wasm build)
+//   node engine/gpu/test_hulls.cjs      (after the wasm build)
 const fs = require('fs'), path = require('path');
 const src = fs.readFileSync(path.join(__dirname, 'gpu_world.js'), 'utf8');
 const a = src.indexOf('const HULL = '), b = src.indexOf('const HULLS = hullLibrary();');
 const HULLS = new Function(src.slice(a, b) + '\nreturn hullLibrary();')();
-const wasm = fs.readFileSync(path.join(__dirname, '../engine/target/wasm32-unknown-unknown/release/sf_engine.wasm'));
+const wasm = fs.readFileSync(path.join(__dirname, '../../target/wasm32-unknown-unknown/release/sf_demo.wasm'));
 WebAssembly.instantiate(wasm, {}).then(({ instance }) => {
   const E = instance.exports, n = E.hull_count();
   let worst = 0, bad = [];

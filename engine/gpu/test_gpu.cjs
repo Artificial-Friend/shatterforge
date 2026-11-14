@@ -1,11 +1,11 @@
 // Headless checks of the WebGPU engine (SwiftShader here; any WebGPU in a real browser).
-// Usage: node gpu/test_gpu.cjs [scene...]
+// Usage: node engine/gpu/test_gpu.cjs [scene...]
 //   parity : box, stack, column, pile      (same scenes as the CPU reference engine, compared to it)
 //   physics: bounce, incline, wall, bullet, beam, sleep
 const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
-const root = path.resolve(__dirname, '..');
-const wasm = fs.readFileSync(path.join(root, 'engine/target/wasm32-unknown-unknown/release/sf_engine.wasm')).toString('base64');
+const root = path.resolve(__dirname, '..', '..');
+const wasm = fs.readFileSync(path.join(root, 'target/wasm32-unknown-unknown/release/sf_demo.wasm')).toString('base64');
 const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {

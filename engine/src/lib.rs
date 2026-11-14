@@ -1,4 +1,5 @@
-//! Shatterforge engine (phase 0 prototypes): adaptive brick store and box rigid-body solver.
+//! Shatterforge engine: the brick store, the structure (at rest and dynamic), break plans, meshes and the
+//! simulation that ties them (`sim::Sim`). No levels, no player, no page: those are the demo's (game/).
 #![cfg_attr(target_arch = "wasm32", no_std)]
 extern crate alloc;
 
@@ -23,25 +24,17 @@ pub type Map<K, V> = hashbrown::HashMap<K, V, core::hash::BuildHasherDefault<Fx>
 pub type Set<K> = hashbrown::HashSet<K, core::hash::BuildHasherDefault<Fx>>;
 pub mod brick;
 pub mod phys;
-pub mod tower;
-pub mod complex;
-pub mod city;
 pub mod mesh;
-pub mod player;
-pub mod game;
+pub mod sim;
 pub mod structure;
 pub mod hull;
 mod validation;
+
+// The engine's tests run on the demo's buildings: its level files are taken in as fixtures, for tests only. They
+// reach the engine as `crate::brick` and so on, which is what the demo crate re-exports under the same names.
+#[cfg(test)] #[path = "../../game/src/tower.rs"] pub mod tower;
+#[cfg(test)] #[path = "../../game/src/complex.rs"] pub mod complex;
+#[cfg(test)] #[path = "../../game/src/city.rs"] pub mod city;
+#[cfg(test)] #[path = "../../game/src/player.rs"] pub mod player;
 #[cfg(test)] mod dyn_tests;
 #[cfg(test)] mod dyn_closed;
-
-#[cfg(target_arch = "wasm32")]
-#[global_allocator]
-static ALLOC: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;
-
-#[cfg(all(target_arch = "wasm32", not(test)))]
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! { core::arch::wasm32::unreachable() }
-
-#[cfg(target_arch = "wasm32")]
-pub mod wasm;

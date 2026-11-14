@@ -1,8 +1,7 @@
 // Cut the whole ground storey with a sweep of blasts: does the tower above detach? If not, show what holds it.
-use sf_engine::game::Game;
 use sf_engine::math::*;
 fn main() {
-    let mut g = Game::new(12);
+    let mut g = sf_demo::tower::new(12);
     let mut x = -11.6f32;
     let mut big = 0;
     while x <= 11.7 { let mut z = -11.6f32; while z <= 11.7 {

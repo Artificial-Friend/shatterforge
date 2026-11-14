@@ -52,15 +52,18 @@ fn world() -> &'static mut World { unsafe { WORLD.get_or_insert_with(World::new)
     p.as_ptr()
 }
 
-// ---------------------------------------------------------------- phase-1 playground (game.rs)
-use crate::game::Game;
-static mut GAME: Option<Game> = None;
+// ---------------------------------------------------------------- phase-1 playground (sim.rs)
+use crate::sim::Sim;
+static mut GAME: Option<Sim> = None;
+static mut PLAYER: Option<crate::player::Player> = None;
 #[allow(static_mut_refs)]
-fn game() -> &'static mut Game { unsafe { GAME.as_mut().unwrap() } }
+fn player() -> &'static mut crate::player::Player { unsafe { PLAYER.as_mut().unwrap() } }
+#[allow(static_mut_refs)]
+fn game() -> &'static mut Sim { unsafe { GAME.as_mut().unwrap() } }
 
-#[no_mangle] pub extern "C" fn game_new(storeys: u32) { unsafe { GAME = Some(Game::new(storeys as i32)); } }
+#[no_mangle] pub extern "C" fn game_new(storeys: u32) { unsafe { GAME = Some(crate::tower::new(storeys as i32)); PLAYER = Some(crate::player::Player::new(crate::tower::start(storeys as i32, 0))); } }
 /// A tower of `kind`: 0 concrete frame, 1 masonry, 2 timber.
-#[no_mangle] pub extern "C" fn game_new_kind(storeys: u32, kind: u32) { unsafe { GAME = Some(Game::new_kind(storeys as i32, kind as u8)); } }
+#[no_mangle] pub extern "C" fn game_new_kind(storeys: u32, kind: u32) { unsafe { GAME = Some(crate::tower::new_kind(storeys as i32, kind as u8)); PLAYER = Some(crate::player::Player::new(crate::tower::start(storeys as i32, kind as u8))); } }
 // ---- handing the brick store between the simulation worker and the page
 static mut SNAP: Vec<u8> = Vec::new();
 #[allow(static_mut_refs)]
@@ -111,7 +114,7 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn dirty_hi() -> i32 { game().dirty.1 }
 #[no_mangle] pub extern "C" fn out_ptr() -> *const f32 { game().out.as_ptr() }
 #[no_mangle] pub extern "C" fn out_len() -> u32 { game().out.len() as u32 }
-/// the page's copy: the motion of the structure's cell at a point (Game::view_motion): 1 if found; then motion_ptr (12 numbers)
+/// the page's copy: the motion of the structure's cell at a point (Sim::view_motion): 1 if found; then motion_ptr (12 numbers)
 #[no_mangle] pub extern "C" fn view_motion(x: f32, y: f32, z: f32) -> i32 { game().view_motion([x, y, z]) as i32 }
 #[no_mangle] pub extern "C" fn motion_ptr() -> *const f32 { game().motion.as_ptr() }
 /// a new list of rubble lying on the structure follows (`rest_load`), replacing the last
@@ -120,7 +123,7 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn rest_applied() -> f32 { game().rest_applied }
 #[no_mangle] pub extern "C" fn cracked_total() -> u32 { game().cracked_total as u32 }
 #[no_mangle] pub extern "C" fn bricks_dump() { game().dump(); }
-/// a free piece's shape (Game::piece_shape) into its own buffer: its length; then piece_ptr
+/// a free piece's shape (Sim::piece_shape) into its own buffer: its length; then piece_ptr
 #[no_mangle] pub extern "C" fn piece_shape(k: u32) -> u32 { game().piece_shape(k) as u32 }
 #[no_mangle] pub extern "C" fn piece_ptr() -> *const f32 { game().piece_out.as_ptr() }
 #[no_mangle] pub extern "C" fn blast(x: f32, y: f32, z: f32, r: f32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.blast(v3(x, y, z), r) as u32; g.finish_plans(); n }
@@ -128,22 +131,22 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn bricks_alive() -> u32 { game().b.alive_count() as u32 }
 #[no_mangle] pub extern "C" fn joints_live() -> u32 { game().b.live_joints as u32 }
 #[no_mangle] pub extern "C" fn bytes_per_brick() -> f32 { game().b.total_bytes_per_brick() }
-#[no_mangle] pub extern "C" fn player_set(x: f32, y: f32, z: f32) { let g = game(); g.player.p = v3(x, y, z); g.player.v = V3::ZERO; }
+#[no_mangle] pub extern "C" fn player_set(x: f32, y: f32, z: f32) { let p = player(); p.p = v3(x, y, z); p.v = V3::ZERO; }
 #[no_mangle] pub extern "C" fn player_step(dt: f32, wx: f32, wy: f32, wz: f32, jump: u32, fly: u32) {
-    let g = game(); g.player.step(&g.b, dt, v3(wx, wy, wz), jump != 0, fly != 0);
+    let g = game(); player().step(&g.b, dt, v3(wx, wy, wz), jump != 0, fly != 0);
 }
 /// the debris near the player (from the page's read-back), as oriented boxes the player stands on and walks into
-#[no_mangle] pub extern "C" fn player_debris_clear() { game().player.extra.clear(); }
-#[no_mangle] pub extern "C" fn player_debris_box(cx: f32, cy: f32, cz: f32, qx: f32, qy: f32, qz: f32, qw: f32, hx: f32, hy: f32, hz: f32) { game().player.extra.push(crate::player::Obstacle::obb([cx, cy, cz], [qx, qy, qz, qw], [hx, hy, hz])); }
-#[no_mangle] pub extern "C" fn player_get(axis: u32) -> f32 { game().player.p.get(axis as usize) }
-#[no_mangle] pub extern "C" fn player_on_ground() -> u32 { game().player.on_ground as u32 }
+#[no_mangle] pub extern "C" fn player_debris_clear() { player().extra.clear(); }
+#[no_mangle] pub extern "C" fn player_debris_box(cx: f32, cy: f32, cz: f32, qx: f32, qy: f32, qz: f32, qw: f32, hx: f32, hy: f32, hz: f32) { player().extra.push(crate::player::Obstacle::obb([cx, cy, cz], [qx, qy, qz, qw], [hx, hy, hz])); }
+#[no_mangle] pub extern "C" fn player_get(axis: u32) -> f32 { player().p.get(axis as usize) }
+#[no_mangle] pub extern "C" fn player_on_ground() -> u32 { player().on_ground as u32 }
 #[no_mangle] pub extern "C" fn structure_step(max_fail: u32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.structure_step(max_fail as usize) as u32; g.finish_plans(); n }
 /// pieces the last structure step sent off: with no failures, loose contents (the page applies its output then too)
 /// the building has loose bricks (room contents) not yet sent off: the page runs a first structure step
 #[no_mangle] pub extern "C" fn loose_pending() -> u32 { game().loose_pending as u32 }
 #[no_mangle] pub extern "C" fn last_detached() -> u32 { game().last_detached as u32 }
 #[no_mangle] pub extern "C" fn structure_ratio() -> f32 { game().max_ratio }
-/// The structure as the engineer sees it (Game::view_out, view_apply): what the last structure step wrote, and in
+/// The structure as the engineer sees it (Sim::view_out, view_apply): what the last structure step wrote, and in
 /// the page's copy room to take it, drawing it, and leaving the view.
 #[no_mangle] pub extern "C" fn view_ptr() -> *const f32 { game().view_out.as_ptr() }
 #[no_mangle] pub extern "C" fn view_len() -> u32 { game().view_out.len() as u32 }
@@ -165,7 +168,7 @@ static mut SNAP: Vec<u8> = Vec::new();
 #[no_mangle] pub extern "C" fn dup_bricks() -> u32 { game().dup_bricks as u32 }
 #[no_mangle] pub extern "C" fn spill_why(k: u32) -> u32 { game().spill_why[(k as usize).min(3)] as u32 }
 #[no_mangle] pub extern "C" fn spill_mat(k: u32) -> u32 { if k == 8 { game().spill_single as u32 } else { game().spill_mat[(k as usize).min(7)] as u32 } }
-/// Room for `n` impact records (11 floats each, see `Game::impacts`); returns where to write them.
+/// Room for `n` impact records (11 floats each, see `Sim::impacts`); returns where to write them.
 #[no_mangle] pub extern "C" fn impacts_in(n: u32) -> *mut f32 { let g = game(); g.inp.clear(); g.inp.resize(n as usize * 11, 0.0); g.inp.as_mut_ptr() }
 #[no_mangle] pub extern "C" fn impacts(dt: f32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.impacts(dt) as u32; g.finish_plans(); n }
 #[no_mangle] pub extern "C" fn piece_blast(piece: u32, x: f32, y: f32, z: f32, r: f32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.blast_piece(piece, v3(x, y, z), r) as u32; g.finish_plans(); n }
@@ -174,7 +177,7 @@ static mut SNAP: Vec<u8> = Vec::new();
     game().impact(piece, v3(px, py, pz), v3(dx, dy, dz), impulse, approach, dt) as u32
 }
 
-/// The engine's hull library, for the check against the GPU's (gpu/test_hulls.cjs): the number of hulls, and
+/// The engine's hull library, for the check against the GPU's (engine/gpu/test_hulls.cjs): the number of hulls, and
 /// per hull k = 0..2 its box centre, 3..5 half size, 6 volume share, 7..9 centroid (cube coordinates), 10 pattern
 #[no_mangle] pub extern "C" fn hull_count() -> u32 { crate::hull::lib().cells.len() as u32 }
 #[no_mangle] pub extern "C" fn hull_value(id: u32, k: u32) -> f64 {
@@ -182,9 +185,9 @@ static mut SNAP: Vec<u8> = Vec::new();
     match k { 0..=2 => c.bc[k as usize], 3..=5 => c.bh[k as usize - 3], 6 => c.vol, 7..=9 => c.cen[k as usize - 7], _ => c.pattern as f64 }
 }
 
-/// The GPU broke falling piece `piece` by its plan (see Game::snap); the result in `out`.
+/// The GPU broke falling piece `piece` by its plan (see Sim::snap); the result in `out`.
 #[no_mangle] pub extern "C" fn piece_snap(piece: u32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.snap(piece) as u32; g.finish_plans(); n }
-/// The break plans made by the last call (see Game::plan_out)
+/// The break plans made by the last call (see Sim::plan_out)
 #[no_mangle] pub extern "C" fn plan_ptr() -> *const f32 { game().plan_out.as_ptr() }
 #[no_mangle] pub extern "C" fn plan_len() -> u32 { game().plan_out.len() as u32 }
 /// The city's lots (kind 5, `n` a side): how many, and lot k's field f: 0 kind, 1 storeys, 2 quarter turns, 3 x, 4 z

@@ -1,6 +1,6 @@
 # The city (kind 5)
 
-A city of n × n lots on a 40 m pitch, a building on each, streets between (`engine/src/city.rs`). In the page: Settings → Building → city, and Settings → City size (2 × 2 to 8 × 8 lots; 3 × 3 by default). The engine takes the size as its storeys (`game_new_kind(n, 5)`).
+A city of n × n lots on a 40 m pitch, a building on each, streets between (`game/src/city.rs`). In the page: Settings → Building → city, and Settings → City size (2 × 2 to 8 × 8 lots; 3 × 3 by default). The engine takes the size as its storeys (`game_new_kind(n, 5)`).
 
 ## Layout
 
@@ -18,7 +18,7 @@ Test `city::tests::a_turned_copy_keeps_its_joints`: the complex building in each
 
 ## Structure checks by lot
 
-- Each lot is analysed on its own (`Game::structure_step`). Analysed all at once, the solver's accuracy is relative to the whole city: in a 5 × 5 city, the arches of two complex buildings came out as mechanisms (2.25 and 1.19 of strength), where alone they stand at 0.66.
+- Each lot is analysed on its own (`Sim::structure_step`). Analysed all at once, the solver's accuracy is relative to the whole city: in a 5 × 5 city, the arches of two complex buildings came out as mechanisms (2.25 and 1.19 of strength), where alone they stand at 0.66.
 - A lot is analysed again only when it has changed (a brick removed, split or detached there), rubble lies on it, or it has joints wearing. A lot left alone gives the same answer every time.
 - Each lot keeps its last worst ratio; the city's worst is the largest.
 
@@ -35,7 +35,7 @@ Test `city::tests::the_city_is_what_it_should_be_and_stands` (native, release, b
 
 ## The dynamic structure by lot (branch `test`, docs/DYNAMIC.md)
 
-- Each lot keeps its own displacements, velocities and beds (`Game::dynst`), and is stepped on its own. A lot still moving stays active; the others cost nothing.
+- Each lot keeps its own displacements, velocities and beds (`Sim::dynst`), and is stepped on its own. A lot still moving stays active; the others cost nothing.
 - Test `dyn_tests::a_city_is_stepped_lot_by_lot` (native, release, build machine): the 3 × 3 city's first step solves its 9 lots at rest in 704–990 ms; at rest a step takes 0.2 ms. A column of the complex building shot out moves lot 0 only: at rest again after 95 steps (1.6 s), the slowest 31 ms.
 - The engineer's view (key V) colours every brick of the city by its load and draws the lots where their solutions put them: 7,539 bricks and 32,819 cells, 475 kB when it is switched on (every lot analysed once), then only the lots that change.
 

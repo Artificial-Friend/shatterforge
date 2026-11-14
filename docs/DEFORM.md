@@ -6,9 +6,9 @@ stages with a gate each. The standing structure's bending is docs/DYNAMIC.md ("P
 
 ## What a falling piece is today
 
-- **A rigid body on the GPU** (`gpu/gpu_world.js`): a compound of boxes and hulls with one position, one
+- **A rigid body on the GPU** (`engine/gpu/gpu_world.js`): a compound of boxes and hulls with one position, one
   rotation, one velocity. It cannot change shape. A steel beam that comes off lands as straight as it left.
-- **It breaks, it does not bend.** A hard contact reaches the engine through `Game::impacts` (game.rs): the
+- **It breaks, it does not bend.** A hard contact reaches the engine through `Sim::impacts` (sim.rs): the
   material near the contact is crushed by the impact's energy (1/2 J v), and the piece is then checked *at rest*
   under its own inertia, every brick loaded by its mass times the piece's deceleration and held at the
   contact (`structure::analyse`). Joints over their strength crack or part; the piece splits into new rigid
@@ -119,7 +119,7 @@ flight and tumbling of any length cost nothing and the leaving rule does not app
 
 **2. Landing.** A piece's hard contacts (already reported: body, point, direction, impulse, approach speed)
 become kicks on its network, held where it touches for the length of the impact. The check at rest in
-`Game::impacts` stays for brittle pieces (masonry, glass, plain concrete), which is right for them and cheap;
+`Sim::impacts` stays for brittle pieces (masonry, glass, plain concrete), which is right for them and cheap;
 ductile pieces (steel, reinforced concrete, timber) take the step.
 - Gate a: a steel beam dropped flat across a support at mid-span: the hinge's turn against the rigid-plastic
   answer (energy in over Mp, less what the test measures as crushed), within 20%, at three heights.

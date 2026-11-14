@@ -350,7 +350,7 @@ pub struct Dyn {
     /// asked for (`want_cells`): the free cells after the last step, for the page's view of the structure:
     /// (brick, corner x, z; far corner x, z (ticks); centre (m); displacement (m) and rotation (rad))
     pub want_cells: bool,
-    /// the view of this lot has been written since it was last asked for (`Game::view_out`): a lot at rest is
+    /// the view of this lot has been written since it was last asked for (`Sim::view_out`): a lot at rest is
     /// not written again
     pub viewed: bool,
     pub cells: Vec<([i32; 5], [f64; 3], [f64; 6])>,
@@ -370,7 +370,7 @@ pub struct Dyn {
     /// cells with no way to a support are stepped too, held by their mass alone (a piece in flight: docs/DEFORM.md).
     /// Only a dynamic step can: at rest nothing holds them. Not used by the game yet.
     pub free: bool,
-    /// the lot has sagged enough to be drawn where it is (`game::VIEW_BEND`)
+    /// the lot has sagged enough to be drawn where it is (`sim::VIEW_BEND`)
     pub bent: bool,
     /// after a solve at rest: the most any cell's loads and springs leave out of balance, over the structure's
     /// largest load on a cell (what the solve's tolerance leaves; `bias` is this, limited)
@@ -1322,7 +1322,7 @@ fn spring(b: &Bricks, nodes: &[Node], l: &Link) -> Spring {
     let pocket = l.joint != NONE && ax != 1 && ax < 3 && ((mi == mat::STEEL && mo == mat::MASONRY) || (mi == mat::MASONRY && mo == mat::STEEL));
     let mut f = if infill || pocket { 0.02 } else if mono { 0.05 } else { 1.0 };
     // a cracked joint is about half as stiff (a cracked concrete section's I is 0.3-0.5 of the uncracked one),
-    // and wear softens it further, to a fifth when worn through (game.rs, wear_joints): its load moves on
+    // and wear softens it further, to a fifth when worn through (sim.rs, wear_joints): its load moves on
     if l.joint != NONE { let d = b.jdmg[l.joint as usize]; f *= (if d & 1 != 0 { 0.5 } else { 1.0 }) * (1.0 - 0.6 * (d >> 1) as f64 / 127.0); }
     for i in 0..3 { k[i] *= f; kr[i] *= f; }
     if l.joint != NONE && hinge(b, ia, ib) { if ax < 3 { kr[(ax + 1) % 3] = 0.0; kr[(ax + 2) % 3] = 0.0; } else { kr[1] = 0.0; kr[2] = 0.0; } }

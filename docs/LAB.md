@@ -1,5 +1,8 @@
 # Lab: scenario checks as data
 
+> **Paths (14 November, second commit of the day):** the repository is split into `engine/` (the future SDK) and `game/` (its demo). In this file, paths and names are the current ones throughout, older entries included: `game/lab/lab.cjs` (was `game/lab.cjs`), `engine/gpu/` (was `gpu/`), `engine/src/sim.rs` and `Sim` (were `game.rs` and `Game`), the levels in `game/src/` (were in `engine/src/`). README.md has the layout.
+
+
 The lab runs scripted destruction scenarios and reports what happened as numbers and pass/fail checks, not as screenshots. It runs the same way in a browser on a real GPU and headless on a software GPU.
 
 ## How it works
@@ -106,11 +109,11 @@ Suites: `quick` (collapse, ball) and `full` (all seven).
 **Headless (software GPU).** From the repository root:
 
 ```
-node game/lab.cjs quick                      # or full, or scenario names
-node game/lab.cjs collapse --frames 150      # a shortened run
-node game/lab.cjs collapse --trace 36:58     # trace the bodies made in frames 36-58
-node game/lab.cjs ball --read-lag 3 --job-lag 6
-node game/lab.cjs collapse --frames 150 --twice   # determinism: twice, compared frame by frame
+node game/lab/lab.cjs quick                      # or full, or scenario names
+node game/lab/lab.cjs collapse --frames 150      # a shortened run
+node game/lab/lab.cjs collapse --trace 36:58     # trace the bodies made in frames 36-58
+node game/lab/lab.cjs ball --read-lag 3 --job-lag 6
+node game/lab/lab.cjs collapse --frames 150 --twice   # determinism: twice, compared frame by frame
 ```
 
 The runner prints the summaries and writes `lab-results/<scenario>.json` and `all.json`. It exits with 1 when a check fails. It needs Playwright and `three` (set `SF_NODE_MODULES` to a `node_modules` folder that has `three`). On the software GPU a 4-storey collapse step takes about 4 s, so 150 frames take about 10 minutes.
@@ -164,7 +167,7 @@ Determinism holds on one machine and browser. A different GPU or driver rounds d
 
 ## The foundation changes, compared (November 2026)
 
-Each line is one collapse run of 150 frames on the software GPU (`node game/lab.cjs collapse --frames 150`), counted from its events. Runs vary (GPU atomics), so there are three of each. The raw lines are in `lab-results/cmp_*.txt`.
+Each line is one collapse run of 150 frames on the software GPU (`node game/lab/lab.cjs collapse --frames 150`), counted from its events. Runs vary (GPU atomics), so there are three of each. The raw lines are in `lab-results/cmp_*.txt`.
 
 **Convex cells against boxes** (spring-network solver, no GPU breaks):
 
@@ -208,7 +211,7 @@ What the kept version does:
 
 ## Rebounds and launches (7 November)
 
-**How they were found.** Runs are now the same every time, so one bad bounce can be replayed and traced. `SF_TRACE_BODIES=42,95 node game/lab.cjs collapse --frames 66 --trace 50:65` records the chosen bodies every frame, straight from the GPU: pose, velocity, mass, and every contact with its normal, points, impulses and approach speeds (`btrace` in the report). In the first rebounds:
+**How they were found.** Runs are now the same every time, so one bad bounce can be replayed and traced. `SF_TRACE_BODIES=42,95 node game/lab/lab.cjs collapse --frames 66 --trace 50:65` records the chosen bodies every frame, straight from the GPU: pose, velocity, mass, and every contact with its normal, points, impulses and approach speeds (`btrace` in the report). In the first rebounds:
 - A 2.3 t piece wedged in a pocket of the 138 t upper part went from −2.1 to +1.6 m/s.
 - A 49 kg piece under a 773 kg one took 76,000 N s from the ground in one step.
 
@@ -242,7 +245,7 @@ The building comes down much further: the roof goes from 18.64 to 4.29 m, agains
 - The new check "body slots freed twice" (limit 0) counts it.
 - The 36 jumps of seed 7 without either change are a spare thrown up about 1 m per frame at frame 142, a launch rather than a read-back fault (`read-back check` 0).
 
-**Debugging switches** (`game/lab.cjs`):
+**Debugging switches** (`game/lab/lab.cjs`):
 - `SF_TRACE_BODIES` (with `--trace`)
 - `SF_SEED`
 - `SF_PINCH`
@@ -421,7 +424,7 @@ Scenarios `complex`, `complexcol`, `complexroom`, `keystone` (suite `complex`; d
 
 The box buildings on the same build (quick suite, full length): `collapse` as at the end of phase 0 (2 frames drawn below, 7 jumps, 3 rebounds, 21 energy gains, not settled by 10 s; it settles at 15 s), `ball` passes, determinism OK. With particles taking every hull (the library's cells too) by its faces, `ball` had a crumb jump 0.31 m (limit 0.26): cells keep their boxes for particles (docs/GPU.md, Convex chunks).
 
-After the arcade's redesign and the furniture (9 November, later; software GPU, 300 frames each; `node game/lab.cjs complex --frames 300`, `keystone` run on its own because its title line holds " of " and the suite's output filter dropped it):
+After the arcade's redesign and the furniture (9 November, later; software GPU, 300 frames each; `node game/lab/lab.cjs complex --frames 300`, `keystone` run on its own because its title line holds " of " and the suite's output filter dropped it):
 - `complexstand` passes: 171 loose objects settle on the floors, nothing fails.
 - `complex` (ground storey and piers cut): the building comes down, roof 10.89 -> 3.74 m by 5 s, dust 3.5%. Open: 8 frames drawn below and 6 above what exists (holes and duplicates while parts are cut free; 6 and 2 before), 14 rebounds and one crumb thrown up at 5.7 m/s, all at frame 39 (furniture parts hit by the falling floor: the first, a 3-box object at 2.5 m), not settled by 5 s. The furniture is new bodies falling with the building; the rebounds are written down here and in docs/PHASE2.md.
 - `complexcol`, `complexroom` pass.
@@ -431,7 +434,7 @@ Box buildings on the same build: `collapse` as the phase-0 baseline (2 below, 7 
 
 ## 9 November, evening: the city; the keystone shot; the complex building's rebounds traced
 
-Software GPU, 300 frames each (`node game/lab.cjs complex --frames 300`, `node game/lab.cjs city --frames 300`).
+Software GPU, 300 frames each (`node game/lab/lab.cjs complex --frames 300`, `node game/lab/lab.cjs city --frames 300`).
 
 **The city (`citystand`, `city`; docs/CITY.md)**
 - `citystand` (3 × 3 lots, left alone) passes. It settles at once; the GPU takes 55 ms a step (median), the same as one complex building standing (22 ms), plus the static shapes.
@@ -460,7 +463,7 @@ Software GPU, 300 frames each (`node game/lab.cjs complex --frames 300`, `node g
 
 ## 10 November: the dynamic structure (branch `test`, docs/DYNAMIC.md)
 
-Software GPU. `tools/check.sh lab` (collapse 600 frames, ball, the page checks, collapse twice), then `node game/lab.cjs complex --frames 300`, `node game/lab.cjs city --frames 300` and `node game/lab.cjs far`, all on the build with the dynamic structure on. `SF_STATIC=1` runs a scenario with it off. `mixed` (960 frames) and `nibble` followed, and `nibble` again with `SF_STATIC=1`.
+Software GPU. `tools/check.sh lab` (collapse 600 frames, ball, the page checks, collapse twice), then `node game/lab/lab.cjs complex --frames 300`, `node game/lab/lab.cjs city --frames 300` and `node game/lab/lab.cjs far`, all on the build with the dynamic structure on. `SF_STATIC=1` runs a scenario with it off. `mixed` (960 frames) and `nibble` followed, and `nibble` again with `SF_STATIC=1`.
 
 **What the lab now records.** Each structure job in a report's timeline carries `dyn`: the solver's iterations, whether the structure is still moving, the cells that left it and the joints cut for them, whether the solve stopped at its cap, and the fastest cell (mm/s).
 
@@ -513,7 +516,7 @@ Software GPU. `tools/check.sh lab` (collapse 600 frames, ball, the page checks, 
 
 ## 11 November: the dynamic structure reworked (docs/DYNPLAN.md stages 0–2 and 6, docs/DYNAMIC.md)
 
-Software GPU, the build of this commit. `tools/check.sh lab`; `node game/lab.cjs complex --frames 300`, `city --frames 300`, `far`, `mixed`; and `tools/compare.sh ball`, `complexcol`, `keystone`, `nibble` (each scenario at its full length, with the dynamic structure and with `SF_STATIC=1`). Software-GPU times compare only with each other, and only within one comparison: the machine's load changed between runs (`ball`'s GPU step: 640 ms in one run, 80 ms in the next).
+Software GPU, the build of this commit. `tools/check.sh lab`; `node game/lab/lab.cjs complex --frames 300`, `city --frames 300`, `far`, `mixed`; and `tools/compare.sh ball`, `complexcol`, `keystone`, `nibble` (each scenario at its full length, with the dynamic structure and with `SF_STATIC=1`). Software-GPU times compare only with each other, and only within one comparison: the machine's load changed between runs (`ball`'s GPU step: 640 ms in one run, 80 ms in the next).
 
 **The scoreboard (`tools/compare.sh <scenario>`, stage 0).** It runs a scenario both ways and prints the failed checks, the engine jobs' times, the slowest job by name (the timeline now carries each job's time), the structure steps and those at the cap, and four gates.
 
@@ -567,7 +570,7 @@ It costs: the complex building's analysis is 2.7 times the frame's a node (44.7 
 
 ### The cut mixed building is at its limit
 
-`game::tests::parts_far_above_a_cut_do_not_fall_on_their_own` (the mixed building's west wall and half its fronts shot away, then 20 s of checks with wear; it asks for no failure from the fourth storey up) is out of the default run.
+`sim::tests::parts_far_above_a_cut_do_not_fall_on_their_own` (the mixed building's west wall and half its fronts shot away, then 20 s of checks with wear; it asks for no failure from the fourth storey up) is out of the default run.
 
 | Solve | Worst joint after the cut | Joints wearing | Failures in storeys 1–3 / above, 20 s |
 | --- | --- | --- | --- |
@@ -629,7 +632,7 @@ Asked for after the first fixes of the day: the calibration (floor loads, streng
 
 ### The calibration: what could be done, and what the buildings do not allow
 
-| Change | Done | Standing, worst joint (native, `Game::new_kind`, first solve) |
+| Change | Done | Standing, worst joint (native, `Sim::new_kind`, first solve) |
 | --- | --- | --- |
 | Concrete's flexural strength 10 MPa for 12 | yes | 4-storey frame 0.34 → 0.34, 12-storey 0.39 → 0.42, masonry 0.59 → 0.59, mixed 0.56 → 0.56, complex 0.42 → 0.42; the frame with a line of ground columns gone 0.57 → 0.57 (its worst joint is shear's) |
 | Floors carry 1,000 N/m² besides themselves (`IMPOSED`) | **no**: the code and its mass are in, set to 0 | frame 0.39, 12-storey 0.46, masonry 0.65, mixed 0.67, complex 0.48, 3 × 3 city 0.89 and its lots no longer rest |
@@ -656,7 +659,7 @@ Asked for after the first fixes of the day: the calibration (floor loads, streng
 
 ### The ball (`tallball`, new scenario)
 
-Asked for: a ball or car into a taller building, the first impact the strongest, stopped part-way by what it breaks. `node game/lab.cjs tallball`, software GPU, 600 frames: an 8-storey concrete frame, a steel ball of 0.4 m sent down onto the middle of a roof bay at 45 m/s.
+Asked for: a ball or car into a taller building, the first impact the strongest, stopped part-way by what it breaks. `node game/lab/lab.cjs tallball`, software GPU, 600 frames: an 8-storey concrete frame, a steel ball of 0.4 m sent down onto the middle of a roof bay at 45 m/s.
 
 | | |
 | --- | --- |
@@ -679,7 +682,7 @@ Asked for: a ball or car into a taller building, the first impact the strongest,
 
 - **Why:** the GPU stops a body against the standing structure as against a rigid wall, in the step of the hit; the engine crushes and breaks what was hit some frames later. So a hit bounces first and breaks second: the body is never slowed by going through. "The first impact is the strongest" holds (it is a rigid stop); "resistance stops it in the middle" holds only when the bounce brings it back into the hole it made.
 - **What it needs:** a hit that breaks what it meets goes on with what is left of its energy (the page has the body's velocity before the hit and gives it back for falling pieces that are cut free, `noRebound`; not for a body against the structure). That is the next piece of work on hits, with the crushing of the pieces themselves (DYNPLAN stage 7).
-- The complex building has no walls or floors a ball from the side meets, and its roof is pitched: the scenario is on the frame for that reason. `complex::build_tall` and `Game::new_kind(5, 4)` build the taller complex building (it stands at 0.87).
+- The complex building has no walls or floors a ball from the side meets, and its roof is pitched: the scenario is on the frame for that reason. `complex::build_tall` and `Sim::new_kind(5, 4)` build the taller complex building (it stands at 0.87).
 
 ### Checks on this build (software GPU)
 
@@ -726,7 +729,7 @@ docs/STRUCTURE.md, "The buildings with their floors loaded", has the table and t
 | −4 m | 227 joints fail, 7 pieces | 385 joints fail, 17 pieces; 52 joints yielding at most; what stands is 13 mm down |
 
   On 13 November the same frame stood with a whole edge line of ground columns gone at 0.57, "unbent, as before".
-- **Wear.** `game::tests::a_building_left_near_its_limit_wears_and_comes_down_over_time`: the test's preparation now nibbles the ground storey in 0.4 m rows until the worst joint is at 0.90 (it stopped at 0.77 where, with the frame standing at 0.60, nothing wears in the time watched). One joint wears through after 41 s (56 crack with it), the rest is relieved, and nothing more goes in the 450 s watched; the next 0.4 m row brings the frame down at once. That a worn building comes down round on round (before: from 0.99, failures in checks 1, 5, 47, 59, 121) is no longer seen: that gate is the ignored test `a_worn_building_comes_down_in_several_rounds`, a known gap (rule 5). The window between "wears" and "falls at once" is narrower than one 0.4 m row on this frame.
+- **Wear.** `sim::tests::a_building_left_near_its_limit_wears_and_comes_down_over_time`: the test's preparation now nibbles the ground storey in 0.4 m rows until the worst joint is at 0.90 (it stopped at 0.77 where, with the frame standing at 0.60, nothing wears in the time watched). One joint wears through after 41 s (56 crack with it), the rest is relieved, and nothing more goes in the 450 s watched; the next 0.4 m row brings the frame down at once. That a worn building comes down round on round (before: from 0.99, failures in checks 1, 5, 47, 59, 121) is no longer seen: that gate is the ignored test `a_worn_building_comes_down_in_several_rounds`, a known gap (rule 5). The window between "wears" and "falls at once" is narrower than one 0.4 m row on this frame.
 
 ### The sums checked
 
@@ -769,7 +772,7 @@ A collapse makes a few big bodies first (the storeys above the cut) and thousand
 
 ### Checks on this build (software GPU, 14 November)
 
-`tools/check.sh lab`: engine 98 passed, 15 ignored; GPU suite 40 of 40; page checks `rest`, `debris`, `view`, `settings` pass; `collapse` over 150 frames the same twice. Then every scenario by name (`node game/lab.cjs =name`, full length); docs/STATUS.md has the rows. Software-GPU timings of this night are not comparable with each other: the machine was restarted part-way and ran several times faster after.
+`tools/check.sh lab`: engine 98 passed, 15 ignored; GPU suite 40 of 40; page checks `rest`, `debris`, `view`, `settings` pass; `collapse` over 150 frames the same twice. Then every scenario by name (`node game/lab/lab.cjs =name`, full length); docs/STATUS.md has the rows. Software-GPU timings of this night are not comparable with each other: the machine was restarted part-way and ran several times faster after.
 
 | Scenario | Result | 13 November or before |
 | --- | --- | --- |

@@ -1,6 +1,6 @@
 # WebGPU rigid-body engine
 
-`gpu/gpu_world.js` is the engine's rigid-body physics. It runs entirely on the GPU, with no read-back during a step.
+`engine/gpu/gpu_world.js` is the engine's rigid-body physics. It runs entirely on the GPU, with no read-back during a step.
 
 The CPU engine in `engine/src/phys.rs` is the reference for the shared core:
 - box contacts
@@ -148,7 +148,7 @@ Crumbs are particles: spheres of the brick's volume, drawn as the bricks they ar
 
 Particles cut from a moving body wait (state 4) and are placed at the next step from the parent's pose then, like its pieces (`breakBody(parent, kids, pr, qr, dvs, parts, pdvs)`).
 
-## Validation (`node gpu/test_gpu.cjs`, headless Chrome with SwiftShader WebGPU)
+## Validation (`node engine/gpu/test_gpu.cjs`, headless Chrome with SwiftShader WebGPU)
 
 | Check | Expected | GPU result |
 | --- | --- | --- |
@@ -217,7 +217,7 @@ GPU test `pinch` turns it on and passes, but it passes with it off too, because 
 
 ## Breaking in the step of the hit
 
-The engine answers a hit about 4 frames late. So each new falling piece carries a break plan from it (`Game::plan_piece`): where it breaks first, and how hard a hit must be to break it there.
+The engine answers a hit about 4 frames late. So each new falling piece carries a break plan from it (`Sim::plan_piece`): where it breaks first, and how hard a hit must be to break it there.
 
 How the engine makes the plan:
 - The piece is loaded with its own weight, resting on its bricks within 0.5 m of its lowest.
@@ -309,7 +309,7 @@ GPU test `determinism`: three scenes, each run twice, every pose (and particle) 
 - A pile of 120 convex chunks, 90 frames.
 - Everything at once: a 7,700 t block crushing 24 pieces (24 crushed), 1,500 particles poured, a column broken on the GPU (1 break), and a body broken into pieces as it falls, one of them broken again in the same step.
 
-The lab checks the whole system (page, engine, GPU): `node game/lab.cjs collapse --frames 150 --twice` runs the collapse twice and compares a digest of every frame. The digest covers poses, particles, bodies, breaks, dust, bricks, joints, contacts and the GPU's inputs, and it reports where the two runs part. `tools/check.sh lab` runs it.
+The lab checks the whole system (page, engine, GPU): `node game/lab/lab.cjs collapse --frames 150 --twice` runs the collapse twice and compares a digest of every frame. The digest covers poses, particles, bodies, breaks, dust, bricks, joints, contacts and the GPU's inputs, and it reports where the two runs part. `tools/check.sh lab` runs it.
 
 Three things made lab runs differ besides the GPU's atomics, all fixed:
 - the stats were read whenever the browser had mapped them (the lab now waits for them every frame, `flushStats`);
@@ -327,7 +327,7 @@ Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall throu
 
 ## Still to do
 
-- **A fast-spinning chunk sinks into the ground (open, 9 November).** The GPU test `hullthrow` throws the hull library's cells; with six runtime hulls registered before it (`freehull` ran first), it drew another random sample, and library cell 39, thrown as body 75 spinning at 49 rad/s (corners at about 15 m/s), had a corner 7.6 cm inside the ground at frame 8 (limit 5 cm; the scene's own sample: 1.2 cm). Reproduce: `HTHROW_ALL=1 node gpu/test_gpu.cjs freehull hullthrow`. The scene now throws the library's cells only, as written (the runtime hulls have `freehull`); the deeper case is not the margin (`ground_margin` covers w r dt) but the contacts: found once a frame, they cannot follow a body that turns 0.8 rad (47 degrees) in that frame, and corners that were not touching at its start come round into the ground. Candidates: a cap on the turn per frame (0.25 rad: 15 rad/s at 60 Hz) for bodies off the ground, or contacts found again in the sub-steps for the few spinning that fast.
+- **A fast-spinning chunk sinks into the ground (open, 9 November).** The GPU test `hullthrow` throws the hull library's cells; with six runtime hulls registered before it (`freehull` ran first), it drew another random sample, and library cell 39, thrown as body 75 spinning at 49 rad/s (corners at about 15 m/s), had a corner 7.6 cm inside the ground at frame 8 (limit 5 cm; the scene's own sample: 1.2 cm). Reproduce: `HTHROW_ALL=1 node engine/gpu/test_gpu.cjs freehull hullthrow`. The scene now throws the library's cells only, as written (the runtime hulls have `freehull`); the deeper case is not the margin (`ground_margin` covers w r dt) but the contacts: found once a frame, they cannot follow a body that turns 0.8 rad (47 degrees) in that frame, and corners that were not touching at its start come round into the ground. Candidates: a cap on the turn per frame (0.25 rad: 15 rad/s at 60 Hz) for bodies off the ground, or contacts found again in the sub-steps for the few spinning that fast.
 
 - **Rebounds in the collapse (open).** With shock propagation, the lab collapse (150 frames, seeds 0 / 7 / 8) counts 10 / 6 / 11 rebounds and 5 / 2 / 0 launches, against 13 / 26 / 16 and 7 / 6 / 8 without it. What is left is mostly pieces landing at 2–3 m/s and leaving at 1–2 m/s. Some may be real: the check reads the centre's speed, and a spinning piece that lands on one end can send its centre up. The launches left are spares and slivers at 5–14 m/s.
 
