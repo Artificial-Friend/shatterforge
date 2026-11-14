@@ -766,3 +766,24 @@ A collapse makes a few big bodies first (the storeys above the cut) and thousand
 - These numbers are choices, not measurements: no real GPU has run them (rule 8). The benchmark's report line now names both presets and the debris kept, so a run on a real machine says which it was.
 - Every slider is under "Advanced: every parameter", folded; benchmark, lab and diagnostics under a second fold. Moving a slider that a preset set shows the preset as "custom". The old single "Quality" setting, if saved, becomes both presets.
 - Page check `settings` (new, in `tools/check.sh lab`): folded at the start, sliders inside the fold, low and ultra set what the table says, a real key press on a slider turns the preset to custom, the choice is saved and restored.
+
+### Checks on this build (software GPU, 14 November)
+
+`tools/check.sh lab`: engine 98 passed, 15 ignored; GPU suite 40 of 40; page checks `rest`, `debris`, `view`, `settings` pass; `collapse` over 150 frames the same twice. Then every scenario by name (`node game/lab.cjs =name`, full length); docs/STATUS.md has the rows. Software-GPU timings of this night are not comparable with each other: the machine was restarted part-way and ran several times faster after.
+
+| Scenario | Result | 13 November or before |
+| --- | --- | --- |
+| `citystand` (3 × 3 city left alone, floors loaded) | **passes**: no joint fails, settled at 9.1 s | passed with nothing on the floors; at 1,000 N/m² the city stood at 0.89 and did not rest |
+| `complexstand`, `complexcol`, `complexroom`, `keystone`, `far`, `ball` | pass | pass |
+| `masonry` (ground storey cut) | comes down (roof 14.89 → 11.84 m); fails 6 of the falling pieces' checks (9 rebounds, 3 thrown up, 7 moving too far, 2 frames drawn above, 1 energy gain, not settled) | not in STATUS before |
+| `mixed` | comes down (22.39 → 10.02 m); fails 5 (17 rebounds, 3 thrown up, 6 moving too far, 6 frames drawn below, not settled) | failed (29 rebounds, crumbled share 0.27, ...) |
+| `timber` | comes down (15 → 11.77 m); fails 4 (7 rebounds, ...) | not in STATUS before |
+| `collapse` | fails 3: 2 frames drawn below, 4 pieces moving too far, **12 energy gains** (79); settled at 9.9 s (not settled) | fails 3 |
+| `complex` | fails 6 (14 rebounds, crumbled share 0.80, ...) | failed at 300 frames (15 rebounds, 0.76) |
+| `city` (two lots cut) | fails 8 (19 rebounds, 6 thrown up, 28 moving too far, crumbled share 0.92, ...) | failed at 300 frames (2 rebounds, 0.89, ...) |
+| `tallball` | as on 13 November: stops at 26.79 m, 0.16 of its speed after the hit; 2 pieces moving too far | 4 |
+| `nibble` (mixed building, ground storey eaten away) | its own gates pass: 1,062 joints crack before the upper storeys fall, 9.5 s from the first failure to the fall, all of the upper storeys come down. Fails 6 of the falling pieces' checks (45 rebounds, 7 thrown up, 14 moving too far, 12 frames below and 14 above, 1 energy gain); 922 breaks, 22,833 particles | 13 November: failed 1 (2 pieces moving too far) |
+| `debriscap` | above | new |
+
+- **Every failed check in this table is a falling pieces' check** (rebounds, launches, crumbling, drawing lag, settling): the part of the engine this day did not touch, and where docs/DYNPLAN.md stage 7 and docs/DEFORM.md point. The structure's own checks (nothing fails standing, the cut buildings come down, the shot column and keystone are carried) pass in every scenario.
+- `collapse`'s 12 energy gains are one body: the 719 m³ upper part of the frame (1,084 boxes), lying at 9.35 m, starting to move at 0.01 to 0.02 m/s from frame 305. Not traced further.
