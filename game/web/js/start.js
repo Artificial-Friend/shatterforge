@@ -8,7 +8,7 @@
     if (KIND === 5) setupCity();
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
     if (!LABSTATE) await startWorker(bytes);   // (the lab runs the engine inline, its jobs delayed by whole frames)
-    initSettings(); initDiag(); initPreset();
+    initSettings(); initDiag(); initPreset(); initMenu();
     // (in the city: in the street east of the first lot, facing it)
     if (KIND === 5) { const L0 = lots()[0]; E.player_set(L0.x + 20, 0.0, L0.z - 16); } else E.player_set(0, 0.0, -16);
   } catch (e) { $('warn').textContent = 'Could not start the engine: ' + e.message; return; }
@@ -37,9 +37,11 @@
   // a benchmark or lab run asked for before the reload starts by itself
   if (LABSTATE && gpu) labRun().catch(e => { $('bench').hidden = false; $('bench-out').textContent = 'Lab failed: ' + e.message + '\n' + e.stack; window.LAB_ERROR = e.message; });
   else if (benchPending()) { $('start').hidden = true; benchStart(); }
+  // (a level reset: straight in, on the same level; a click on the view takes the pointer again)
+  else { let again = false; try { again = sessionStorage.getItem('sf-reset') === '1'; sessionStorage.removeItem('sf-reset'); } catch (e) {} if (again) { $('start').hidden = true; physicsPaused = false; started = true; } }
 })();
 $('go').addEventListener('click', () => {
-  $('start').hidden = true; physicsPaused = false;
+  $('start').hidden = true; physicsPaused = false; started = true;
   const r = cv.requestPointerLock && cv.requestPointerLock(); if (r && r.catch) r.catch(() => {});
 });
 requestAnimationFrame(frame);

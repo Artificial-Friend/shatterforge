@@ -26,19 +26,27 @@ const which = process.argv[2] || 'rest';
   for (let i = 0; i < 180; i++) { await new Promise(r => setTimeout(r, 1000)); if (await p.evaluate(() => !!gpu && !$('go').disabled)) break; }
   await p.evaluate(() => $('go').click());
   if (which === 'settings') {
-    // (14 Nov) two presets, physics and graphics, each setting what it owns; every other parameter folded away
-    // until asked for; a slider moved by hand makes its preset custom.
+    // (14 Nov) the menu on Esc, with a window each for graphics and physics: a preset and, folded, every parameter
+    // it owns; a slider moved by hand makes its preset custom; the simulation is paused while a panel is open;
+    // the level resets (the page starts again and goes straight in).
     const r = await p.evaluate(() => {
-      const out = {}, pick = (id, v) => { const el = document.getElementById(id); el.value = v; el.dispatchEvent(new Event('change')); };
-      out.folded = !document.getElementById('s-adv').open && !document.getElementById('s-tools').open;
-      out.inAdv = ['s-debris', 's-crumbs', 's-rubble', 's-substeps', 's-colors', 's-far', 's-dynamic'].every(id => document.getElementById('s-adv').contains(document.getElementById(id)));
-      out.top = ['s-kind', 's-gfx', 's-phys', 's-view'].every(id => { const el = document.getElementById(id); return !document.getElementById('s-adv').contains(el) && !document.getElementById('s-tools').contains(el); });
+      const out = {}, el = (id) => document.getElementById(id), pick = (id, v) => { el(id).value = v; el(id).dispatchEvent(new Event('change')); };
+      const shown = () => ['menu', 'win-gfx', 'win-phys'].filter(id => !el(id).hidden).join(',');
+      out.closed = shown() === '' && physicsPaused === false;
+      escapeKey(); out.menu = [shown(), physicsPaused];
+      el('m-gfx').click(); out.gfxWin = shown(); escapeKey(); out.backToMenu = shown();
+      el('m-phys').click(); out.physWin = shown(); document.querySelector('#win-phys .back').click(); out.back2 = shown();
+      escapeKey(); out.closedAgain = [shown(), physicsPaused];
+      out.folded = !el('g-adv').open && !el('p-adv').open && !el('s-tools').open;
+      out.physIn = ['s-debris', 's-crumbs', 's-rubble', 's-substeps', 's-colors', 's-far', 's-dynamic', 's-crush'].every(id => el('p-adv').contains(el(id)));
+      out.gfxIn = ['s-gShadows', 's-gMap', 's-gPx', 's-viewScale'].every(id => el('g-adv').contains(el(id)));
+      out.top = el('menu').contains(el('s-kind')) && el('menu').contains(el('m-reset')) && el('win-gfx').contains(el('s-gfx')) && !el('g-adv').contains(el('s-gfx')) && el('win-phys').contains(el('s-phys')) && !el('p-adv').contains(el('s-phys'));
       pick('s-phys', 'low'); out.low = [setting.debris, setting.crumbs, setting.rubble, setting.substeps, setting.colors, debrisMax, setting.phys];
       pick('s-phys', 'ultra'); out.ultra = [setting.debris, setting.crumbs, debrisMax === Infinity, setting.phys];
       pick('s-gfx', 'low'); out.gfxLow = [renderer.shadowMap.enabled, renderer.getPixelRatio(), sun.shadow.mapSize.x, setting.gfx];
       pick('s-gfx', 'high'); out.gfxHigh = [renderer.shadowMap.enabled, sun.shadow.mapSize.x, setting.gfx];
       pick('s-phys', 'high');
-      toggleSettings(true); document.getElementById('s-adv').open = true;
+      showPanel('win-phys'); el('p-adv').open = true;
       return out;
     });
     // (a real key on the slider: the page tells a hand from its own presets by the event being trusted)
@@ -46,9 +54,23 @@ const which = process.argv[2] || 'rest';
     Object.assign(r, await p.evaluate(() => {
       const custom = [debrisMax, document.getElementById('s-phys').value, setting.phys];
       const el = document.getElementById('s-phys'); el.value = 'high'; el.dispatchEvent(new Event('change'));
+      showPanel('win-gfx'); document.getElementById('g-adv').open = true;
       return { custom, saved: JSON.parse(localStorage.getItem('sf-settings') || '{}').phys, back: debrisMax };
     }));
-    const ok = !err && r.folded && r.inAdv && r.top && JSON.stringify(r.low) === JSON.stringify([1500, 64, 16, 6, 10, 1500, 'low']) && r.ultra[0] === 20000 && r.ultra[2] === true && r.gfxLow[0] === false && r.gfxLow[1] === 1 && r.gfxLow[2] === 1024 && r.gfxHigh[0] === true && r.gfxHigh[1] === 2048 && r.custom[0] === 9750 && r.custom[1] === '' && r.custom[2] === '' && r.saved === 'high' && r.back === 10000;
+    await p.focus('#s-gMap'); await p.keyboard.press('ArrowRight');
+    Object.assign(r, await p.evaluate(() => ({ gfxCustom: [sun.shadow.mapSize.x, document.getElementById('s-gfx').value, setting.gfx] })));
+    // the reset: a mark in the world (a blast: the bricks it cuts change their count), then reset: the page starts again, without the start card,
+    // with every brick back
+    const before = await p.evaluate(() => { showPanel(null); return E.bricks_alive(); });
+    await p.evaluate(() => { radius = 1.2; doBlast(); });
+    let after = before; for (let i = 0; i < 60 && after === before; i++) { await new Promise(r => setTimeout(r, 500)); after = await p.evaluate(() => E.bricks_alive()); }
+    r.blast = [before, after];
+    await p.evaluate(() => resetLevel());
+    await p.waitForFunction(() => typeof gpu !== 'undefined' && !!gpu && typeof started !== 'undefined' && started && document.getElementById('start').hidden, null, { timeout: 180000 });
+    Object.assign(r, await p.evaluate((n0) => ({ reset: [E.bricks_alive() === n0, document.getElementById('start').hidden, physicsPaused, sessionStorage.getItem('sf-reset')] }), before));
+    const ok = !err && r.closed && r.menu[0] === 'menu' && r.menu[1] === true && r.gfxWin === 'win-gfx' && r.backToMenu === 'menu' && r.physWin === 'win-phys' && r.back2 === 'menu' && r.closedAgain[0] === '' && r.closedAgain[1] === false
+      && r.folded && r.physIn && r.gfxIn && r.top && JSON.stringify(r.low) === JSON.stringify([1500, 64, 16, 6, 10, 1500, 'low']) && r.ultra[0] === 20000 && r.ultra[2] === true && r.gfxLow[0] === false && r.gfxLow[1] === 1 && r.gfxLow[2] === 1024 && r.gfxHigh[0] === true && r.gfxHigh[1] === 2048
+      && r.custom[0] === 9750 && r.custom[1] === '' && r.custom[2] === '' && r.saved === 'high' && r.back === 10000 && r.gfxCustom[0] === 4096 && r.gfxCustom[1] === '' && r.blast[1] !== r.blast[0] && r.reset[0] && r.reset[1] && r.reset[2] === false && r.reset[3] === null;
     console.log(`${ok ? 'PASS' : 'FAIL'} settings: ${JSON.stringify(r)}${err ? ' · ' + err : ''}`);
     await b.close(); process.exit(ok ? 0 : 1);
   }
