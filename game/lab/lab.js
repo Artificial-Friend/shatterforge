@@ -214,7 +214,7 @@ function labOnRead(r, pr) {
   }
   const L = LAB, f = L.f, nb = r.body.length / 7;
   const quiet = f > L.quietFrom;   // nothing pushed from outside lately (blast, ball, cut)
-  let bad = 0, below = 0, gain = 0, ekPrev = 0;
+  let bad = 0, below = 0, gain = 0, ekPrev = 0, slack = 0;
   const now = new Map();
   const at = r.bodiesAt || gpu.bodies;
   for (let b = 2; b <= nb; b++) {
@@ -234,6 +234,11 @@ function labOnRead(r, pr) {
     // (nor a body cut on the GPU since, or a few frames before: the poses read back lag the step)
     if (!was || was.gb !== gb || was.cut !== gb.labCut || (gb.labCut !== undefined && f - gb.labCut <= 3)) continue;
     gain += e - was.e; ekPrev += was.ek;
+    // (what a body may gain without it being energy from nothing: its weight over 2 mm. The solver holds a
+    // resting body's place to millimetres, not to nothing, and for the upper part of a collapsed frame, 1,673 t,
+    // 1.2 mm of height is 20 kJ: it showed as "20,193 J gained from 1 J" at frame 579 of the lab's collapse, the
+    // part lying still on its heap. For a 50 kg piece the same 2 mm is 1 J, and a launch is still a launch.)
+    if (e > was.e) slack += Math.min(e - was.e, m * 9.81 * 0.002);
     if (e - was.e > 1000) (L.gainers = L.gainers || []).push({ body: b, gain_J: Math.round(e - was.e), size: gb.labH, made_at: gb.labF, y: [+was.y.toFixed(2), +y.toFixed(2)], vy: [+was.vy.toFixed(2), +vy.toFixed(2)], vol: +(gb.labVol || 0).toFixed(2), vol_was: +(was.vol || 0).toFixed(2), asleep: r.sleeping ? r.sleeping[b - 1] : null });
     if (quiet) {
       if (was.vy < -2 && vy > 0.5 * -was.vy) { L.bounces++; L.bounceMax = Math.max(L.bounceMax, vy / -was.vy); labEvent('bounce', f, { body: b, vy_before: +was.vy.toFixed(2), vy_after: +vy.toFixed(2), y: +y.toFixed(2), size: gb.labH, made_at: gb.labF, pushed_by_page: gb.labSetV || null }); }
@@ -247,7 +252,7 @@ function labOnRead(r, pr) {
   // the energy (kinetic + height) of the bodies present at both read-backs can only fall, unless pushed
   // (energy the page gave parts it cut free is allowed for, used up as it shows and fading over ~30 read-backs)
   const given = L.given || 0; L.given = Math.max(0, given - Math.max(0, gain)) * 0.97;
-  if (quiet && L.prevBodies && gain > 0.05 * ekPrev + 2000 + given) { L.energyGains++; L.energyGainMax = Math.max(L.energyGainMax, ekPrev > 0 ? gain / ekPrev : 0); labEvent('energy_gain', f, { gain_J: Math.round(gain), kinetic_before_J: Math.round(ekPrev), most: (L.gainers || []).sort((a, b) => b.gain_J - a.gain_J).slice(0, 3) }); }
+  if (quiet && L.prevBodies && gain > 0.05 * ekPrev + 2000 + given + slack) { L.energyGains++; L.energyGainMax = Math.max(L.energyGainMax, ekPrev > 0 ? gain / ekPrev : 0); labEvent('energy_gain', f, { gain_J: Math.round(gain), kinetic_before_J: Math.round(ekPrev), most: (L.gainers || []).sort((a, b) => b.gain_J - a.gain_J).slice(0, 3) }); }
   L.gainers = [];
   L.prevBodies = now;
   // flight recorder: every body at the last 4 read-backs; the first 2 bursts (a launch or a gain over 1 MJ while
