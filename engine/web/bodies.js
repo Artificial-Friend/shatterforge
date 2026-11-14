@@ -254,7 +254,7 @@ function addPieces(list, xf, vel, cool) {
   const parts = gpu.addParticles ? gpu.addParticles(pent.map(x => x.e)) : [];
   for (const b of pl) { const k = b.id === -2 ? 'spill' : b.id < 0 ? 'crumb' : 'piece'; partsBy[k] = (partsBy[k] || 0) + 1; }   // (where particles come from)
   // (h: the box of the crumb's volume; a cell keeps its hull id, to be drawn as itself)
-  parts.forEach((slot, k) => { if (slot < 0) return; const s = pent[k].s, e = s.hull ? Math.cbrt(GpuWorld.hulls.hulls[s.hull].vol) : 1; const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: s.h.map(x => x * e), hull: s.hull, col: s.col, gen: g, dead: false }; partsMade++; });
+  parts.forEach((slot, k) => { if (slot < 0) return; const s = pent[k].s, e = s.hull ? Math.cbrt(GpuWorld.hulls.hulls[s.hull].vol) : 1; const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: s.h.map(x => x * e), hull: s.hull, col: s.col, gen: g, dead: false }; if (LAB.on) { pInfo[slot].labF = LAB.f; pInfo[slot].labWhy = pent[k].e.wait ? 'piece, waiting' : 'piece'; pInfo[slot].labV = pent[k].e.v.map(x => +x.toFixed(2)); } partsMade++; });
   const idxs = gpu.addBodies(bodies);
   list.forEach((b, k) => {
     if (b.id < 0) return;

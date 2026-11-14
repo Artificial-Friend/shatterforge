@@ -215,6 +215,56 @@ Kernels `pinch_acc` and `pinch` sum each body's normal impulses as vectors and a
 
 GPU test `pinch` turns it on and passes, but it passes with it off too, because the crush test crushes those pieces once the block reaches them. In the lab collapse (150 frames, seeds 0 / 7 / 8, before shock propagation): rebounds 13 / 26 / 16 → 12 / 11 / 15, launches 7 / 6 / 8 → 4 / 2 / 2, but one energy gain in each run (0 before). With shock propagation: rebounds 10 / 6 / 11 → 9 / 17 / 16, launches 5 / 2 / 0 → 3 / 1 / 0. Three runs do not tell it apart from luck, and it adds energy gains on its own, so it stays off.
 
+## The velocity bound (14 November)
+
+**What it is.** After the solve, each body's velocity is held to what its contacts can physically have given it (kernels `vh_init`, `vh_acc`, `vh_clamp`; `GpuWorld.velocityBound = false` turns it off). Contacts here lose energy (restitution 0.05 to 0.5), so what a step can add to a body's speed is bounded by how fast its contacts were closing when the step began:
+
+- speed: `|v'| ≤ |v| + (1 + e) × the fastest closing at any of its contact points + a step of gravity`;
+- upward: `v'y ≤ vy + (1 + e) × the fastest closing along a contact normal × that normal's upward part`;
+- spin: what it had, plus `(1 + e) ×` the closing over the arm from the contact to its centre, plus 1 rad/s;
+- the distance gone in the step (what `finish` applies): no further than at the bounded speed, plus what the contacts push it out of an overlap by (`maxPush`).
+
+`e` is the greatest restitution among the body's contacts plus 0.1 (`boundSlack`) for what the solve leaves over. A closing against a body that can itself give way counts for `m_other / (m + m_other)` of it; against the static world or a sleeping body, all of it. A body that stands on the static world through the contacts under it (the levels of shock propagation, up to 6 bodies deep) can always come to rest, with `e` of its fall returned.
+
+**Why.** The solver does not settle a squeeze between very unequal masses in a few iterations, and what it leaves is a velocity nothing physical gave. Lab `masonry`, frames 59 to 61: a 5.2 t piece on a 0.56 t one, both falling at 3.6 m/s, under a 495 t part coming down at 10 m/s, left the step going **up** at 3.55 m/s; two pieces lying on it left at 5.5 and 7.7 m/s. Crushing and shock propagation each remove some cases (above); the bound holds in every case, crushed or not, converged or not. The velocities *inside* a step are the unbounded ones, which is why the distance is bounded too: a piece crushed in the step it was squeezed in ended 0.23 m from where a step at its speed puts it, and was drawn jumping (lab `masonry`, frame 52).
+
+**Pinching is on with it** (`GpuWorld.pinching`, off since 9 November as "not told apart from luck"). With the bound, pieces that used to be thrown out of a squeeze stay in it; the lab's collapse then kept breaking its upper part against them (measured on the first form of the bound, before the engine's fixes of the same day: 915 bodies after 240 frames, 437 with the pinch test crushing them by the stress on them). The table below is with both on, against both off.
+
+**What it does not bound:** anything in free flight. **What it takes away:** a hit passed down a chain of contacts within one step is passed on in the next step instead.
+
+**Tried first, each dropped for a reason a test found:**
+- A box of velocities per axis. A chunk landing on a sloping face could not turn its fall into a slide (sideways 0 before, so 0 after), slid at 0.45 m/s for 0.6, and GPU test `hullpairs` found it still falling off after 2 s.
+- The fastest partner's velocity as the limit, with allowances for the body's own spin and a step of gravity upward. A body the solver kept kicking climbed by that much every step it stayed in contact: GPU test `bound`, 2.25 m/s where 1.8 was meant. Closing speeds have no such ratchet: a contact that is not closing gives nothing.
+- A grounded *partner* imposing its whole contact-point velocity: a 238 kg piece spinning under a 700 kg one sent it up at 3.6 m/s.
+- Bounding the velocity only: the distance, above.
+
+**Numbers (software GPU, this build):**
+
+GPU test `bound`: the `landing` cases with shock propagation and crushing off, the solver on its own. The heavy piece's rebound, m/s:
+
+| Heavy on light, at | Without the bound | With | The light piece, with | Bound (0.2 × the fall) |
+| --- | --- | --- | --- | --- |
+| 960 kg on 47 kg, 7.7 m/s | 3.65 | 0.05 | 0.77 | 1.54 |
+| 960 kg on 47 kg, 2 m/s | 0.96 | 0.02 | 0.22 | 0.40 |
+| 7,680 kg on 47 kg, 5 m/s | 0.75 | 0.00 | 0.50 | 1.00 |
+| 207 kg on 47 kg, 7.7 m/s | 2.45 | 0.05 | 0.77 | 1.54 |
+
+The lab, 240 frames, three seeds each (`SF_SEED` 0 / 7 / 8), with the bound and the pinch test against neither (`SF_NOBOUND=1`):
+
+| | Without | With |
+| --- | --- | --- |
+| `collapse`: rebounds over half the impact speed | 9 / 2 / 1 | 0 / 0 / 0 |
+| `collapse`: pieces thrown up faster than 5 m/s | 0 / 1 / 3 | 0 / 0 / 0 |
+| `collapse`: crumbled share of a big part (worst) | 0.29 / 0.28 / 0.09 | 0.11 / 0.08 / 0.10 |
+| `collapse`: bodies at frame 240 | 694 / 430 / 355 | 386 / 322 / 328 |
+| `masonry`: rebounds | 5 / 1 / 0 | 1 / 1 / 1 |
+| `masonry`: thrown up | 2 / 1 / 1 | 0 / 0 / 0 |
+| both: pieces moving further than their speed allows | 0 / 1 / 2 and 2 / 2 / 2 | 2 / 0 / 2 and 3 / 3 / 2 |
+
+Over the six pairs: rebounds 18 → 3, launches 8 → 0. One rebound is left in each masonry run (−3.2 → +1.8, −3.2 → +1.6, −2.3 → +1.8 m/s). In seed 0 it is a part broken off a tumbling piece on the GPU (`snap_split`), which leaves with the piece's motion at its own centre: the spin's, not a contact's. In the other two it is a piece of 10 and of 6 boxes, not traced. The jumps are crumbs, the same with and without: "Still to do".
+
+All 41 GPU scenes pass with it (40 before, and `bound`). Cost: three more dispatches a step (one a manifold, two a body), and the pinch test's two.
+
 ## Breaking in the step of the hit
 
 The engine answers a hit about 4 frames late. So each new falling piece carries a break plan from it (`Sim::plan_piece`): where it breaks first, and how hard a hit must be to break it there.
@@ -327,9 +377,11 @@ Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall throu
 
 ## Still to do
 
+- **Crumbs that hop (open, 14 November).** In a collapse of 20,000 crumbs, two or three are drawn moving 0.3 to 0.5 m in one frame, upward, with a velocity that says otherwise (falling at 4.2 m/s and 0.41 m higher than a frame before: lab `masonry`, frame 14). Each is beside or inside a large body falling at the frame it happens. The same with and without the velocity bound (9 and 12 over six runs). What was tried: the separation limit of a particle against shapes (2 m/s past its own approach) taken per particle and sub-step and not per shape; GPU test `particles` then left a particle inside a body, which the rule "a particle never ends inside a body" forbids, and it was taken back out. Not found: what moves them. The lab's check counts them ("pieces moving further than their speed allows").
+
 - **A fast-spinning chunk sinks into the ground (open, 9 November).** The GPU test `hullthrow` throws the hull library's cells; with six runtime hulls registered before it (`freehull` ran first), it drew another random sample, and library cell 39, thrown as body 75 spinning at 49 rad/s (corners at about 15 m/s), had a corner 7.6 cm inside the ground at frame 8 (limit 5 cm; the scene's own sample: 1.2 cm). Reproduce: `HTHROW_ALL=1 node engine/gpu/test_gpu.cjs freehull hullthrow`. The scene now throws the library's cells only, as written (the runtime hulls have `freehull`); the deeper case is not the margin (`ground_margin` covers w r dt) but the contacts: found once a frame, they cannot follow a body that turns 0.8 rad (47 degrees) in that frame, and corners that were not touching at its start come round into the ground. Candidates: a cap on the turn per frame (0.25 rad: 15 rad/s at 60 Hz) for bodies off the ground, or contacts found again in the sub-steps for the few spinning that fast.
 
-- **Rebounds in the collapse (open).** With shock propagation, the lab collapse (150 frames, seeds 0 / 7 / 8) counts 10 / 6 / 11 rebounds and 5 / 2 / 0 launches, against 13 / 26 / 16 and 7 / 6 / 8 without it. What is left is mostly pieces landing at 2–3 m/s and leaving at 1–2 m/s. Some may be real: the check reads the centre's speed, and a spinning piece that lands on one end can send its centre up. The launches left are spares and slivers at 5–14 m/s.
+- **Rebounds in the collapse (mostly closed, 14 November).** With the velocity bound and the pinch test, 240 frames, seeds 0 / 7 / 8: `collapse` 0 / 0 / 0 rebounds and 0 / 0 / 0 launches (9 / 2 / 1 and 0 / 1 / 3 without), `masonry` 1 / 1 / 1 and 0 / 0 / 0 (5 / 1 / 0 and 2 / 1 / 1). Open: the one rebound in each masonry run, above. Before: With shock propagation, the lab collapse (150 frames, seeds 0 / 7 / 8) counts 10 / 6 / 11 rebounds and 5 / 2 / 0 launches, against 13 / 26 / 16 and 7 / 6 / 8 without it. What is left is mostly pieces landing at 2–3 m/s and leaving at 1–2 m/s. Some may be real: the check reads the centre's speed, and a spinning piece that lands on one end can send its centre up. The launches left are spares and slivers at 5–14 m/s.
 
 - **Mass ratio limit.** Across one contact the heavier body responds as if at most 20 times heavier (GPU test `sandwich`: a 7,700 t block landing on 11 t rubble went from a 2.52 m/s rebound to 0.37 m/s). The limit only takes energy from the heavy body: of its response at the limited mass, the part that brings its speed down to its least is kept, and the rest is taken at its real mass (`sandwich`: 0.37 → 0.03 m/s; dropping the whole change once it overshot zero lost the slowing too, and the block sank and rebounded at 1.9 m/s). Debug switches (`dbgBits`): 1 limits before splitting, 2 turns this off, 4 colours supports with the rest. The limit is between the masses as split over a body's overflow contacts, so a split body is never made lighter than the light one. Applied both ways and before splitting, it made momentum.
 - **Supports first.** Contacts with the static world or a resting body are coloured in their own pass before the others, so a body's supports are solved in sequence, not left to the parallel overflow pass.

@@ -75,6 +75,7 @@ function labInstall() {
   const snp = gpu.snapped.bind(gpu), kill = gpu.killBody.bind(gpu);
   gpu.snapped = (i, j, imp) => {
     const r = snp(i, j, imp);
+    (L.ops = L.ops || []).push({ f: L.f, op: 'snapped', body: i, spare: j, books_i: +(L.bodyVol.get(i) || 0).toFixed(3), had_i: L.bodyVol.has(i), spare_shapes: (gpu.bodyShapes.get(j) || []).length });
     const moved = (gpu.bodyShapes.get(j) || []).reduce((t, k) => { const sh = gpu.shapes[k - 1]; return t + (sh ? labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1) : 0); }, 0);
     if (L.bodyVol.has(i) && moved > 0) {
       L.bodyVol.set(i, L.bodyVol.get(i) - moved); L.bodyVol.set(j, moved); const gb = gpu.bodies[j - 1]; if (gb) { gb.labVol = moved; gb.labF = L.f; gb.labH = 'spare'; }
@@ -85,7 +86,9 @@ function labInstall() {
     }
     return r;
   };
-  gpu.killBody = (b) => { const v = L.bodyVol.get(b) || 0; L.gpuVol -= v; L.bodyVol.delete(b); return kill(b); };
+  const shapesVol = (b) => (gpu.bodyShapes.get(b) || []).reduce((t, k) => { const sh = gpu.shapes[k - 1]; return t + (sh && !sh.dead ? labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1) : 0); }, 0);
+  const op = (o) => { (L.ops = L.ops || []).push({ f: L.f, ...o }); if (L.ops.length > 40) L.ops.shift(); };
+  gpu.killBody = (b) => { const v = L.bodyVol.get(b) || 0; op({ op: 'kill', body: b, books: +v.toFixed(3), shapes_m3: +shapesVol(b).toFixed(3), spare: !!(gpu.bodies[b - 1] || {}).spare }); L.gpuVol -= v; L.bodyVol.delete(b); return kill(b); };
   gpu.addParticles = (list) => { const s = addP(list); L.pendingParts = (L.pendingParts || []).concat(s); return s; };
   gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); if (window.__farKill === 'budget') { L.lostBy.budget = (L.lostBy.budget || 0) + v; L.budgetParts = (L.budgetParts || 0) + 1; } else if (window.__farKill) { L.lostBy.far = (L.lostBy.far || 0) + v; L.farParts = (L.farParts || 0) + 1; labEvent('removed_far', L.f, { particle: i, vol: +v.toFixed(3) }); } else L.lostParticles = (L.lostParticles || 0) + v; return killP(i); };
 }
@@ -109,8 +112,8 @@ function labEvent(kind, f, detail) { const e = LAB.events; (e[kind] = e[kind] ||
 function labDrawBegin() { const d = LAB.draw; d.n = 0; d.vol = 0; }
 function labDrawn(key, x, y, z, bound, vol) {
   const d = LAB.draw;
-  if (d.n >= d.keys.length) { const g = (a, C) => { const b = new C(a.length * 2); b.set(a); return b; }; d.keys = g(d.keys, Float64Array); d.pos = g(d.pos, Float32Array); d.bound = g(d.bound, Float32Array); }
-  d.keys[d.n] = key; d.pos[d.n * 3] = x; d.pos[d.n * 3 + 1] = y; d.pos[d.n * 3 + 2] = z; d.bound[d.n] = bound; d.n++; d.vol += vol;
+  if (d.n >= d.keys.length) { const g = (a, C) => { const b = new C(a.length * 2); b.set(a); return b; }; d.keys = g(d.keys, Float64Array); d.pos = g(d.pos, Float32Array); d.bound = g(d.bound, Float32Array); d.vols = g(d.vols, Float32Array); }
+  d.vols[d.n] = vol; d.keys[d.n] = key; d.pos[d.n * 3] = x; d.pos[d.n * 3 + 1] = y; d.pos[d.n * 3 + 2] = z; d.bound[d.n] = bound; d.n++; d.vol += vol;
 }
 // (for a hole: the bodies and particles that exist but have nothing drawn, biggest first)
 function labUndrawn() {
@@ -122,6 +125,17 @@ function labUndrawn() {
   out.sort((a, b) => b.vol - a.vol);
   return { count: out.length, vol: +out.reduce((a, x) => a + x.vol, 0).toFixed(3), first: out.slice(0, 6) };
 }
+// (for a hole or a duplicate: body by body, what is drawn of it against what the books hold for it; and the
+// particles as a whole)
+function labDrawDiff() {
+  const L = LAB, d = L.draw, by = new Map(); let pv = 0, pn = 0;
+  for (let k = 0; k < d.n; k++) { const key = d.keys[k]; if (key < 0) { pn++; const inf = pInfo[(-key - 1) % 1048576]; pv += inf ? labBoxVol(inf.h) : 0; } else { const sh = gpu.shapes[(key % 1048576) - 1], b = sh ? sh.body : 0; by.set(b, (by.get(b) || 0) + (d.vols ? d.vols[k] : 0)); } }
+  const out = [];
+  for (const [b, v] of by) { const t = L.bodyVol.get(b) || 0; if (Math.abs(v - t) > 0.005) { const gb = gpu.bodies[b - 1]; out.push({ body: b, drawn: +v.toFixed(3), books: +t.toFixed(3), made: gb && gb.labF, size: gb && gb.labH, cut: gb && gb.labCut, ball: !!(gb && gb.labBall) }); } }
+  out.sort((a, b) => Math.abs(b.drawn - b.books) - Math.abs(a.drawn - a.books));
+  let pt = 0; for (const v of L.partVol.values()) pt += v;
+  return { bodies: out.slice(0, 8), bodies_off: out.length, particles_drawn: pn, particles_drawn_m3: +pv.toFixed(3), particles_books: L.partVol.size, particles_books_m3: +pt.toFixed(3) };
+}
 // every frame: what is drawn against what exists
 function labFrameChecks() {
   const L = LAB, d = L.draw, f = L.f;
@@ -130,10 +144,13 @@ function labFrameChecks() {
   const D = L.staticDrawn + d.vol;
   const parts = () => ({ static_drawn: +L.staticDrawn.toFixed(2), static_now: +L.staticT.toFixed(2), gpu_drawn: +d.vol.toFixed(2), gpu_now: +L.gpuVol.toFixed(2), reads_pending: L.gates.length, chunks_pending: pendingChunks.length, placing: gpu.placing() });
   L.Thist.push(L.T); if (L.Thist.length > L.readLag + L.jobLag + 4) L.Thist.shift();
+  // (the last frames' sums, for a hole's or a duplicate's event: which part of the picture changed)
+  { let bv = 0, pv = 0, bn = 0, pn = 0; for (let k = 0; k < d.n; k++) { if (d.keys[k] < 0) { pv += d.vols[k]; pn++; } else { bv += d.vols[k]; bn++; } }
+    (L.sums = L.sums || []).push({ f, static_drawn: +L.staticDrawn.toFixed(3), bodies_drawn: +bv.toFixed(3), shapes: bn, parts_drawn: +pv.toFixed(3), parts: pn, static_now: +L.staticT.toFixed(3), gpu_now: +L.gpuVol.toFixed(3), read: snapCur ? snapCur.frame : -1 }); if (L.sums.length > 6) L.sums.shift(); }
   const lo = Math.min(...L.Thist), hi = Math.max(...L.Thist), tol = L.volTol;
-  if (D < lo - tol) { L.holeFrames++; L.holeMax = Math.max(L.holeMax, lo - D); if (!L.inHole) labEvent('hole', f, { missing_m3: +(lo - D).toFixed(3), ...parts(), undrawn: labUndrawn() }); L.inHole = true; }
+  if (D < lo - tol) { L.holeFrames++; L.holeMax = Math.max(L.holeMax, lo - D); if (!L.inHole) labEvent('hole', f, { missing_m3: +(lo - D).toFixed(3), T_now: +L.T.toFixed(3), T_window: L.Thist.map(x => +x.toFixed(3)), ...parts(), undrawn: labUndrawn(), diff: labDrawDiff(), last_frames: L.sums.slice(), ops: (L.ops || []).filter(o => o.f >= f - 6) }); L.inHole = true; }
   else if (L.inHole) { L.inHole = false; L.holesRecovered++; }
-  if (D > hi + tol) { L.dupFrames++; L.dupMax = Math.max(L.dupMax, D - hi); labEvent('duplicate', f, { extra_m3: +(D - hi).toFixed(3), ...parts() }); }
+  if (D > hi + tol) { L.dupFrames++; L.dupMax = Math.max(L.dupMax, D - hi); labEvent('duplicate', f, { extra_m3: +(D - hi).toFixed(3), T_now: +L.T.toFixed(3), T_window: L.Thist.map(x => +x.toFixed(3)), ...parts(), diff: labDrawDiff(), last_frames: L.sums.slice(), ops: (L.ops || []).filter(o => o.f >= f - 6) }); }
   L.D = D;
   // b) instances: each drawn piece moves no further between frames than its speed allows, and a piece does not
   //    disappear and come back (flicker)
@@ -145,7 +162,7 @@ function labFrameChecks() {
       if (j !== undefined) {
         const dx = d.pos[k * 3] - prev.pos[j * 3], dy = d.pos[k * 3 + 1] - prev.pos[j * 3 + 1], dz = d.pos[k * 3 + 2] - prev.pos[j * 3 + 2];
         const m = Math.hypot(dx, dy, dz), lim = 0.25 + 2 * Math.max(d.bound[k], prev.bound[j]) / 60;
-        if (m > lim) { L.teleports++; const sh = key >= 0 ? gpu.shapes[(key % 1048576) - 1] : null, gb = sh ? gpu.bodies[sh.body - 1] : null; labEvent('teleport', f, { key, moved_m: +m.toFixed(2), limit_m: +lim.toFixed(2), body: sh ? sh.body : null, made: gb && gb.labF, size: gb && gb.labH, from: [prev.pos[j * 3], prev.pos[j * 3 + 1], prev.pos[j * 3 + 2]].map(v => +v.toFixed(2)), to: [d.pos[k * 3], d.pos[k * 3 + 1], d.pos[k * 3 + 2]].map(v => +v.toFixed(2)) }); }
+        if (m > lim) { L.teleports++; const sh = key >= 0 ? gpu.shapes[(key % 1048576) - 1] : null, gb = sh ? gpu.bodies[sh.body - 1] : null; labEvent('teleport', f, { key, moved_m: +m.toFixed(2), limit_m: +lim.toFixed(2), speed_was: +prev.bound[j].toFixed(2), speed_now: +d.bound[k].toFixed(2), part: key < 0 ? (() => { const pi = (-key - 1) % 1048576, inf = pInfo[pi]; let best = null, bd = 1e9; for (let q = 0; q < d.n; q++) { if (d.keys[q] < 0) continue; const dd = Math.hypot(d.pos[q * 3] - d.pos[k * 3], d.pos[q * 3 + 1] - d.pos[k * 3 + 1], d.pos[q * 3 + 2] - d.pos[k * 3 + 2]); if (dd < bd) { bd = dd; best = q; } } const sh = best !== null ? gpu.shapes[(d.keys[best] % 1048576) - 1] : null, gb = sh ? gpu.bodies[sh.body - 1] : null; const pd = snapCur && snapCur.parts ? snapCur.parts.data : null; return inf ? { made: inf.labF, why: inf.labWhy, v0: inf.labV, h: inf.h, state: pd ? pd[pi * 12 + 10] : null, v: pd ? [pd[pi * 12 + 3], pd[pi * 12 + 4], pd[pi * 12 + 5]].map(x => +x.toFixed(2)) : null, nearest_shape_m: +bd.toFixed(2), nearest_speed: best !== null ? +d.bound[best].toFixed(2) : null, nearest_body: sh ? sh.body : null, nearest_size: gb && gb.labH, nearest_made: gb && gb.labF, nearest_at: best !== null ? [d.pos[best * 3], d.pos[best * 3 + 1], d.pos[best * 3 + 2]].map(x => +x.toFixed(2)) : null } : null; })() : undefined, body: sh ? sh.body : null, made: gb && gb.labF, size: gb && gb.labH, from: [prev.pos[j * 3], prev.pos[j * 3 + 1], prev.pos[j * 3 + 2]].map(v => +v.toFixed(2)), to: [d.pos[k * 3], d.pos[k * 3 + 1], d.pos[k * 3 + 2]].map(v => +v.toFixed(2)) }); }
       } else {
         const gone = L.goneAt.get(key);
         if (gone !== undefined && f - gone <= 30) { L.flickers++; labEvent('flicker', f, { key, absent_frames: f - gone }); }
@@ -403,7 +420,7 @@ async function labRun() {
   farDist = S.far ?? 100;   // (the clean-up distance: the page's default, or the scenario's)
   Object.assign(L, {
     on: true, name, spec: S, t: 0, f: 0, readLag: st.readLag ?? 2, jobLag: st.jobLag ?? 4, render: !!st.render, gates: [], jobq: [],
-    draw: { n: 0, vol: 0, keys: new Float64Array(4096), pos: new Float32Array(4096 * 3), bound: new Float32Array(4096) },
+    draw: { n: 0, vol: 0, keys: new Float64Array(4096), pos: new Float32Array(4096 * 3), bound: new Float32Array(4096), vols: new Float32Array(4096) },
     Thist: [], holeFrames: 0, holeMax: 0, inHole: false, holesRecovered: 0, dupFrames: 0, dupMax: 0, flickers: 0, teleports: 0, goneAt: new Map(), prevDraw: null,
     bad: 0, below: 0, bounces: 0, bounceMax: 0, launches: 0, launchMax: 0, energyGains: 0, energyGainMax: 0, prevBodies: null, quietFrom: -1,
     injectedAt: -1000, settledAt: null, digest: [], timeline: [], trace: [], traceEv: [], traceWin: st.trace || null, events: {}, series: [], jsMs: [], work: (engineMsLog.length = 0, { cs: 0, ps: 0 }), peakStages: null, peakGpu: 0, volTol: 0.05,
@@ -421,6 +438,7 @@ async function labRun() {
   setting.adaptive = 0; gpu.substeps = setting.substeps;
   Math.random = seededRandom(window.__seed || 20261104);   // (SF_SEED: another run of the same scenario, to tell a trend from one run's luck)
   if (window.__pinch && gpu) gpu.pinching = true;
+  if (window.__noBound && gpu) { gpu.velocityBound = false; gpu.pinching = false; }   // (as before 14 Nov: neither the bound nor the pinch test)
   if (window.__oldMasonry) E.set_param(6, 1);   // (SF_OLD_MASONRY: masonry in falling parts parts at once, for comparison)   // (SF_PINCH: crushing of pinched pieces, off by default)
   fly = true; E.player_set(-20, 8, -30); yaw = Math.PI + 0.62; pitch = -0.12;
   $('start').hidden = true; physicsPaused = false;

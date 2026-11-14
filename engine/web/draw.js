@@ -52,7 +52,8 @@ function drawTargets(r) {
   const n = r.pose.length / 10, tgt = new Int32Array(n), idx = new Int32Array(n), cnt = new Map();
   let nb = 0;
   for (let k = 0; k < n; k++) {
-    const sh = gpu.shapes[r.slots[k] - 1], h = sh && sh.hull ? sh.hull : 0;
+    // (the shape's kind as the read-back took it, not the slot's of today: gpu_world.js readPose)
+    const h = r.hulls ? r.hulls[k] : 0;
     if (!h) { tgt[k] = -1; idx[k] = nb++; continue; }
     const c = cnt.get(h) || 0; if (c >= hullCap(h)) { tgt[k] = -2; continue; }
     tgt[k] = h; idx[k] = c; cnt.set(h, c + 1);
@@ -206,7 +207,7 @@ function drawDebris(now) {
       const sh = gpu.shapes[r.slots[k] - 1], b = sh ? sh.body : 0, vo = (b - 1) * 3;
       const sp = r.vel && vo >= 0 && vo + 2 < r.vel.length ? Math.hypot(r.vel[vo], r.vel[vo + 1], r.vel[vo + 2]) : 0;
       const hv = tg > 0 ? GpuWorld.hulls.hulls[tg].vol : 1;
-      labDrawn(r.gens[k] * 1048576 + r.slots[k], PP.x, PP.y, PP.z, sp, (sh && sh.labBall) || tg === -2 ? 0 : 8 * SS.x * SS.y * SS.z * hv);
+      labDrawn(r.gens[k] * 1048576 + r.slots[k], PP.x, PP.y, PP.z, sp, (r.balls && r.balls[k]) || tg === -2 ? 0 : 8 * SS.x * SS.y * SS.z * hv);
     }
   }
   // particles, blended the same way (matched by slot and generation)

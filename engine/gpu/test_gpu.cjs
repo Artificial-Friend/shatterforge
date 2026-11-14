@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..', '..');
 const wasm = fs.readFileSync(path.join(root, 'target/wasm32-unknown-unknown/release/sf_demo.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -17,7 +17,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
   await p.goto('file:///tmp/sf_blank.html');
   await p.addScriptTag({ path: path.join(__dirname, 'gpu_world.js') });
   const res = await p.evaluate(async ({ wasm, scenes, SUB, SAND_PUSH, SAND_MAT, SAND_SUB, SAND_COL, SAND_FALL, COMP_N, COMP_FLOOR, RELAX, HNOSLEEP, HBOX, HNOCRUSH, HNORED, HONLY, HPDYN, HRANDOM, HBIG, KN }) => {
-    Object.assign(globalThis, KN || {}); if (globalThis.COLR) { const c1 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c1(...a); const [x, y] = globalThis.COLR.split(',').map(Number); w.colRoundsS = x; w.colRounds = y; return w; }; } if (globalThis.DBG) { const c0 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c0(...a); w.dbgBits = +globalThis.DBG; return w; }; }
+    Object.assign(globalThis, KN || {}); if (globalThis.BOUND_OFF) { const c2 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c2(...a); w.velocityBound = false; return w; }; } if (globalThis.COLR) { const c1 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c1(...a); const [x, y] = globalThis.COLR.split(',').map(Number); w.colRoundsS = x; w.colRounds = y; return w; }; } if (globalThis.DBG) { const c0 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c0(...a); w.dbgBits = +globalThis.DBG; return w; }; }
     if (SAND_PUSH) globalThis.SAND_PUSH = SAND_PUSH; if (SAND_MAT) globalThis.SAND_MAT = SAND_MAT; if (SAND_SUB) globalThis.SAND_SUB = SAND_SUB; if (SAND_COL) globalThis.SAND_COL = SAND_COL; if (SAND_FALL) globalThis.SAND_FALL = 1; if (COMP_N) globalThis.COMP_N = COMP_N; if (COMP_FLOOR) globalThis.COMP_FLOOR = 1; if (RELAX) globalThis.RELAX = RELAX; if (HNOSLEEP) globalThis.HNOSLEEP = 1; if (HBOX) globalThis.HBOX = 1; if (HNOCRUSH) globalThis.HNOCRUSH = 1; if (HNORED) globalThis.HNORED = 1; if (HONLY) globalThis.HONLY = HONLY; if (HPDYN) globalThis.HPDYN = 1; if (HRANDOM) globalThis.HRANDOM = 1; if (HBIG) globalThis.HBIG = 1;
     // DT2=1: every scene in steps of 1/30 s (each second call steps twice the time, the other none), as the page
     // steps when the GPU cannot keep up with 60 steps a second
@@ -549,10 +549,11 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
         meta.push({ ia, ib, pa, qa: qa_, ha, hb });
       }
       const w = await GpuWorld.create(dev, list, { substeps: 12, sleep: false });
-      for (let f = 0; f < 120; f++) w.step(1 / 60);
+      const HPW = globalThis.HP_WATCH != null ? +globalThis.HP_WATCH : -1, track = [];
+      for (let f = 0; f < (+globalThis.HP_F || 120); f++) { w.step(1 / 60); if (HPW >= 0 && f % 6 === 5) { await dev.queue.onSubmittedWorkDone(); await settle(); const t = await w.readPose(); const o = (2 * HPW + 1) * 7; track.push([f, +t.body[o].toFixed(2), +t.body[o + 1].toFixed(2), +t.body[o + 2].toFixed(2), +speed(t.vel, 2 * HPW + 1).toFixed(2), +Math.hypot(t.ang[(2 * HPW + 1) * 3], t.ang[(2 * HPW + 1) * 3 + 1], t.ang[(2 * HPW + 1) * 3 + 2]).toFixed(2)]); } }
       await dev.queue.onSubmittedWorkDone(); await settle();
       const r = await w.readPose();
-      let worst = 0, bad = [], vmax = 0;
+      let worst = 0, bad = [], vmax = 0, vk = -1;
       for (let k = 0; k < 200; k++) {
         const m = meta[k], o = (2 * k + 1) * 10, pb = [r.pose[o], r.pose[o + 1], r.pose[o + 2]], qb = [r.pose[o + 3], r.pose[o + 4], r.pose[o + 5], r.pose[o + 6]];
         const oa = 2 * k * 10, paN = [r.pose[oa], r.pose[oa + 1], r.pose[oa + 2]], qaN = [r.pose[oa + 3], r.pose[oa + 4], r.pose[oa + 5], r.pose[oa + 6]];
@@ -561,10 +562,10 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
         let depth = 0;
         for (const v of verts(m.ib, pb, qb, m.hb)) { const d = Math.min(...PA.map(pl => pl.d - (pl.n[0] * v[0] + pl.n[1] * v[1] + pl.n[2] * v[2]))); depth = Math.max(depth, d); }
         worst = Math.max(worst, depth); if (depth > 0.03 && bad.length < 8) bad.push({ k, ia: m.ia, ib: m.ib, depth: +depth.toFixed(3), yB: +pb[1].toFixed(2) });
-        vmax = Math.max(vmax, speed(r.vel, 2 * k + 1));
+        if (speed(r.vel, 2 * k + 1) > vmax) { vmax = speed(r.vel, 2 * k + 1); vk = k; }
       }
       w.destroy();
-      check('hullpairs', worst < 0.03 && vmax < 3 && !bad.length, { deepest_m: +worst.toFixed(3), fastest_ms: +vmax.toFixed(2), bad });
+      check('hullpairs', worst < 0.03 && vmax < 3 && !bad.length, { deepest_m: +worst.toFixed(3), fastest_ms: +vmax.toFixed(2), fastest_pair: vk, bad, track: track.length ? track : undefined });
     }
     if (scenes.includes('hulls')) {
       // convex chunks: (a) every cell of the library, scaled to a 0.5 m brick, dropped tumbling on the ground:
@@ -714,7 +715,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       const under = { shapes: [{ p: [30, 0.25, 8], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] };
       const slab = { shapes: [{ p: [30, 0.5 + 0.1, 8], q: [0, 0, 0, 1], h: [0.7, 0.1, 0.7], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] };
       const w = await GpuWorld.create(dev, [...pieces, alone, under, slab, block], { substeps: 12, sleep: false });
-      if (!globalThis.NOPINCH) w.pinching = true;   // (off by default)
+      if (globalThis.NOPINCH) w.pinching = false;   // (on by default since 14 Nov)
       const bi = w.n, aloneI = 25, underI = 26;
       let crushed = new Set(), pmax = -1e9, bmax = -1e9, hit = null;
       for (let f = 1; f <= 60; f++) {
@@ -728,6 +729,30 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       check('pinch', crushed.size >= 20 && !crushed.has(aloneI) && !crushed.has(underI) && yB < 4.2 && pmax < 1 && bmax < 0.6,
         { crushed: [...crushed].filter(b => b <= 24).length, aloneCrushed: crushed.has(aloneI), underSlabCrushed: crushed.has(underI), blockY: +yB.toFixed(2), blockMaxUp_ms: +bmax.toFixed(2), piecesMaxUp_ms: +pmax.toFixed(2) });
+    }
+    if (scenes.includes('bound')) {
+      // The velocity bound (vh_clamp) on its own: the landing cases with shock propagation off and no crushing, the
+      // solver as it was when a 960 kg slab landing at 7.7 m/s on a 47 kg piece on the ground came back up at
+      // 3.65 m/s. With the bound, neither piece ends a step going up faster than the bound says: both stand on
+      // the ground, so the restitution of the contact (0.1) and the bound's slack (0.1) times its own fall.
+      // Without the bound (BOUND_OFF=1) the heavy piece comes back up at 3.65, 0.96, 0.75 and 2.45 m/s; with it
+      // at 0.05, 0.02, 0.00 and 0.05, the light one at 0.77, 0.22, 0.50 and 0.77. What it bounds in a collapse:
+      // docs/GPU.md, "The velocity bound".
+      const cases = [{ hh: 0.5, v: 7.7 }, { hh: 0.5, v: 2 }, { hh: 1.0, v: 5 }, { hh: 0.3, v: 7.7 }];
+      const out = [];
+      for (const cs of cases) {
+        const hl = 0.135, v0 = -cs.v, hh = cs.hh;
+        const light = { shapes: [{ p: [0, hl + 0.05, 0], q: [0, 0, 0, 1], h: [hl, hl, hl], mat: MAT.concrete }], v: [0, v0, 0], w: [0, 0, 0] };
+        const heavy = { shapes: [{ p: [0, 0.05 + 2 * hl + hh * 0.4 + 0.0005, 0], q: [0, 0, 0, 1], h: [hh, hh * 0.4, hh], mat: MAT.concrete }], v: [0, v0, 0], w: [0, 0, 0] };
+        const w = await GpuWorld.create(dev, [light, heavy], { substeps: 12, sleep: false });
+        w.shock = false; w.crushing = false;
+        let lmax = -1e9, hmax = -1e9;
+        for (let f = 1; f <= 40; f++) { w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle(); const r = await w.readPose(); lmax = Math.max(lmax, r.vel[1]); hmax = Math.max(hmax, r.vel[4]); }
+        w.destroy();
+        const lim = 0.2 * cs.v + 0.05;   // (0.05: the read-back's rounding and the step after)
+        out.push({ heavy_kg: Math.round(2400 * 8 * hh ** 3 * 0.4), light_kg: Math.round(2400 * 8 * hl ** 3), impact_ms: cs.v, heavyUp_ms: +hmax.toFixed(2), lightUp_ms: +lmax.toFixed(2), bound_ms: +lim.toFixed(2), ok: hmax <= lim && lmax <= lim });
+      }
+      check('bound', out.every(o => o.ok), { cases: out });
     }
     if (scenes.includes('compound')) {
       // a big compound body (the upper building: 20 x 20 x 2 bricks of 0.5 m, one body, 400 contacts with the
@@ -1141,7 +1166,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR', 'NOPINCH', 'PIN_H', 'PIN_V', 'PIN_L', 'PIN_PUSH', 'PIN_RELAX', 'PIN_DBG', 'PIN_NOREST', 'PIN_X', 'PIN_FINE', 'NOSHOCK', 'DT2', 'NOSUP', 'HEAPDBG', 'HEAPGRID', 'CREEP_N', 'CHAINDBG', 'CHNOSHOCK', 'CHNOCRUSH', 'HTHROW_ALL'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR', 'NOPINCH', 'BOUND_OFF', 'HP_WATCH', 'HP_F', 'PIN_H', 'PIN_V', 'PIN_L', 'PIN_PUSH', 'PIN_RELAX', 'PIN_DBG', 'PIN_NOREST', 'PIN_X', 'PIN_FINE', 'NOSHOCK', 'DT2', 'NOSUP', 'HEAPDBG', 'HEAPGRID', 'CREEP_N', 'CHAINDBG', 'CHNOSHOCK', 'CHNOCRUSH', 'HTHROW_ALL'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   // the results for docs/STATUS.md (tools/status.py): full runs only (a run of a few scenes is not the state)

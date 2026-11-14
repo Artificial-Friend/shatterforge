@@ -56,6 +56,7 @@ struct Params {
   o_mtry: u32, o_claim2: u32, o_sorted2: u32, o_evhist: u32,
   o_cchk: u32, o_pinch: u32, step: u32, o_level: u32,
   o_level2: u32, o_psup: u32, psup_n: u32, o_released: u32,   // (see color_claim, sort_cells); pinching (see pinch)
+  o_vhull: u32, vh_e: f32, vh_pad0: u32, vh_pad1: u32,   // the velocity bound (see vh_clamp)
 }
 struct ColorU { c: u32 }
 
@@ -1651,6 +1652,102 @@ fn plan4(i: u32, k: u32) -> vec4f { return vec4f(planf(i, k), planf(i, k + 1u), 
   if (near && slowish) { t = il.w + P.dt; } else { setB(i, F_FL, vec4f(fl.x, np)); setB(i, F_RQ, q); }
   setB(i, F_IL, vec4f(il.xyz, t));
 }
+// The velocity bound. Contacts here lose energy (restitution at most 0.5), so what a step can add to a body's
+// speed is bounded by how fast its contacts were closing when the step began:
+//   speed:   |v'| <= |v| + (1 + e) x the fastest closing, at any of its contact points, + a step of gravity
+//   upward:  v'y  <= vy + (1 + e) x the fastest closing along a contact normal x that normal's upward part
+// with e the greatest restitution among its contacts and a little more for what the solve leaves over
+// (boundSlack, 0.1). A closing against a body that can itself give way counts for m_other / (m + m_other)
+// of it (all of it against the static world or a sleeping body): a 328 kg piece spinning under a 5.2 t one has
+// contact points going up at 5 m/s, which is not a speed it can give the 5.2 t one. A body that stands on the
+// static world through the contacts under it (level_pass, up to 6 bodies deep) gets e of its fall back, whatever
+// the pieces between weigh and however they are moving; and any body in contact may stop falling.
+// The solver does not always stay inside this: a piece squeezed between the ground and a part 100 times heavier
+// coming down at 10 m/s is not settled in a few iterations, and left the step going UP at 3.5 m/s, with the
+// pieces lying on it thrown up at 5.5 and 7.7 m/s (lab masonry, frames 59 to 61: a 5.2 t piece under a 495 t
+// part). Crushing (crush, pinch) removes such a piece when the stress says so; this bounds what a step can leave
+// behind, crushed or not. The distance gone in the step (what finish applies) is bounded with it: no further
+// than at the bounded speed, plus what the contacts push out of an overlap (P.max_push): the velocities inside a
+// step are the unbounded ones, and a piece crushed in the step it was squeezed in ended 0.23 m from where a step
+// at its speed puts it (lab masonry frame 52).
+// Per body (10 words, fixed point 1/1024 so the same in any order): the fastest closing; its speed as the step
+// began; the greatest upward gain; its upward velocity as the step began; -; standing on the static world; -;
+// 1 + the greatest restitution among its contacts (0: nothing touches it, and it is left alone); its spin as the
+// step began; the most spin a contact can give it (the closing over the arm to the centre).
+// Not bounded: anything in free flight. What it takes away on purpose: nothing a single contact can do; a chain
+// of contacts passing a hit on in one step passes it on in the next.
+// (Tried first, each dropped for a reason found by a test: a box of velocities per axis, which stopped a chunk
+// landing on a slope from turning its fall into a slide, GPU test hullpairs; the fastest partner's velocity as
+// the limit, with allowances for the body's own spin and for a step of gravity upward, which a body the solver
+// kept kicking climbed by that much every step it stayed in contact, GPU test bound, 2.25 m/s.)
+const VH_FX = 1024.0; const VH_ZERO = 1073741824;
+fn vh_enc(x: f32) -> u32 { return u32(i32(round(clamp(x, -1000.0, 1000.0) * VH_FX)) + VH_ZERO); }
+fn vh_dec(u: u32) -> f32 { return f32(i32(u) - VH_ZERO) / VH_FX; }
+fn vh_fx(x: f32) -> u32 { return u32(round(clamp(x, 0.0, 1000.0) * VH_FX)); }
+@compute @workgroup_size(64) fn vh_init(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x + 1u; if (i >= P.n1) { return; }
+  let o = P.o_vhull + i * 10u; let v = S(i, S_V).xyz;
+  st(o, 0u); st(o + 1u, vh_fx(length(v))); st(o + 2u, 0u); st(o + 3u, vh_enc(v.y)); st(o + 4u, 0u); st(o + 5u, 0u);
+  st(o + 6u, 0u); st(o + 7u, 0u); st(o + 8u, vh_fx(length(S(i, S_W).xyz))); st(o + 9u, 0u);
+}
+// (closing: the relative velocity at the contact point, already times the share the other can impose; nup: the
+// upward part of the normal that pushes this body; along: the closing along that normal)
+fn vh_add(i: u32, closing: f32, along: f32, nup: f32, e: f32, arm: f32) {
+  let o = P.o_vhull + i * 10u;
+  atomicMax(&ints[o], vh_fx(closing)); atomicMax(&ints[o + 2u], vh_fx(along * max(nup, 0.0)));
+  atomicMax(&ints[o + 7u], 1u + vh_fx(clamp(e, 0.0, 1.0))); atomicMax(&ints[o + 9u], vh_fx(closing / max(arm, 0.1)));
+}
+@compute @workgroup_size(64) fn vh_acc(@builtin(global_invocation_id) g: vec3u) {
+  let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }
+  let base = (P.cur_base + mi) * MS; let hd = man[base]; let cnt = u32(hd.z);
+  if (cnt == 0u || cnt >= 8u) { return; }
+  let a = u32(hd.x); let b = u32(hd.y); let da = dyn_awake(a); let db = dyn_awake(b);
+  if (!da && !db) { return; }
+  let e = man[base + M_OUT].x;   // (the contact's restitution; under 0 marks a contact through particles, which has none)
+  let n = man[base + M_N].xyz;   // (from a to b: it pushes b along it and a against it)
+  var va = vec3f(0.0); var wa = vec3f(0.0); var vb = vec3f(0.0); var wb = vec3f(0.0);
+  if (da) { va = S(a, S_V).xyz; wa = S(a, S_W).xyz; }
+  if (db) { vb = S(b, S_V).xyz; wb = S(b, S_W).xyz; }
+  let ima = select(0.0, S(a, S_V).w, da); let imb = select(0.0, S(b, S_V).w, db);
+  let ka = ima / max(ima + imb, 1e-30); let kb = imb / max(ima + imb, 1e-30);
+  // (GPU test landing: a 960 kg slab at 7.7 m/s onto a 47 kg piece lying on the ground, held to 7.1 m/s by that
+  // piece's mass alone, went on into it and came back up at 2.9 m/s: the slab stands on the ground through it)
+  if (da && ld(P.o_level + a) > 0u) { st(P.o_vhull + a * 10u + 5u, 1u); }
+  if (db && ld(P.o_level + b) > 0u) { st(P.o_vhull + b * 10u + 5u, 1u); }
+  for (var k = 0u; k < cnt; k++) {
+    let ra = man[base + M_PT + 2u * k].xyz; let rb = man[base + M_PT + 2u * k + 1u].xyz;
+    let rel = (va + cross(wa, ra)) - (vb + cross(wb, rb));   // (a's point against b's: closing along n when > 0)
+    let cn = max(dot(rel, n), 0.0); let cl = length(rel);
+    if (da) { vh_add(a, ka * cl, ka * cn, -n.y, e, length(ra)); }
+    if (db) { vh_add(b, kb * cl, kb * cn, n.y, e, length(rb)); }
+  }
+}
+@compute @workgroup_size(64) fn vh_clamp(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x + 1u; if (i >= P.n1) { return; }
+  let v4 = S(i, S_V); if (v4.w == 0.0) { return; }
+  let o = P.o_vhull + i * 10u; let t = ld(o + 7u); if (t == 0u) { return; }
+  let e = f32(t - 1u) / VH_FX + P.vh_e;
+  let vy0 = vh_dec(ld(o + 3u));
+  var up = vy0 + (1.0 + e) * f32(ld(o + 2u)) / VH_FX;
+  // (a body in contact may always stop falling: held to keep falling until a closing reached it, the upper
+  // boxes of a pile deeper than the 6 levels went on into the ones under them, and GPU test pile ended 0.10 m
+  // lower than the reference with a third more contacts. One that stands on the static world also gets e of its
+  // fall back.)
+  up = max(up, select(0.0, e * max(-vy0, 0.0), ld(o + 5u) != 0u));
+  let smax = f32(ld(o + 1u)) / VH_FX + (1.0 + e) * f32(ld(o)) / VH_FX + 9.81 * P.dt;
+  var v = v4.xyz;
+  if (v.y > up) { v.y = up; }
+  let sp = length(v); if (sp > smax) { v = v * (smax / sp); }
+  setS(i, S_V, vec4f(v, v4.w));
+  let d4 = S(i, S_DP); var dp = d4.xyz;
+  if (dp.y > (max(up, 0.0) + P.max_push) * P.dt) { dp.y = (max(up, 0.0) + P.max_push) * P.dt; }
+  let dl = length(dp); let dmax = (smax + P.max_push) * P.dt; if (dl > dmax) { dp = dp * (dmax / dl); }
+  setS(i, S_DP, vec4f(dp, d4.w));
+  // (spin: what it had, and what its contacts can give it, with the same allowance; 1 rad/s for a tipping start)
+  let w4 = S(i, S_W); let wl = length(w4.xyz);
+  let wmax = f32(ld(o + 8u)) / VH_FX + (1.0 + e) * f32(ld(o + 9u)) / VH_FX + 1.0;
+  if (wl > wmax) { setS(i, S_W, vec4f(w4.xyz * (wmax / wl), w4.w)); }
+}
 fn find(x0: u32) -> u32 {
   var x = x0;
   loop {
@@ -2441,7 +2538,7 @@ class GpuWorld {
     // contact's pair slot
     let TP = 1024; while (TP < 2 * this.maxMan) TP *= 2; this.TP = TP;
     take('ptab', 3 * TP); take('big', 64 * 4096); take('mslot', this.maxMan);
-    take('hl', 1 + this.maxPairs); take('crushed', cb1); take('released', cb1); take('crush', 12 * 256); take('pinch', 8 * cb1); take('level', cb1); take('level2', cb1); if (opt.maxParticles) take('psup', 13 * cs1);
+    take('hl', 1 + this.maxPairs); take('crushed', cb1); take('released', cb1); take('crush', 12 * 256); take('pinch', 8 * cb1); take('vhull', 10 * cb1); take('level', cb1); take('level2', cb1); if (opt.maxParticles) take('psup', 13 * cs1);
     this.maxEvents = 512; take('events', 12 * this.maxEvents);
     this.maxInherit = 4096; take('inherit', 12 * this.maxInherit);
     take('plan', 24 * cb1); take('spart', cs1); take('snap', 1 + 4 * 256);
@@ -2517,7 +2614,7 @@ class GpuWorld {
     const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
     const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color_init', 'color_round', 'color_claim_s', 'color_claim', 'color_tie', 'color_resolve', 'color_count', 'color_check', 'ev_count', 'ev_cut', 'blist_sort', 'ovf_sort', 'sort_cells', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'wake_boxes', 'inherit', 'retire', 'red_count', 'red_big', 'red_score', 'red_pick', 'red_apply', 'crush', 'crush_release', 'pinch_acc', 'pinch', 'level_pass', 'snap_acc', 'sup_acc', 'snap_split', 'snap_shapes'];
+                   'integrate_pos', 'finish', 'vh_init', 'vh_acc', 'vh_clamp', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'wake_boxes', 'inherit', 'retire', 'red_count', 'red_big', 'red_score', 'red_pick', 'red_apply', 'crush', 'crush_release', 'pinch_acc', 'pinch', 'level_pass', 'snap_acc', 'sup_acc', 'snap_split', 'snap_shapes'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'hull_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
@@ -2562,6 +2659,7 @@ class GpuWorld {
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
     u[136] = this.oHull; u[137] = L.hl; f[139] = this.ovfPush ?? 1; u[138] = (this.dbgBits || 0) | (this.shock === false ? 16 : 0);
     u[140] = L.plan; u[141] = L.spart; u[142] = L.snap; u[143] = L.claim; u[144] = L.mtry; u[145] = L.claim2; u[146] = L.sorted2; u[147] = L.evhist; u[148] = L.cchk || 0; u[149] = L.pinch; u[150] = this.frame; u[151] = L.level; u[152] = L.level2; u[153] = this.capP && this.support !== false ? L.psup : 0; u[154] = this.capS + 1; u[155] = L.released;   // (psup's stride: the shape capacity, so its regions stay put as shapes are added)
+    u[156] = L.vhull; f[157] = this.boundSlack ?? 0.1;
     u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 3;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
@@ -2673,6 +2771,8 @@ class GpuWorld {
     for (let r = 0; r < RS + RA; r++) { ind(p, r < RS ? 'color_claim_s' : 'color_claim', 96 * 4); ind(p, 'color_tie', 96 * 4); ind(p, 'color_resolve', 96 * 4); run(p, 'color_round', 1); }
     ind(p, 'color_count', 96 * 4); run(p, 'adj_scan', 1);
     if (this.shock !== false) { for (let k = 0; k < 6; k++) { p.setBindGroup(1, this.bg1, [k * 256]); ind(p, 'level_pass', 96 * 4); } p.setBindGroup(1, this.bg1, [0]); }
+    // (the velocity bound: each body's own velocity and those of what touches it, as the step starts)
+    if (this.velocityBound !== false) { run(p, 'vh_init', nb); ind(p, 'vh_acc', 96 * 4); }
     if (this.colorCheck) { p.end(); enc.clearBuffer(this.intBuf, (L.cchk + 1) * 4, 32 * this.n1 * 4); p = pass(null); ind(p, 'color_check', 96 * 4); }
     p.end();
     p = pass(null, true); run(p, 'color_scan', 1); p.end();
@@ -2699,9 +2799,10 @@ class GpuWorld {
       colors('relax');
     }
     colors('restitute');
+    if (this.velocityBound !== false) run(p, 'vh_clamp', nb);
     run(p, 'finish', nb);
     if (this.evEnergy > 0) { ind(p, 'ev_count', 96 * 4); run(p, 'ev_cut', 1); ind(p, 'events', 96 * 4); }
-    if (this.crushing !== false) { ind(p, 'crush', 96 * 4); if (this.pinching === true) { ind(p, 'pinch_acc', 96 * 4); run(p, 'pinch', nb); } ind(p, 'crush_release', 96 * 4); }   // (pinching off by default: docs/GPU.md, Crushing on contact)
+    if (this.crushing !== false) { ind(p, 'crush', 96 * 4); if (this.pinching !== false) { ind(p, 'pinch_acc', 96 * 4); run(p, 'pinch', nb); } ind(p, 'crush_release', 96 * 4); }   // (pinching on since the velocity bound, 14 Nov: docs/GPU.md, Crushing on contact)
     if (this.capP && this.support !== false) ind(p, 'sup_acc', 96 * 4);
     if (this.plans) { ind(p, 'snap_acc', 96 * 4); run(p, 'snap_split', nb); run(p, 'snap_shapes', nsh); }
     p.end();
@@ -3114,10 +3215,14 @@ class GpuWorld {
     // records follow when that step's stats come back. Poses from the live records, at whatever time the read
     // resolved, made lab runs differ; from records copied at the read, pieces drawn from a body that had just
     // broken jumped by its new centre, 8.7 m: lab collapse, 6,709 jumps.)
-    this.shapes.forEach((s, k) => { if (s && s.body < n1 && (!minBody || (!s.dead && s.body >= minBody))) { list.push({ mat: s.mat, col: s.col }); slots.push(k + 1); gens.push(this.shapeGen ? this.shapeGen[k] || 0 : 0); } });
+    this.shapes.forEach((s, k) => { if (s && s.body < n1 && (!minBody || (!s.dead && s.body >= minBody))) { list.push({ mat: s.mat, col: s.col, hull: s.hull || 0, ball: !!s.labBall }); slots.push(k + 1); gens.push(this.shapeGen ? this.shapeGen[k] || 0 : 0); } });
     const [bod, sol, shp] = await Promise.all([this.read(this.bodBuf, n1 * 80), this.read(this.solBuf, n1 * 96), this.read(this.shpBuf, this.ns1 * 128)]);
     const t0 = performance.now();
     const pose = new Float32Array(list.length * 10), mats = new Uint8Array(list.length), cols = new Uint16Array(list.length);
+    // (and each shape's hull as it was then: a slot given to another shape while the read was in flight was drawn
+    // with the old pose and size as the new shape's kind, a box as a chunk or a chunk as a box, for a frame or two:
+    // lab collapse, frame 84, 0.25 m3 short)
+    const hulls = Uint16Array.from(list, s => s.hull), balls = Uint8Array.from(list, s => +s.ball);
     list.forEach((s, k) => {
       const o = slots[k] * 32, bi = Math.round(shp[o]);
       const b = bi * 20, p = [bod[b], bod[b + 1], bod[b + 2]], q = [bod[b + 4], bod[b + 5], bod[b + 6], bod[b + 7]];
@@ -3134,7 +3239,7 @@ class GpuWorld {
       vel.set(sol.subarray(s, s + 3), i * 3); ang.set(sol.subarray(s + 4, s + 7), i * 3);
       sleeping[i] = bod[b + 12] > 0.5 ? 1 : 0; timer[i] = bod[b + 11];
     }
-    return { pose, mats, cols, slots: Uint32Array.from(slots), gens: Uint32Array.from(gens), body, vel, ang, sleeping, timer, frame, n1, jsMs: performance.now() - t0 };
+    return { pose, mats, cols, hulls, balls, slots: Uint32Array.from(slots), gens: Uint32Array.from(gens), body, vel, ang, sleeping, timer, frame, n1, jsMs: performance.now() - t0 };
   }
 
   // This step's contacts: bodies, restitution, normal impulse total (N s) and approach speed (m/s) per contact,

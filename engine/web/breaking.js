@@ -219,7 +219,7 @@ function crushBodies() {
     }
     const room = gpu.roomParticles(), keep = list.slice(0, room);
     const parts = gpu.addParticles(keep); partsBy.crushed = (partsBy.crushed || 0) + keep.length;
-    parts.forEach((slot, k) => { if (slot < 0) return; const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: info[k].h, col: info[k].col, gen: g, dead: false }; partsMade++; });
+    parts.forEach((slot, k) => { if (slot < 0) return; const g = pInfo[slot] ? pInfo[slot].gen + 1 : 1; pInfo[slot] = { h: info[k].h, col: info[k].col, gen: g, dead: false }; if (LAB.on) { pInfo[slot].labF = LAB.f; pInfo[slot].labWhy = 'crushed'; pInfo[slot].labV = keep[k].v.map(x => +x.toFixed(2)); } partsMade++; });
     gpu.breakBody(idx, [], c.p, c.q, [], parts, parts.map(() => [0, 0, 0]));
     bodyInfo.delete(idx); crushedBodies++;
   }
@@ -322,7 +322,7 @@ function onImpacts(job, r) {
       kids.push({ id, hit, boxes });
     }
     // (lab: how much of a big falling part leaves as crumbs and particles when it is broken)
-    if (LAB.on) { let all = 0, fine = 0; for (const kd of kids) for (const bx of kd.boxes) { const v = bx[3] * bx[4] * bx[5] * TICK ** 3; all += v; if (kd.id < 0) fine += v; } if (all >= 50) (LAB.bigBreaks = LAB.bigBreaks || []).push([LAB.f, +all.toFixed(0), +(fine / all).toFixed(3)]); }
+    if (LAB.on) { let all = 0, fine = 0, mas = 0, fineMas = 0; for (const kd of kids) for (const bx of kd.boxes) { const v = bx[3] * bx[4] * bx[5] * TICK ** 3, m = (bx[6] & 15) === 1; all += v; if (m) mas += v; if (kd.id < 0) { fine += v; if (m) fineMas += v; } } if (all >= 50) (LAB.bigBreaks = LAB.bigBreaks || []).push([LAB.f, +all.toFixed(0), +(fine / all).toFixed(3), +(mas / all).toFixed(3), +((fine - fineMas) / Math.max(all - mas, 1e-9)).toFixed(3)]); }   // (frame, m3, share in crumbs, share that is masonry, share in crumbs of what is not masonry)
     const idx = pieceBody.get(parent);
     if (idx === undefined) continue;
     if (LAB.on && (LAB.dbgBreaks = LAB.dbgBreaks || []).length < 40) { const bi = bodyInfo.get(idx); let nb = 0, vb = 0; for (const kd of kids) for (const bx of kd.boxes) { nb++; vb += bx[3] * bx[4] * bx[5] * TICK ** 3; } LAB.dbgBreaks.push({ f: LAB.f, piece: parent, body: idx, n_when_made: bi && bi.n, kid_boxes: nb, kid_box_m3: +vb.toFixed(1), kids: kids.length, shapes_gpu: (gpu.bodyShapes.get(idx) || []).length, pend: snapPending.get(parent) ? { spare: snapPending.get(parent).spare, shapes: (gpu.bodyShapes.get(snapPending.get(parent).spare) || []).length } : null, plan: gpu.planOf && gpu.planOf.get(idx) ? { spare: gpu.planOf.get(idx).spare, done: gpu.planOf.get(idx).done } : null }); }
