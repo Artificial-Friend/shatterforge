@@ -1030,6 +1030,21 @@ The first pass on build 228b18a (software GPU, full lengths) showed two more thi
   moving). A job still in flight at the last frame is no longer counted against the scenario; one that then
   failed something would be missed by this check (its own change of measure; rule 3).
 
+**The first fix held buildings up on their crumbs, and was replaced the same day.** Bounded along the way a crumb
+ends up going (commit f259dd1), crumbs could not get out sideways from under what came down on them. On that build
+`qglass` came down 0.29 m (limit at least 1) and GPU tests `heap` and `particles` failed. The rule kept bounds a
+crumb by the speed of the fastest crumb that pushed it, in any direction (docs/GPU.md): `qglass` 1.14 m, `tallball`
+and `qballoffice` pass with no crumb thrown (software GPU, full lengths, 18 November).
+
+**`qchimney` on this rule: it sits down and stands.** The foot blown out on one side, the stack above becomes one
+body of 121.6 t at frame 60, leans slowly on what is left of the foot (its top 0.6 m lower by frame 420), then what
+is left gives way and it comes straight down on the plinth: its top 3.85 m lower at 15 s (limit at least 10: fails),
+upright, still quivering at the end (one energy gain at frame 877, 12 kJ on 121 t; not settled). With particles
+holding nothing up (`SF_NOSUP=1`, a new switch of the lab) it does the same, 3.66 m, so it does not stand on its
+crumbs but on the pieces of its foot. On build 228b18a its top came down 10 m and 21 bodies were still awake at
+15 s. Why it no longer falls over was not found. The limit is not changed; the scenario fails and is listed in
+docs/STATUS.md.
+
 **Seen once, not reproduced: a pinched piece that never slept.** In `qtemple` on 228b18a body 275, 11 kg and three
 boxes, lay 4 cm above the ground under the standing structure, held between the two (six contacts, 600 to 3,400
 N s each, one frame's impulse of about 20 t), still to a millimetre and awake from frame 360 to the end, with 168
