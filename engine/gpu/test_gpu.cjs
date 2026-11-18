@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..', '..');
 const wasm = fs.readFileSync(path.join(root, 'target/wasm32-unknown-unknown/release/sf_demo.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'crumbpop', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'crumbpop', 'crumbnest', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -969,6 +969,29 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       const res = { crumbsMaxUp_ms: +up.toFixed(2), atFrame: at, fastest_ms: +sp.toFixed(2) };
       // (the part's 6 m/s and the separation speed, with a step of gravity: nothing it pushes leaves faster)
       check('crumbpop', res.crumbsMaxUp_ms <= 8.2 && res.fastest_ms <= 8.4, res);
+    }
+    if (scenes.includes('crumbnest')) {
+      // Crumbs made on top of one another do not throw each other (18 Nov; the limit after the crumbs' own pushes
+      // in p_contact). 24 crumbs (r 0.155) at rest, 0.1 m apart, four layers of three by two, in a well 0.5 m
+      // square between four static walls on a static floor 4 m up: as the bricks of a failing floor turn to
+      // crumbs in place. Each pushes its neighbours off by the overlap, at most by how fast the two close plus the
+      // separation speed (2 m/s); every neighbour and every sub-step added that speed again, and the top of the
+      // column left at 7.09 m/s (frame 5). With the limit: 1.8 m/s up, 2.07 the fastest. (Lab tallball and
+      // qballoffice, 18 Nov: one crumb each up at 13.2 and 11.3 m/s with nothing moving near.)
+      const st = [{ p: [0, 3.875, 0], q: [0, 0, 0, 1], h: [1, 0.125, 1], mat: MAT.concrete }];
+      for (const [x, z, hx, hz] of [[-0.5, 0, 0.25, 0.75], [0.5, 0, 0.25, 0.75], [0, -0.5, 0.25, 0.25], [0, 0.5, 0.25, 0.25]]) st.push({ p: [x, 5, z], q: [0, 0, 0, 1], h: [hx, 1, hz], mat: MAT.concrete });
+      const w = await GpuWorld.create(dev, [{ fixed: true, shapes: st }], { substeps: 12, sleep: false, maxBodies: 8, maxShapes: 64, maxParticles: 1024 });
+      const list = []; for (let k = 0; k < 4; k++) for (let i = 0; i < 3; i++) for (let j = 0; j < 2; j++) list.push({ p: [-0.09 + 0.09 * i, 4.16 + 0.1 * k, -0.05 + 0.1 * j + 0.01 * (k % 2)], v: [0, 0, 0], r: 0.155, mat: 0 });
+      w.addParticles(list);
+      let up = -1e9, sp = 0, at = 0, top = 0;
+      for (let f = 1; f <= 60; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        const pr = await w.readParticles(); const d = new Float32Array(pr.data.buffer || pr.data);
+        for (let i = 0; i < pr.n; i++) { const vy = d[i * 12 + 4]; if (vy > up) { up = vy; at = f; } sp = Math.max(sp, Math.hypot(d[i * 12 + 3], d[i * 12 + 4], d[i * 12 + 5])); top = Math.max(top, d[i * 12 + 1]); }
+      }
+      w.destroy();
+      const res = { crumbsMaxUp_ms: +up.toFixed(2), atFrame: at, fastest_ms: +sp.toFixed(2), highest_m: +top.toFixed(2) };
+      check('crumbnest', res.crumbsMaxUp_ms <= 2.5 && res.fastest_ms <= 3, res);
     }
     if (scenes.includes('bound')) {
       // The velocity bound (vh_clamp) on its own: the landing cases with shock propagation off and no crushing, the
