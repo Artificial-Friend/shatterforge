@@ -21,7 +21,7 @@ function frameBody(now, dt) {
     E.player_step(dt, w.x, w.y, w.z, keys.has('Space') ? 1 : 0, fly ? 1 : 0);
     cam.position.set(E.player_get(0), E.player_get(1) + 1.65, E.player_get(2));
     // (the city is wider than the sun's shadow: the shadow follows the player)
-    if (KIND === 5) { const px = E.player_get(0), pz = E.player_get(2); sun.target.position.set(px, 0, pz); sun.position.set(px - 30, 60, pz - 22); }
+    if (TILED) { const px = E.player_get(0), pz = E.player_get(2); sun.target.position.set(px, 0, pz); sun.position.set(px - 30, 60, pz - 22); }
     cam.rotation.set(pitch, yaw, 0);
     pump();
     // physics runs while anything is awake (and briefly after a blast, before the first stats arrive)

@@ -25,7 +25,9 @@ if [ "$level" != status ]; then
     # (and determinism: the collapse twice, 150 frames, the same frame for frame)
     lab) for c in rest debris view settings; do node game/lab/page_check.cjs $c 2>&1 | grep -E "^(PASS|FAIL)"; done
          node game/lab/lab.cjs quick 2>&1 | grep -v "GL Driver" | grep -v " of "
-         node game/lab/lab.cjs collapse --frames 150 --twice --out lab-results/twice 2>&1 | grep -E "deterministic|    frame" ;;
+         node game/lab/lab.cjs collapse --frames 150 --twice --out lab-results/twice 2>&1 | grep -E "deterministic|    frame"
+         # (and the same collapse with the engineer's view on: the view draws, it changes nothing; 15 Nov)
+         node game/lab/lab.cjs collapse --frames 150 --twice-view --out lab-results/twiceview 2>&1 | grep -E "deterministic|the two runs|    frame" ;;
     lab-full) node game/lab/lab.cjs full 2>&1 | grep -v "GL Driver" | grep -v " of " ;;
   esac
 fi

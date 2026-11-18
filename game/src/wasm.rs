@@ -117,16 +117,28 @@ static mut SNAP: Vec<u8> = Vec::new();
 /// the page's copy: the motion of the structure's cell at a point (Sim::view_motion): 1 if found; then motion_ptr (12 numbers)
 #[no_mangle] pub extern "C" fn view_motion(x: f32, y: f32, z: f32) -> i32 { game().view_motion([x, y, z]) as i32 }
 #[no_mangle] pub extern "C" fn motion_ptr() -> *const f32 { game().motion.as_ptr() }
+/// the moving cells of the last structure step (Sim::motion_cells): the worker reads them out, the page's copy takes them in
+#[no_mangle] pub extern "C" fn motion_cells_ptr() -> *const f32 { game().motion_cells.as_ptr() }
+#[no_mangle] pub extern "C" fn motion_cells_len() -> u32 { game().motion_cells.len() as u32 }
+#[no_mangle] pub extern "C" fn motion_cells_in(n: u32) -> *mut f32 { let g = game(); g.motion_cells.clear(); g.motion_cells.resize(n as usize, 0.0); g.motion_cells.as_mut_ptr() }
 /// a new list of rubble lying on the structure follows (`rest_load`), replacing the last
 #[no_mangle] pub extern "C" fn rest_begin() { let g = game(); g.rest.clear(); g.rest_fresh = true; }
 #[no_mangle] pub extern "C" fn rest_load(x: f32, y: f32, z: f32, f: f32) { game().rest.push([x, y, z, f]); }
 #[no_mangle] pub extern "C" fn rest_applied() -> f32 { game().rest_applied }
 #[no_mangle] pub extern "C" fn cracked_total() -> u32 { game().cracked_total as u32 }
 #[no_mangle] pub extern "C" fn bricks_dump() { game().dump(); }
+/// what falling piece `k` weighs in the engine (kg): the sum of its bricks' (structure::mass)
+#[no_mangle] pub extern "C" fn piece_mass(k: u32) -> f32 { let g = game(); g.pieces.get(k as usize).map_or(0.0, |p| p.iter().map(|&i| crate::structure::mass(&g.b, i)).sum()) }
 /// a free piece's shape (Sim::piece_shape) into its own buffer: its length; then piece_ptr
 #[no_mangle] pub extern "C" fn piece_shape(k: u32) -> u32 { game().piece_shape(k) as u32 }
 #[no_mangle] pub extern "C" fn piece_ptr() -> *const f32 { game().piece_out.as_ptr() }
 #[no_mangle] pub extern "C" fn blast(x: f32, y: f32, z: f32, r: f32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.blast(v3(x, y, z), r) as u32; g.finish_plans(); n }
+/// Sim::punch (a heavy fast body about to hit); then punch_ptr, punch_len: what it met (Sim::punch_out)
+#[no_mangle] pub extern "C" fn punch(x: f32, y: f32, z: f32, dx: f32, dy: f32, dz: f32, r: f32, energy: f32, mass: f32, reach: f32, gain: f32) -> u32 { let g = game(); g.plan_out.clear(); let n = g.punch(v3(x, y, z), v3(dx, dy, dz), r, energy, mass, reach, gain) as u32; g.finish_plans(); n }
+#[no_mangle] pub extern "C" fn punch_probe(x: f32, y: f32, z: f32, dx: f32, dy: f32, dz: f32, r: f32, energy: f32, mass: f32, reach: f32, gain: f32) { game().punch_probe(v3(x, y, z), v3(dx, dy, dz), r, energy, mass, reach, gain); }
+#[no_mangle] pub extern "C" fn punch_ptr() -> *const f32 { game().punch_out.as_ptr() }
+#[no_mangle] pub extern "C" fn punch_len() -> u32 { game().punch_out.len() as u32 }
+#[no_mangle] pub extern "C" fn sweep(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32, r: f32, reach: f32) -> f32 { game().sweep(v3(ox, oy, oz), v3(dx, dy, dz), r, reach) }
 #[no_mangle] pub extern "C" fn raycast(ox: f32, oy: f32, oz: f32, dx: f32, dy: f32, dz: f32, max: f32) -> f32 { game().raycast(v3(ox, oy, oz), v3(dx, dy, dz), max) }
 #[no_mangle] pub extern "C" fn bricks_alive() -> u32 { game().b.alive_count() as u32 }
 #[no_mangle] pub extern "C" fn joints_live() -> u32 { game().b.live_joints as u32 }
@@ -190,6 +202,17 @@ static mut SNAP: Vec<u8> = Vec::new();
 /// The break plans made by the last call (see Sim::plan_out)
 #[no_mangle] pub extern "C" fn plan_ptr() -> *const f32 { game().plan_out.as_ptr() }
 #[no_mangle] pub extern "C" fn plan_len() -> u32 { game().plan_out.len() as u32 }
+/// The Quarter (kind 6): its lots (9; lot k's field f: 0 x, 1 z of its centre, m) and the things on them (thing k's
+/// field f: 0 what (the order of `quarter::What`), 1 its lot's index, 2 x and 3 z of its design origin (m), 4 its
+/// quarter turns).
+#[no_mangle] pub extern "C" fn quarter_lot(k: u32, f: u32) -> f32 { let c = crate::quarter::lot_centre(((k as i32) % crate::quarter::N, (k as i32) / crate::quarter::N)); if f == 0 { c.0 } else { c.1 } }
+#[no_mangle] pub extern "C" fn quarter_things() -> u32 { crate::quarter::layout().len() as u32 }
+#[no_mangle] pub extern "C" fn quarter_thing(k: u32, f: u32) -> f32 {
+    let l = crate::quarter::layout();
+    let Some(p) = l.get(k as usize) else { return -1.0 };
+    let o = crate::quarter::origin(p);
+    match f { 0 => p.what as u32 as f32, 1 => crate::quarter::lot_index(p.lot) as f32, 2 => o.0, 3 => o.1, _ => p.quarter as f32 }
+}
 /// The city's lots (kind 5, `n` a side): how many, and lot k's field f: 0 kind, 1 storeys, 2 quarter turns, 3 x, 4 z
 /// (m, its centre).
 #[no_mangle] pub extern "C" fn city_lots(n: u32) -> u32 { crate::city::layout(n as i32).lots.len() as u32 }

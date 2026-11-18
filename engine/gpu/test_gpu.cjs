@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..', '..');
 const wasm = fs.readFileSync(path.join(root, 'target/wasm32-unknown-unknown/release/sf_demo.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -17,7 +17,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
   await p.goto('file:///tmp/sf_blank.html');
   await p.addScriptTag({ path: path.join(__dirname, 'gpu_world.js') });
   const res = await p.evaluate(async ({ wasm, scenes, SUB, SAND_PUSH, SAND_MAT, SAND_SUB, SAND_COL, SAND_FALL, COMP_N, COMP_FLOOR, RELAX, HNOSLEEP, HBOX, HNOCRUSH, HNORED, HONLY, HPDYN, HRANDOM, HBIG, KN }) => {
-    Object.assign(globalThis, KN || {}); if (globalThis.BOUND_OFF) { const c2 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c2(...a); w.velocityBound = false; return w; }; } if (globalThis.COLR) { const c1 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c1(...a); const [x, y] = globalThis.COLR.split(',').map(Number); w.colRoundsS = x; w.colRounds = y; return w; }; } if (globalThis.DBG) { const c0 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c0(...a); w.dbgBits = +globalThis.DBG; return w; }; }
+    Object.assign(globalThis, KN || {}); if (globalThis.SWEEP_OFF) GpuWorld.sweepOff = true; if (globalThis.WAKE_OFF) GpuWorld.wakeFastOff = true; if (globalThis.COVER_OFF) { const c4 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c4(...a); w.coverOff = true; return w; }; } if (globalThis.BOUND_OFF) { const c2 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c2(...a); w.velocityBound = false; return w; }; } if (globalThis.COLR) { const c1 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c1(...a); const [x, y] = globalThis.COLR.split(',').map(Number); w.colRoundsS = x; w.colRounds = y; return w; }; } if (globalThis.DBG) { const c0 = GpuWorld.create; GpuWorld.create = async (...a) => { const w = await c0(...a); w.dbgBits = +globalThis.DBG; return w; }; }
     if (SAND_PUSH) globalThis.SAND_PUSH = SAND_PUSH; if (SAND_MAT) globalThis.SAND_MAT = SAND_MAT; if (SAND_SUB) globalThis.SAND_SUB = SAND_SUB; if (SAND_COL) globalThis.SAND_COL = SAND_COL; if (SAND_FALL) globalThis.SAND_FALL = 1; if (COMP_N) globalThis.COMP_N = COMP_N; if (COMP_FLOOR) globalThis.COMP_FLOOR = 1; if (RELAX) globalThis.RELAX = RELAX; if (HNOSLEEP) globalThis.HNOSLEEP = 1; if (HBOX) globalThis.HBOX = 1; if (HNOCRUSH) globalThis.HNOCRUSH = 1; if (HNORED) globalThis.HNORED = 1; if (HONLY) globalThis.HONLY = HONLY; if (HPDYN) globalThis.HPDYN = 1; if (HRANDOM) globalThis.HRANDOM = 1; if (HBIG) globalThis.HBIG = 1;
     // DT2=1: every scene in steps of 1/30 s (each second call steps twice the time, the other none), as the page
     // steps when the GPU cannot keep up with 60 steps a second
@@ -730,6 +730,143 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       check('pinch', crushed.size >= 20 && !crushed.has(aloneI) && !crushed.has(underI) && yB < 4.2 && pmax < 1 && bmax < 0.6,
         { crushed: [...crushed].filter(b => b <= 24).length, aloneCrushed: crushed.has(aloneI), underSlabCrushed: crushed.has(underI), blockY: +yB.toFixed(2), blockMaxUp_ms: +bmax.toFixed(2), piecesMaxUp_ms: +pmax.toFixed(2) });
     }
+    if (scenes.includes('passby')) {
+      // A fast body through a hole it fits (15 Nov; the narrow phase's `sweep`). A steel ball of four crossed boxes
+      // (the game's, 0.8 m across, 2,104 kg), turned so its edges are skew to everything, sent down at 47 m/s through
+      // the middle of a 1.2 m square hole in a fixed 0.25 m slab made of four plates and, round the hole, eight
+      // blocks turned 30 degrees (skew edges, as a fracture's cells have). Its corners reach 0.49 m: it clears the
+      // rim by 0.11 m and touches nothing. It must come out below at the speed of free fall (47 m/s and g t), going
+      // straight down. Before (SWEEP_OFF=1): the pair margin covers all of a step's travel (0.8 m), edge-edge
+      // contacts with the rim form although the ball only passes it, and it is slowed and thrown aside (the
+      // numbers are in docs/GPU.md, "Fast pairs that only pass"). The second case is the same ball 0.35 m off
+      // centre: its path does meet the rim, and it must be stopped or turned by it (the test must not let through
+      // what does hit).
+      const r = 0.4, a = r, b = 0.5 * r;
+      const tq = qa([1, 0.4, 0.7], 0.6);
+      const ball = (x) => ({ shapes: [[a, b, b], [b, a, b], [b, b, a], [0.7 * r, 0.7 * r, 0.7 * r]].map(h => ({ p: [x, 9, 0], q: tq, h, mat: MAT.steel })), mass: 7850 * 4 / 3 * Math.PI * r ** 3, v: [0, -47, 0], w: [0, 0, 0] });
+      const plates = [[-1.6, 0, 1.0, 2.6], [1.6, 0, 1.0, 2.6], [0, -1.6, 0.6, 1.0], [0, 1.6, 0.6, 1.0]].map(([x, z, hx, hz]) => ({ p: [x, 5, z], q: [0, 0, 0, 1], h: [hx, 0.125, hz], mat: MAT.concrete }));
+      // (the turned blocks sit on the plates' inner edges, their nearest corners 0.6 m from the middle or more)
+      const rim = []; for (let k = 0; k < 8; k++) { const an = k * Math.PI / 4, d = 0.6 / Math.cos(Math.PI / 8) + 0.2; rim.push({ p: [Math.cos(an) * (d + 0.25), 5.2, Math.sin(an) * (d + 0.25)], q: qa([0.3, 1, 0.2], Math.PI / 6 + k), h: [0.12, 0.07, 0.12], mat: MAT.concrete }); }
+      const slab = { shapes: [...plates, ...rim], fixed: true };
+      const res = {};
+      for (const [name, x] of [['through', 0], ['offCentre', 0.35]]) {
+        const w = await GpuWorld.create(dev, [slab, ball(x)], { substeps: 12, sleep: false });
+        const nsh = slab.shapes.length;
+        let last = null, slowest = 1e9, side = 0, contacts = 0;
+        for (let f = 1; f <= 12; f++) {
+          w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+          const rr = await w.readPose(); last = rr;
+          const v = [rr.vel[3], rr.vel[4], rr.vel[5]];
+          if (rr.body[8] > 1) { slowest = Math.min(slowest, -v[1]); side = Math.max(side, Math.hypot(v[0], v[2])); }
+          contacts = Math.max(contacts, w.stats.contacts || w.stats.manifolds || 0);
+        }
+        w.destroy();
+        res[name] = { slowestDown_ms: +slowest.toFixed(2), sideways_ms: +side.toFixed(2), contactsMost: contacts, y_end: +last.body[8].toFixed(2) };
+        void nsh;
+      }
+      const t = res.through, o = res.offCentre;
+      check('passby', t.slowestDown_ms >= 47 && t.sideways_ms <= 0.05 && (o.slowestDown_ms < 40 || o.sideways_ms > 2), res);
+    }
+    if (scenes.includes('wedge')) {
+      // Covered faces (15 Nov; `cover_fix`). A floor of 2 m panels, fixed, seams across the way. On it:
+      // - two of the glass house's chairs (12 kg each: a seat, a block of a leg, a back), one behind the other, and
+      //   the game's ball (three eight-sided discs, 0.5 m across, 514 kg) into them at 60 m/s, coming down at
+      //   3.4 m/s. Carried along whole they would leave the ball 60 x 514 / 538 = 57.3 m/s.
+      // - a 300 kg steel block, and the same ball into it, level. Carried along it would leave the ball 37.9 m/s;
+      //   the block tips and digs in, and on a floor of ONE piece the ball is left 28 m/s.
+      // Before (COVER_OFF=1): the block, tipped 4.7 cm into the floor, meets the next panel's edge at the seam
+      // (a contact with the panel's side, normal 0.92 along the way, 23,315 N s in one step) and stops there with
+      // the ball behind it: 4.2 m/s. The chairs leave the ball 51.0 m/s. After: see the check.
+      // And the ball is a body thrown (`setShot`: its contacts at its real mass while it flies fast, not at 20
+      // times the light piece's). Without that (SHOT_OFF=1) the chairs leave it 54.7 m/s: each took what a 25.7 kg
+      // piece takes. With it 56.7. The block is 300 kg, within the limit either way: 30.4 m/s.
+      // (Lab qballglass, 15 Nov: the ball left the chairs at 40.8 m/s, one contact having taken 5,588 N s, the
+      // momentum of 93 kg at 60 m/s, from a 12 kg chair.)
+      const r = 0.25;
+      const discs = (c) => { const k = 1 / Math.cos(Math.PI / 8), L = 0.4 * r, corners = [], top = [], bottom = [], sides = [];
+        for (let i = 0; i < 8; i++) { const a = (2 * i + 1) * Math.PI / 8; corners.push([r * k * Math.cos(a), r * k * Math.sin(a), L], [r * k * Math.cos(a), r * k * Math.sin(a), -L]); }
+        for (let i = 0; i < 8; i++) { top.push(2 * i); bottom.unshift(2 * i + 1); const j = (i + 1) % 8; sides.push([2 * i, 2 * i + 1, 2 * j + 1, 2 * j]); }
+        const h = Math.SQRT1_2; return [[0, 0, 0, 1], [0, h, 0, h], [-h, 0, 0, h]].map(q => GpuWorld.pieceShape(corners, [top, bottom, ...sides], c, q, MAT.steel, MAT.steel)); };
+      const ball = (y, vy) => ({ shapes: discs([-1.5, y, 0]), mass: 514, v: [60, vy, 0], w: [0, 0, 0] });
+      // (the floor in panels 2 m long, as the house's deck is: seams across the way at x = 1, 3, 5, ...)
+      const floor = { shapes: Array.from({ length: 20 }, (_, k) => ({ p: [-20 + 2 * k, -0.0625, 0], q: [0, 0, 0, 1], h: [1, 0.0625, 5], mat: MAT.concrete })), fixed: true };
+      const bx = (lo, hi, mat) => ({ p: lo.map((v, k) => (v + hi[k]) / 2), q: [0, 0, 0, 1], h: lo.map((v, k) => (hi[k] - v) / 2), mat });
+      const chair = (x, z) => ({ shapes: [bx([x, 0.375, z], [x + 0.5, 0.5, z + 0.5], MAT.timber), bx([x + 0.125, 0, z + 0.125], [x + 0.375, 0.375, z + 0.375], MAT.steel), bx([x, 0.5, z], [x + 0.5, 1.0, z + 0.125], MAT.timber)], mass: 12, v: [0, 0, 0], w: [0, 0, 0] });
+      const res = {};
+      for (const [name, pieces, y, vy] of [['chairs', [chair(0, 0.125), chair(0.875, 0.125)], 0.8, -3.4],
+                                           ['block', [{ shapes: [bx([0, 0, -0.2], [0.4, 0.4, 0.2], MAT.steel)], mass: 300, v: [0, 0, 0], w: [0, 0, 0] }], 0.45, 0]]) {
+        const w = await GpuWorld.create(dev, [floor, ...pieces, ball(y, vy)], { substeps: 12, sleep: false });
+        const bi = 1 + pieces.length;
+        if (!globalThis.SHOT_OFF) w.setShot(bi + 1);
+        let slowest = 1e9, crushedAt = [], vEnd = 0, track = [];
+        for (let f = 1; f <= 10; f++) {
+          w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+          const rr = await w.readPose();
+          const v = [rr.vel[3 * bi], rr.vel[3 * bi + 1], rr.vel[3 * bi + 2]];
+          slowest = Math.min(slowest, v[0]); vEnd = v[0]; track.push(+v[0].toFixed(1));
+          for (const c of w.takeCrushed()) crushedAt.push([f, c.body]);
+        }
+        w.destroy();
+        res[name] = { slowest_ms: +slowest.toFixed(2), end_ms: +vEnd.toFixed(2), crushed: crushedAt, forward_ms: track };
+      }
+      // (the block: between what a floor of one piece gives and what carrying it along would)
+      check('wedge', res.chairs.end_ms >= 56 && res.chairs.end_ms <= 57.4 && res.block.end_ms >= 27 && res.block.end_ms <= 38, res);
+    }
+    if (scenes.includes('sleeper')) {
+      // A sleeping body in a fast one's way (15 Nov; `prep_woken`). The glass house's wardrobe (0.625 x 1.75 x 3.5 m
+      // of timber, 383 kg) stands on the fixed floor until it sleeps; then the game's ball (0.5 m, 514 kg) comes at
+      // 53 m/s, level, 0.6 m over the floor, into its long side. Sharing the ball's momentum, the two go on at
+      // 53 x 514 / 897 = 30 m/s; a hit that gives all back would leave the ball 53 x (514 - 383) / 897 = 7.7 m/s
+      // forward. Before (WAKE_OFF=1): the wardrobe is asleep in the step the ball reaches it, held as fixed, and
+      // the ball comes back from it as from a wall: -15.9 m/s here, as in the lab (qballglass: 26,335 N s through one
+      // contact), the wardrobe left at rest. After: the ball goes on at 23.7 m/s, the wardrobe at 35.4.
+      const r = 0.25;
+      const discs = (c) => { const k = 1 / Math.cos(Math.PI / 8), L = 0.4 * r, corners = [], top = [], bottom = [], sides = [];
+        for (let i = 0; i < 8; i++) { const a = (2 * i + 1) * Math.PI / 8; corners.push([r * k * Math.cos(a), r * k * Math.sin(a), L], [r * k * Math.cos(a), r * k * Math.sin(a), -L]); }
+        for (let i = 0; i < 8; i++) { top.push(2 * i); bottom.unshift(2 * i + 1); const j = (i + 1) % 8; sides.push([2 * i, 2 * i + 1, 2 * j + 1, 2 * j]); }
+        const h = Math.SQRT1_2; return [[0, 0, 0, 1], [0, h, 0, h], [-h, 0, 0, h]].map(q => GpuWorld.pieceShape(corners, [top, bottom, ...sides], c, q, MAT.steel, MAT.steel)); };
+      const floor = { shapes: [{ p: [0, -0.25, 0], q: [0, 0, 0, 1], h: [20, 0.25, 8], mat: MAT.concrete }], fixed: true };
+      const wardrobe = { shapes: [{ p: [0.3125, 0.875, 0], q: [0, 0, 0, 1], h: [0.3125, 0.875, 1.75], mat: MAT.timber }], mass: 383, v: [0, 0, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [floor, wardrobe], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16 });
+      let asleepAt = 0;
+      for (let f = 1; f <= 400 && !asleepAt; f++) { w.step(1 / 60); if (f % 20 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); const rr = await w.readPose(); if (rr.sleeping[1]) asleepAt = f; } }
+      const [bi] = w.addBodies([{ shapes: discs([-2.0, 0.6, 0]), mass: 514, v: [53, 0, 0], w: [0, 0, 0] }]);
+      w.setShot(bi);
+      let slowest = 1e9, track = [], wardrobeV = 0;
+      for (let f = 1; f <= 10; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        const rr = await w.readPose();
+        const vx = rr.vel[3 * (bi - 1)]; slowest = Math.min(slowest, vx); track.push(+vx.toFixed(1)); wardrobeV = rr.vel[3];
+      }
+      w.destroy();
+      const res = { asleepAtFrame: asleepAt, ball_slowest_ms: +slowest.toFixed(2), ball_forward_ms: track, wardrobe_end_ms: +wardrobeV.toFixed(2) };
+      // (never back; and no faster on than sharing its momentum allows, with a little for the wardrobe turning)
+      check('sleeper', asleepAt > 0 && slowest >= 5 && track[track.length - 1] <= 36, res);
+    }
+    if (scenes.includes('crushgive')) {
+      // What a crushed piece gives back (18 Nov; `crush_refund`). A 200 t block (4 x 2 x 4 m) comes down at 2.3 m/s
+      // on a 300 kg piece of concrete (0.5 m) that lies on the fixed floor. The piece is crushed in the step it is
+      // squeezed in (pinch); the block can lose to it what carries 300 kg along, 0.003 m/s. Before (REFUND_OFF=1)
+      // it leaves that step as slow as the solver made it against the piece as a strut, at 20 times the piece's
+      // mass (lab collapse, 18 Nov: 2,005 t from 2.26 to 0.75 m/s on one piece of rubble).
+      // Here: 3.12 m/s before the step, 1.65 after it without the kernel, 3.12 with it.
+      const floor = { shapes: [{ p: [0, -0.25, 0], q: [0, 0, 0, 1], h: [20, 0.25, 20], mat: MAT.concrete }], fixed: true };
+      const piece = { shapes: [{ p: [0, 0.25, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], mass: 300, v: [0, 0, 0], w: [0, 0, 0] };
+      const block = { shapes: [{ p: [0, 1.75, 0], q: [0, 0, 0, 1], h: [2, 1, 2], mat: MAT.concrete }], mass: 200000, v: [0, -2.3, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [floor, piece, block], { substeps: 12, sleep: false });
+      if (globalThis.REFUND_OFF) w.refund = false;
+      let crushedAt = 0, track = [];
+      for (let f = 1; f <= 8; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        const rr = await w.readPose();
+        const vy = -rr.vel[7]; track.push(+vy.toFixed(2));
+        if (w.takeCrushed().length && !crushedAt) crushedAt = f;
+      }
+      w.destroy();
+      // (its speed down after the step the piece was crushed in, and after the step before)
+      const res = { crushedAtFrame: crushedAt, block_down_ms: track, before_ms: track[crushedAt - 2], after_ms: track[crushedAt - 1] };
+      check('crushgive', crushedAt > 1 && res.after_ms >= res.before_ms - 0.01, res);
+    }
     if (scenes.includes('bound')) {
       // The velocity bound (vh_clamp) on its own: the landing cases with shock propagation off and no crushing, the
       // solver as it was when a 960 kg slab landing at 7.7 m/s on a 47 kg piece on the ground came back up at
@@ -818,6 +955,37 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       // frames of fall, so 0.76 m/s. The limit was 0.7, from the 6.3 m/s it starts at.)
       const vHit = -vs[Math.max(0, hit - 2)], allowed = 0.1 * vHit;
       check('stumps', vmax < allowed && later < 0.7 && pmax < 2.5, { hitAt: hit, reboundUp_ms: +vmax.toFixed(2), allowed_ms: +allowed.toFixed(2), laterUp_ms: +later.toFixed(2), vy: vs, overflow: ovf, stages: stg, piecesUpDown: globalThis.pcv });
+    }
+    if (scenes.includes('pland')) {
+      // A crumb that lands is read where it is (15 Nov). Three crumbs of 0.155 m, read back after every step: one
+      // dropped onto the ground at 19 m/s, one onto a fixed table 0.4 m high at 19 m/s, one thrown level at 12 m/s
+      // and falling. In no step may one move further than its speed before or after the step covers (and gravity),
+      // and none may stand still in the air for a step.
+      const w = await GpuWorld.create(dev, [{ shapes: [{ p: [3, 0.2, 0], q: [0, 0, 0, 1], h: [0.6, 0.2, 0.6], mat: MAT.concrete }], fixed: true }],
+        { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16, maxParticles: 64 });
+      const R = 0.155;
+      w.addParticles([{ p: [0, 3.03, 0], v: [0, -19, 0], r: R, mat: MAT.concrete }, { p: [3, 3.03, 0], v: [0, -19, 0], r: R, mat: MAT.concrete }, { p: [-6, 1.2, 0], v: [12, 0, 0], r: R, mat: MAT.concrete }]);
+      const tr = [[], [], []]; let worst = 0, worstAt = null, stalls = 0;
+      for (let f = 1; f <= 40; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        const r = await w.readParticles(), d = r.data;
+        for (let i = 0; i < 3; i++) {
+          const cur = { p: [d[i * 12], d[i * 12 + 1], d[i * 12 + 2]], v: [d[i * 12 + 3], d[i * 12 + 4], d[i * 12 + 5]], st: d[i * 12 + 10] };
+          const prev = tr[i][tr[i].length - 1];
+          if (prev) {
+            const moved = Math.hypot(cur.p[0] - prev.p[0], cur.p[1] - prev.p[1], cur.p[2] - prev.p[2]);
+            const sp = Math.max(Math.hypot(...cur.v), Math.hypot(...prev.v)), over = moved - (sp / 60 + 0.5 * 9.81 / 3600 + 0.002);
+            if (over > worst) { worst = over; worstAt = { particle: i, f, moved: +moved.toFixed(3), speed: +sp.toFixed(2) }; }
+            const air = cur.p[1] - R > (i === 1 ? 0.4 : 0) + 0.02;
+            if (air && moved < 1e-4 && Math.hypot(...prev.v) > 1) stalls++;
+          }
+          tr[i].push(cur);
+        }
+      }
+      w.destroy();
+      const rest = tr.map(t => t[t.length - 1].p[1]);
+      check('pland', worst <= 0 && stalls === 0 && Math.abs(rest[0] - R) < 0.01 && Math.abs(rest[1] - (0.4 + R)) < 0.01 && Math.abs(rest[2] - R) < 0.01,
+        { furthestOverSpeed_m: +worst.toFixed(3), at: worstAt, stalls, restY: rest.map(y => +y.toFixed(3)), ground: tr[0].slice(6, 14).map(t => [+t.p[1].toFixed(3), +t.v[1].toFixed(2), t.st]), table: tr[1].slice(4, 12).map(t => [+t.p[1].toFixed(3), +t.v[1].toFixed(2), t.st]) });
     }
     if (scenes.includes('particles')) {
       // granular crumbs poured on a fixed table: they pile up on it and around it on the ground, never inside it
@@ -1166,12 +1334,12 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR', 'NOPINCH', 'BOUND_OFF', 'HP_WATCH', 'HP_F', 'PIN_H', 'PIN_V', 'PIN_L', 'PIN_PUSH', 'PIN_RELAX', 'PIN_DBG', 'PIN_NOREST', 'PIN_X', 'PIN_FINE', 'NOSHOCK', 'DT2', 'NOSUP', 'HEAPDBG', 'HEAPGRID', 'CREEP_N', 'CHAINDBG', 'CHNOSHOCK', 'CHNOCRUSH', 'HTHROW_ALL'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR', 'NOPINCH', 'BOUND_OFF', 'SWEEP_OFF', 'COVER_OFF', 'SHOT_OFF', 'WAKE_OFF', 'REFUND_OFF', 'HP_WATCH', 'HP_F', 'PIN_H', 'PIN_V', 'PIN_L', 'PIN_PUSH', 'PIN_RELAX', 'PIN_DBG', 'PIN_NOREST', 'PIN_X', 'PIN_FINE', 'NOSHOCK', 'DT2', 'NOSUP', 'HEAPDBG', 'HEAPGRID', 'CREEP_N', 'CHAINDBG', 'CHNOSHOCK', 'CHNOCRUSH', 'HTHROW_ALL'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   // the results for docs/STATUS.md (tools/status.py): full runs only (a run of a few scenes is not the state)
   if (process.argv.length <= 2) try {
-    const out = process.env.SF_GPU_OUT || require('path').join(__dirname, '..', 'lab-results', 'gpu.json');
+    const out = process.env.SF_GPU_OUT || require('path').join(__dirname, '..', '..', 'lab-results', 'gpu.json');
     require('fs').mkdirSync(require('path').dirname(out), { recursive: true });
     require('fs').writeFileSync(out, JSON.stringify({ date: new Date().toISOString(), scenes: process.argv.slice(2), results: res }));
   } catch (e) {}

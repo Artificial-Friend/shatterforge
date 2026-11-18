@@ -27,6 +27,14 @@ pub fn colour(b: &Bricks, i: u32) -> [f32; 3] {
     let iu = i as usize;
     let base = match (b.mat[iu], b.paint[iu]) {
         (mat::GLASS, _) => [0.36, 0.50, 0.58],
+        // finishes of their own, whatever the material (the quarter's buildings: game/src/kit.rs)
+        (_, 9) => [0.87, 0.84, 0.77],    // marble
+        (_, 10) => [0.93, 0.92, 0.89],   // white: render, painted steel
+        (_, 11) => [0.78, 0.70, 0.56],   // travertine, sandstone
+        (_, 12) => [0.42, 0.31, 0.23],   // dark weathered timber
+        (_, 13) => [0.50, 0.24, 0.18],   // red oxide
+        (_, 14) => [0.66, 0.36, 0.25],   // roof tile
+        (_, 15) => [0.24, 0.34, 0.28],   // dark green
         (mat::MASONRY, _) => [0.60, 0.36, 0.28],   // brick
         (mat::STEEL, _) => [0.36, 0.40, 0.44],
         (mat::TIMBER, 8) => [0.62, 0.46, 0.30],   // timber floor

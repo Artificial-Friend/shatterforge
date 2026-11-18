@@ -18,6 +18,11 @@ use alloc::vec::Vec;
 /// moment (254 x 146 x 37 UB in a 0.25 m box: 47 cm2, 15 cm2 of web, 483 cm3, 5,540 cm4 against 625 cm2, 3,906 cm3
 /// and 32,552 cm4)
 pub const STEEL_AREA: f32 = 0.16;
+/// What a loose object (`F_LOOSE`: furniture, a cart, a statue) weighs of the solid boxes it is drawn as. A cabinet,
+/// a bed, a car body or a cast figure is a shell round air: its boards or its skin are about a fifth of its box.
+/// (Solid, the glass house's wardrobe weighed 1.9 t and a bed in the villa 750 kg; the steel ball, 514 kg at 60 m/s,
+/// came back off the wardrobe at 19 m/s: lab `qballglass`, 15 Nov.)
+pub const LOOSE_FILL: f32 = 0.2;
 pub const STEEL_SHEAR: f32 = 0.10;
 pub const STEEL_FLEX: f32 = 0.12;
 pub const STEEL_STIFF: f64 = 0.17;
@@ -128,7 +133,9 @@ pub fn mass(b: &Bricks, i: u32) -> f32 {
     let s = b.size(i);
     // (a steel member weighs its section, not the solid box: STEEL_AREA)
     let share = if b.mat[i as usize] == mat::STEEL { STEEL_AREA } else { 1.0 };
-    (s[0] * s[1] * s[2]) as f32 * TICK * TICK * TICK * mat::density(b.mat[i as usize]) * b.vol_share(i) as f32 * share
+    // (loose contents: `LOOSE_FILL`)
+    let fill = if b.flags[i as usize] & crate::brick::F_LOOSE != 0 { LOOSE_FILL } else { 1.0 };
+    (s[0] * s[1] * s[2]) as f32 * TICK * TICK * TICK * mat::density(b.mat[i as usize]) * b.vol_share(i) as f32 * share * fill
 }
 
 /// Flexural strength (Pa) for bending of a brick: reinforced concrete gets its rebar.

@@ -56,7 +56,7 @@ struct Params {
   o_mtry: u32, o_claim2: u32, o_sorted2: u32, o_evhist: u32,
   o_cchk: u32, o_pinch: u32, step: u32, o_level: u32,
   o_level2: u32, o_psup: u32, psup_n: u32, o_released: u32,   // (see color_claim, sort_cells); pinching (see pinch)
-  o_vhull: u32, vh_e: f32, vh_pad0: u32, vh_pad1: u32,   // the velocity bound (see vh_clamp)
+  o_vhull: u32, vh_e: f32, o_shot: u32, o_refund: u32,   // the velocity bound (see vh_clamp); bodies thrown (see shot_scale)
 }
 struct ColorU { c: u32 }
 
@@ -262,6 +262,33 @@ fn push_pair(a: u32, b: u32) {
 // scans finer levels: the small shapes there find it. A moving shape looks at everything; a resting or static
 // one only into cells that hold a moving shape, and only at moving shapes. Each pair is found once: on one
 // level by the lower index, across levels by the finer shape. The moving shape goes first in the pair.
+// A sleeping body is held as fixed in the step, and one that a moving body touches is woken by the narrow phase
+// to join the solver in the next (pair_wake_emit). So the step in which something first hits it, it is a wall.
+// A piece that creeps onto it loses nothing by that; a fast one does: GPU test sleeper, the game's 514 kg ball at
+// 53 m/s into a 383 kg cabinet asleep on the floor: 26,335 N s through one contact in that step, the ball back at
+// 15.9 m/s, where the two can only share the ball's momentum (it goes on at 30 m/s, the cabinet with it; lab
+// qballglass, 15 Nov, the glass house's wardrobe). So what sleeps in the way of a body faster than WAKE_FAST is
+// woken before the contacts are made: marked here, by the boxes of the two overlapping (they hold a step's
+// travel), in the body's word of the shot table (bit 4: a mark, not the sleep flag itself, which this pass reads
+// from many threads), and woken by prep_woken, which also gives it its mass in the solver.
+const WAKE_FAST = 3.0;
+fn wake_fast(b: u32) -> bool { let v = S(b, S_V).xyz; return dot(v, v) > WAKE_FAST * WAKE_FAST; }
+@compute @workgroup_size(64) fn prep_woken(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x + 1u; if (i >= P.n1) { return; }
+  if ((ld(P.o_shot + i) & 4u) == 0u) { return; }
+  atomicAnd(&ints[P.o_shot + i], 3u);
+  let p = B(i, F_P); if (p.w == 0.0 || !asleep(i)) { return; }
+  wake(i); if (asleep(i)) { return; }
+  let il = B(i, F_IL).xyz;
+  let R = qmat(B(i, F_Q));
+  let a = R[0] * il.x; let b = R[1] * il.y; let c = R[2] * il.z;
+  let c0 = a * R[0].x + b * R[1].x + c * R[2].x;
+  let c1 = a * R[0].y + b * R[1].y + c * R[2].y;
+  let c2 = a * R[0].z + b * R[1].z + c * R[2].z;
+  setS(i, S_V, vec4f(0.0, 0.0, 0.0, p.w)); setS(i, S_W, vec4f(0.0));
+  setS(i, S_I0, vec4f(c0.x, c1.y, c2.z, c1.x)); setS(i, S_I1, vec4f(c2.x, c2.y, 0.0, 0.0));
+  atomicAdd(&ints[C_AWAKE], 1u);
+}
 @compute @workgroup_size(64) fn pairs(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.ns1 || dead(i)) { return; }
   let bi = sbody(i);
@@ -292,6 +319,9 @@ fn push_pair(a: u32, b: u32) {
         if (!ai && !aj) { continue; }
         let lj = Hs(j, H_LO).xyz; let hj = Hs(j, H_HI).xyz;
         if (any(lo > hj) || any(lj > hi)) { continue; }
+        // (a sleeping body in a fast one's way wakes now: see prep_woken)
+        if (ai && !aj && B(bj, F_P).w > 0.0 && wake_fast(bi)) { atomicOr(&ints[P.o_shot + bj], 4u); }
+        if (aj && !ai && B(bi, F_P).w > 0.0 && wake_fast(bj)) { atomicOr(&ints[P.o_shot + bi], 4u); }
         if (ai) { push_pair(i, j); } else { push_pair(j, i); }
       }
     } } }
@@ -312,21 +342,80 @@ fn ground_contact(p: vec3f, q: vec4f, h: vec3f, margin: f32) -> Contact {
   return c;
 }
 
-fn box_box(pa: vec3f, ra: mat3x3f, ha: vec3f, pb: vec3f, rb: mat3x3f, hb: vec3f, margin: f32) -> Contact {
+// A fast pair passing each other (15 Nov). The margin of a pair covers all it can travel in the step, so a body
+// at 47 m/s has contacts with everything within 0.8 m of it, and an edge-edge contact with a shape it only
+// passes (the rim of a hole it goes through with 0.1 m to spare) stopped it there: its approach along that
+// contact's slanted normal was more than the gap allows (lab tallball: 104 such contacts with the roof slab's
+// rim, 44.7 m/s down to 8.3). For a pair moving more than SWEEP_MIN in the step, each separating axis gives the
+// part of the step [in, out] during which the two overlap along it (within tol: the margin without the
+// straight travel), B moving by dv against A; with no moment at which they overlap along every axis, they do not
+// meet in this step, and there is no contact. Slower pairs keep every contact within the margin, as before.
+const SWEEP_MIN = 0.3;
+// along one axis the overlap lasts while lo <= tau * dl <= hi
+fn sweep(io: vec2f, lo: f32, hi: f32, dl: f32) -> vec2f {
+  if (abs(dl) < 1e-6) { if (lo > 0.0 || hi < 0.0) { return vec2f(2.0, -1.0); } return io; }
+  let t1 = lo / dl; let t2 = hi / dl;
+  return vec2f(max(io.x, min(t1, t2)), min(io.y, max(t1, t2)));
+}
+// Covered faces (15 Nov). The standing structure is many boxes, face to face: a floor is panels, a wall is bricks.
+// A face of one that another covers is inside the solid: nothing can touch it. But a piece that lies a few
+// centimetres into a floor (pressed, tipping, landing) and slides to the next panel is, to that panel alone, a
+// piece beside it and below its top, and the contact that pair gives is with the panel's side: across the piece's
+// way. (GPU test wedge: a 300 kg block pushed along a floor of 2 m panels by a 514 kg ball at 60 m/s tipped 4.7 cm
+// into the floor, met the next panel's edge, took 23,315 N s there in one step and stopped the ball: 4.2 m/s
+// left, where on a floor of one piece it leaves the ball 28 m/s; with this, 30.4. Lab qballglass: the glass
+// house's chairs, caught so, took 19 m/s off the ball.) The page marks each fixed box's covered faces (bits: +x, -x, +y, -y, +z, -z; kept in
+// the shape's H_H.w; GpuWorld.setStaticCover), and a contact's normal loses the part that pushes out through a
+// covered face is no contact: such a face is inside the solid, and what is over it is held by the faces that are
+// really there (the panel's top, in that panel's own contact or its neighbour's).
+fn cover_strip(m: vec3f, mask: u32) -> vec3f {
+  var r = m;
+  if ((m.x > 0.0 && (mask & 1u) != 0u) || (m.x < 0.0 && (mask & 2u) != 0u)) { r.x = 0.0; }
+  if ((m.y > 0.0 && (mask & 4u) != 0u) || (m.y < 0.0 && (mask & 8u) != 0u)) { r.y = 0.0; }
+  if ((m.z > 0.0 && (mask & 16u) != 0u) || (m.z < 0.0 && (mask & 32u) != 0u)) { r.z = 0.0; }
+  return r;
+}
+fn cover_fix(c0: Contact, si: u32, sj: u32) -> Contact {
+  var c = c0; if (c.cnt == 0u) { return c; }
+  var mi = u32(Hs(si, H_H).w); var mj = u32(Hs(sj, H_H).w);
+  if ((mi | mj) == 0u) { return c; }
+  // (only a fixed body's shape has covered faces: a slot's mark must not outlive that)
+  if (B(u32(Hs(si, H_ID).x), F_P).w != 0.0) { mi = 0u; }
+  if (B(u32(Hs(sj, H_ID).x), F_P).w != 0.0) { mj = 0u; }
+  if ((mi | mj) == 0u) { return c; }
+  // (the normal points from i to j: j is pushed out of i along it, i out of j against it)
+  var n = c.n;
+  if (mi != 0u) { n = cover_strip(n, mi); }
+  if (mj != 0u) { n = -cover_strip(-n, mj); }
+  // (through a covered face: no contact. Turned to the faces that are there instead, it kept the
+  // depth measured along the way it had pointed, 0.3 m along a floor for a piece 1 cm into it, and pushed that far
+  // up: the heap of lab collapse never settled, 109 of 364 bodies awake at 7.5 s against 10 without. What lies
+  // over the seam is held by the contact with the panel it lies on.)
+  // (a contact that leans through one by less than 0.3 of itself stays as it is: a chair's leg on a floor, a hair
+  // off the vertical, lost its contact with the next panel and rocked on the seam for good: lab quarter, 2 bodies
+  // of 267 awake at 10 s)
+  let d = n - c.n;
+  if (dot(d, d) > 0.09) { c.cnt = 0u; }
+  return c;
+}
+fn box_box(pa: vec3f, ra: mat3x3f, ha: vec3f, pb: vec3f, rb: mat3x3f, hb: vec3f, margin: f32, dv: vec3f, tol: f32) -> Contact {
   var c: Contact; c.cnt = 0u;
   let t = pb - pa;
+  let fast = dot(dv, dv) > SWEEP_MIN * SWEEP_MIN; var io = vec2f(0.0, 1.0);
   var ac: array<vec3f, 3>;
   for (var i = 0u; i < 3u; i++) { ac[i] = abs(vec3f(dot(ra[i], rb[0]), dot(ra[i], rb[1]), dot(ra[i], rb[2]))) + vec3f(1e-6); }
   var sa = -1e30; var ia = 0u;
   for (var i = 0u; i < 3u; i++) {
     let s = abs(dot(t, ra[i])) - (ha[i] + dot(hb, ac[i]));
     if (s > margin) { return c; }
+    if (fast) { let R = ha[i] + dot(hb, ac[i]) + tol; let d0 = dot(t, ra[i]); io = sweep(io, -R - d0, R - d0, dot(dv, ra[i])); }
     if (s > sa) { sa = s; ia = i; }
   }
   var sb = -1e30; var jb = 0u;
   for (var j = 0u; j < 3u; j++) {
     let s = abs(dot(t, rb[j])) - (hb[j] + ha.x * ac[0][j] + ha.y * ac[1][j] + ha.z * ac[2][j]);
     if (s > margin) { return c; }
+    if (fast) { let R = hb[j] + ha.x * ac[0][j] + ha.y * ac[1][j] + ha.z * ac[2][j] + tol; let d0 = dot(t, rb[j]); io = sweep(io, -R - d0, R - d0, dot(dv, rb[j])); }
     if (s > sb) { sb = s; jb = j; }
   }
   var se = -1e30; var ei = 0u; var ej = 0u; var el = vec3f(0.0);
@@ -338,8 +427,10 @@ fn box_box(pa: vec3f, ra: mat3x3f, ha: vec3f, pb: vec3f, rb: mat3x3f, hb: vec3f,
           + hb.x * abs(dot(rb[0], l)) + hb.y * abs(dot(rb[1], l)) + hb.z * abs(dot(rb[2], l));
     let s = abs(dot(t, l)) - r;
     if (s > margin) { return c; }
+    if (fast) { let d0 = dot(t, l); io = sweep(io, -(r + tol) - d0, (r + tol) - d0, dot(dv, l)); }
     if (s > se) { se = s; ei = i; ej = j; el = l; }
   } }
+  if (fast && io.x > io.y) { return c; }
   let use_b = sb > sa + 0.005;
   let face_best = select(sa, sb, use_b);
   if (se > face_best + 0.01) {
@@ -455,8 +546,9 @@ fn hull_ground(s: HShape, margin: f32) -> Contact {
 // Separating axes: the faces of both, then the cross products of their edge directions; the contact from the
 // best one: a reference face clipped against the incident face (up to 8 points, reduced to 4 later), or the
 // closest points of two edges. The normal points from A to B; w is the separation (negative: overlap).
-fn hull_hull(A: HShape, B: HShape, margin: f32) -> Contact {
+fn hull_hull(A: HShape, B: HShape, margin: f32, dv: vec3f, tol: f32) -> Contact {
   var c: Contact; c.cnt = 0u;
+  let fast = dot(dv, dv) > SWEEP_MIN * SWEEP_MIN; var io = vec2f(0.0, 1.0);   // (see sweep)
   let ha = hhead(A.t); let hb = hhead(B.t);
   let nfa = u32(ha.y); let nfb = u32(hb.y); let nva = u32(ha.x); let nvb = u32(hb.x);
   // both hulls' corners and edge directions in the world, read once (every axis projects all corners: read
@@ -471,11 +563,14 @@ fn hull_hull(A: HShape, B: HShape, margin: f32) -> Contact {
   for (var f = 0u; f < nfa; f++) {
     let pl = hface(A, f); var lo = 1e30; for (var k = 0u; k < nvb; k++) { lo = min(lo, dot(VB[k], pl.xyz)); }
     let s = lo - pl.w; if (s > margin) { return c; } if (s > sa) { sa = s; fa = f; }
+    // (B beyond this face of A: they overlap along its normal while s + tau * (dv . n) <= tol)
+    if (fast) { io = sweep(io, -1e30, tol - s, dot(dv, pl.xyz)); }
   }
   var sb = -1e30; var fb = 0u;
   for (var f = 0u; f < nfb; f++) {
     let pl = hface(B, f); var lo = 1e30; for (var k = 0u; k < nva; k++) { lo = min(lo, dot(VA[k], pl.xyz)); }
     let s = lo - pl.w; if (s > margin) { return c; } if (s > sb) { sb = s; fb = f; }
+    if (fast) { io = sweep(io, -1e30, tol - s, -dot(dv, pl.xyz)); }
   }
   var se = -1e30; var el = vec3f(0.0); var ei = 0u; var ej = 0u;
   for (var i = 0u; i < nda; i++) {
@@ -487,11 +582,13 @@ fn hull_hull(A: HShape, B: HShape, margin: f32) -> Contact {
       for (var k = 0u; k < nva; k++) { let d = dot(VA[k], l); alo = min(alo, d); ahi = max(ahi, d); }
       for (var k = 0u; k < nvb; k++) { let d = dot(VB[k], l); blo = min(blo, d); bhi = max(bhi, d); }
       let s1 = blo - ahi; let s2 = alo - bhi;
+      if (fast) { io = sweep(io, alo - tol - bhi, ahi + tol - blo, dot(dv, l)); }
       var s = s1; if (s2 > s1) { s = s2; l = -l; }
       if (s > margin) { return c; }
       if (s > se) { se = s; el = l; ei = i; ej = j; }
     }
   }
+  if (fast && io.x > io.y) { return c; }
   let use_b = sb > sa + 0.005;
   let fbest = select(sa, sb, use_b);
   if (se > fbest + 0.01) {
@@ -605,6 +702,13 @@ var<private> sup_mat: u32 = 0xffffffffu; var<private> sup_cap: f32 = 0.0;   // (
 fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   // a crushed body (see crush) touches only the static world until the page turns it into rubble
   if ((crushed(a) && moving(b)) || (crushed(b) && moving(a))) { return; }
+  // a body thrown, on its way through what it has broken (setShot 2), does not touch the fixed world (the ground
+  // it does): the hole made for it is where it was going when it asked, and it may come 0.1 m off that
+  // (what is across its way, that is: a contact whose normal is within 60 degrees of the way it moves. The floor it
+  // flies over holds it still: coming down at 5.6 m/s of 58, it went through the glass house's floor in the
+  // 0.3 s it took to pass two partitions. Lab qballglass, 18 Nov)
+  if ((ld(P.o_shot + a) & 3u) == 2u && b != 0u && !moving(b)) { let v = S(a, S_V).xyz; let l = length(v); if (l > 1.0 && abs(dot(v, c0.n)) > 0.5 * l) { return; } }
+  if ((ld(P.o_shot + b) & 3u) == 2u && a != 0u && !moving(a)) { let v = S(b, S_V).xyz; let l = length(v); if (l > 1.0 && abs(dot(v, c0.n)) > 0.5 * l) { return; } }
   var c = c0;
   reduce4(&c);
   let slot = atomicAdd(&ints[C_MAN], 1u);
@@ -822,7 +926,8 @@ fn narrow_box(k: u32) {
   atomicAdd(&ints[C_PAIRS], 1u);
   let bj = sbody(sj);
   let m = pair_margin(si, sj, bi, bj);
-  let c = box_box(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), Hs(si, H_H).xyz, Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), Hs(sj, H_H).xyz, m.x);
+  let dv = (S(bj, S_V).xyz - S(bi, S_V).xyz) * P.dt;
+  let c = cover_fix(box_box(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), Hs(si, H_H).xyz, Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), Hs(sj, H_H).xyz, m.x, dv, m.x - length(dv)), si, sj);
   pair_wake_emit(si, sj, bi, bj, S(bi, S_V).xyz, m.y, m.z, c);
 }
 @compute @workgroup_size(64) fn narrow_hull(@builtin(global_invocation_id) g: vec3u) {
@@ -848,7 +953,8 @@ fn narrow_box(k: u32) {
   let bj = sbody(sj);
   let m = pair_margin(si, sj, bi, bj);
   let tj = u32(Hs(sj, H_ID).w);
-  let c = hull_hull(HShape(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), Hs(si, H_H).xyz, ti), HShape(Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), Hs(sj, H_H).xyz, tj), m.x);
+  let dv = (S(bj, S_V).xyz - S(bi, S_V).xyz) * P.dt;
+  let c = cover_fix(hull_hull(HShape(Hs(si, H_WP).xyz, qmat(Hs(si, H_WQ)), Hs(si, H_H).xyz, ti), HShape(Hs(sj, H_WP).xyz, qmat(Hs(sj, H_WQ)), Hs(sj, H_H).xyz, tj), m.x, dv, m.x - length(dv)), si, sj);
   pair_wake_emit(si, sj, bi, bj, S(bi, S_V).xyz, m.y, m.z, c);
 }
 
@@ -1179,6 +1285,18 @@ fn ratio_scale(ia: f32, ib: f32) -> vec2f {
   if (ib * P_RATIO < ia) { return vec2f(1.0, ia / (P_RATIO * ib)); }
   return vec2f(1.0);
 }
+// A body thrown (15 Nov; marked by the page, GpuWorld.setShot: the game's ball) is not limited while it flies
+// faster than SHOT_MIN: the limit is for a heavy body lying on light ones, where the solver cannot settle a
+// ratio of hundreds; a ball that knocks a light piece out of its way settles in one pass, and limited it paid
+// for each piece as for one of a twentieth of its own mass. (GPU test wedge: a 514 kg ball through two 12 kg
+// chairs, 60 to 54.7 m/s; they can take 2.7 m/s from it, and limited each took what a 25.7 kg piece does. A
+// 2.1 t ball paid for every crumb as for 105 kg.)
+const SHOT_MIN = 10.0;
+fn shot_scale(a: u32, b: u32, va: vec3f, vb: vec3f, sc: vec2f) -> vec2f {
+  if ((ld(P.o_shot + a) & 3u) != 0u && dot(va, va) > SHOT_MIN * SHOT_MIN) { return vec2f(1.0); }
+  if ((ld(P.o_shot + b) & 3u) != 0u && dot(vb, vb) > SHOT_MIN * SHOT_MIN) { return vec2f(1.0); }
+  return sc;
+}
 // The limit may only take energy from the heavy body, never give it: its response at the limited mass (sc
 // times its real one) is kept where that slowed it down; where it sped it up, the heavy body takes the change
 // at its real mass. Applied both ways, the limit made momentum: a slab landing on stumps with pieces on it
@@ -1233,7 +1351,7 @@ fn solve_man(m: u32, use_bias: bool, split: bool) {
   // (the ratio is limited between the masses as split: limited first, a body split over k contacts acted as
   // 20/k times the light body, lighter than it; a slab landing with 100 pieces on it was thrown up at 8 m/s,
   // GPU test stumps)
-  let sc = select(ratio_scale(va4.w * ka, vb4.w * kb), ratio_scale(va4.w, vb4.w), (P.dbg & 1u) != 0u);
+  let sc = shot_scale(a, b, va, vb, select(ratio_scale(va4.w * ka, vb4.w * kb), ratio_scale(va4.w, vb4.w), (P.dbg & 1u) != 0u));
   // (shock propagation, relax only: where the pass takes back a push, the lower body of a vertical contact is
   // held, see level_pass)
   var holdA = false; var holdB = false;
@@ -1359,7 +1477,7 @@ fn restitute_man(m: u32) {
   let hd = man[base]; let a = u32(hd.x); let b = u32(hd.y); let cnt = u32(hd.z);
   let va4 = S(a, S_V); let vb4 = S(b, S_V);
   var va = va4.xyz; var wa = S(a, S_W).xyz; var vb = vb4.xyz; var wb = S(b, S_W).xyz;
-  let sc = ratio_scale(va4.w, vb4.w); let rec = sc.x != 1.0 || sc.y != 1.0;
+  let sc = shot_scale(a, b, va, vb, ratio_scale(va4.w, vb4.w)); let rec = sc.x != 1.0 || sc.y != 1.0;
   let ima = va4.w * sc.x; let imb = vb4.w * sc.y;
   let A0 = S(a, S_I0) * sc.x; let A1 = S(a, S_I1) * sc.x; let B0 = S(b, S_I0) * sc.y; let B1 = S(b, S_I1) * sc.y;
   let n = man[base + M_N].xyz; let rv = man[base + M_RV];
@@ -1471,6 +1589,45 @@ const C_NCRUSH = 15u; const MAX_CRUSH = 256u;
   let hd = man[(P.cur_base + mi) * MS]; let a = u32(hd.x); let b = u32(hd.y);
   if (crushed(a) && moving(b) && !crushed(b)) { st(P.o_released + b, P.step + 1u); }
   if (crushed(b) && moving(a) && !crushed(a)) { st(P.o_released + a, P.step + 1u); }
+  // and what the crushed piece gives back (crush_refund)
+  let out = man[(P.cur_base + mi) * MS + M_OUT]; let j = min(out.y, 1e9);
+  if (j <= 0.0 || u32(cold[(P.cur_base + mi) * CS + 5u].w) == SUP_KEY) { return; }
+  let n = man[(P.cur_base + mi) * MS + M_N].xyz; let ia = B(a, F_P).w; let ib = B(b, F_P).w;
+  if (ia <= 0.0 || ib <= 0.0) { return; }
+  let sc = ratio_scale(ia, ib);
+  // (the normal points from a to b: the impulse pushed b along it and a against it)
+  // (only to the heavier of the two, the one that did the crushing: a light piece the crushed one was pressed
+  // onto was pushed by it, not slowed. GPU test chain: given back, that push threw the piece under it up at 7.8 m/s)
+  if (crushed(a) && !crushed(b) && ib < ia) { let got = j * ib * sc.y; refund_add(b, -n * (got - min(got, out.z * ib / ia))); }
+  if (crushed(b) && !crushed(a) && ia < ib) { let got = j * ia * sc.x; refund_add(a, n * (got - min(got, out.z * ia / ib))); }
+}
+// What a crushed piece gives back (18 Nov). A piece is crushed in the step it is squeezed in, at the end of it: by
+// then the solver has slowed the body that squeezed it against it as against a strut, and a heavy body at that
+// as if it were no more than P_RATIO times the piece's mass. Lab collapse: the 2,005 t upper part of the frame,
+// falling at 2.26 m/s onto the rubble of its own cut storey, left one step at 0.75 m/s: 18,057 N s through one
+// contact with a piece of that rubble, which stopped 2,005 t as it would 12 t. It then came down on the stumps
+// of its columns at under 2 m/s, too slowly to be an impact at all, and stood on them whole, 1.74 m lower. (Until
+// 15 Nov one contact with a floor panel's covered side gave the event that broke it up: see cover_fix.)
+// A piece that fails does not stop what breaks it: it can take the momentum that carries its own mass along at
+// the speed they met at, and no more. So each body that pressed a piece crushed in this step gets back the
+// velocity that piece's contact took from it, less that share (the piece's mass x the contact's closing speed, over
+// its own mass); and no more than brings it back to the speed it began the step with (the velocity bound's
+// record), so nothing is made.
+// Per body: 3 x i32, the velocity to give back, 1/1024 m/s (fixed point: the same sums in any order).
+const RF_FX = 1024.0;
+fn refund_add(i: u32, dv: vec3f) {
+  let o = P.o_refund + i * 3u; let q = clamp(dv, vec3f(-1000.0), vec3f(1000.0)) * RF_FX;
+  atomicAdd(&ints[o], bitcast<u32>(i32(round(q.x)))); atomicAdd(&ints[o + 1u], bitcast<u32>(i32(round(q.y)))); atomicAdd(&ints[o + 2u], bitcast<u32>(i32(round(q.z))));
+}
+@compute @workgroup_size(64) fn crush_refund(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i == 0u || i >= P.n1 || !moving(i) || crushed(i)) { return; }
+  let o = P.o_refund + i * 3u;
+  let r = vec3f(f32(bitcast<i32>(ld(o))), f32(bitcast<i32>(ld(o + 1u))), f32(bitcast<i32>(ld(o + 2u)))) / RF_FX;
+  if (dot(r, r) == 0.0) { return; }
+  let v = S(i, S_V).xyz; var v2 = v + r;
+  let most = max(f32(ld(P.o_vhull + i * 10u + 1u)) / VH_FX, length(v)); let l = length(v2);
+  if (l > most) { v2 *= most / l; }
+  setS(i, S_V, vec4f(v2, S(i, S_V).w));
 }
 fn crush_stop(i: u32) { setS(i, S_V, vec4f(0.0, 0.0, 0.0, S(i, S_V).w)); setS(i, S_W, vec4f(0.0, 0.0, 0.0, S(i, S_W).w)); }
 // crushing strength (MPa) by material: concrete, masonry, steel, glass, timber (across the grain), test, ground,
@@ -2403,10 +2560,15 @@ function buildBodies(list) {
   const bodies = [], shapes = [];
   for (const b of list) {
     let M = 0, com = [0, 0, 0];
-    const ms = b.shapes.map(s => (b.fixed ? 0 : MATERIALS[s.mat].density) * 8 * s.h[0] * s.h[1] * s.h[2] * (s.hull ? HULLS.hulls[s.hull].vol : 1));
+    // (s.density: the shape's own, where it is not its material's as a solid: a steel member is a rolled section in
+    // the box it is drawn as, engine structure::STEEL_AREA)
+    const ms = b.shapes.map(s => (b.fixed ? 0 : (s.density ?? MATERIALS[s.mat].density)) * 8 * s.h[0] * s.h[1] * s.h[2] * (s.hull ? HULLS.hulls[s.hull].vol : 1));
     // where each shape's mass is: a chunk's centroid (its box centre can lie outside a wedge)
     const mc = b.shapes.map(s => { if (!s.hull) return s.p; const c = HULLS.hulls[s.hull].cen, R = q2m(s.q), o = c.map((x, k) => x * s.h[k]);
       return [0, 1, 2].map(i => s.p[i] + R[i][0] * o[0] + R[i][1] * o[1] + R[i][2] * o[2]); });
+    // (b.mass: the body's mass given, where its shapes overlap and their volumes add to more than it has: a ball
+    // of crossed boxes; the shapes share it by their volumes)
+    if (b.mass > 0 && !b.fixed) { const sum = ms.reduce((x, y) => x + y, 0); if (sum > 0) for (let k = 0; k < ms.length; k++) ms[k] *= b.mass / sum; }
     b.shapes.forEach((s, k) => { M += ms[k]; for (let i = 0; i < 3; i++) com[i] += ms[k] * mc[k][i]; });
     if (M > 0) com = com.map(c => c / M); else { com = [0, 0, 0]; b.shapes.forEach(s => { for (let i = 0; i < 3; i++) com[i] += s.p[i] / b.shapes.length; }); }
     let q = [0, 0, 0, 1], il = [0, 0, 0];
@@ -2432,7 +2594,7 @@ function buildBodies(list) {
     const bi = bodies.length + 1;
     bodies.push({ p: com, q, im: M > 0 ? 1 / M : 0, il, v: b.v || [0, 0, 0], w: b.w || [0, 0, 0], mass: M });
     for (const s of b.shapes) {
-      shapes.push({ body: bi, mat: s.mat, col: s.col ?? s.mat, hull: s.hull || 0, lp: mtv(Rb, [0, 1, 2].map(i => s.p[i] - com[i])), lq: qmulJ(qconj(q), s.q), h: s.h });
+      shapes.push({ body: bi, mat: s.mat, col: s.col ?? s.mat, hull: s.hull || 0, density: s.density, lp: mtv(Rb, [0, 1, 2].map(i => s.p[i] - com[i])), lq: qmulJ(qconj(q), s.q), h: s.h });
     }
   }
   return { bodies, shapes };
@@ -2546,7 +2708,7 @@ class GpuWorld {
     // contact's pair slot
     let TP = 1024; while (TP < 2 * this.maxMan) TP *= 2; this.TP = TP;
     take('ptab', 3 * TP); take('big', 64 * 4096); take('mslot', this.maxMan);
-    take('hl', 1 + this.maxPairs); take('crushed', cb1); take('released', cb1); take('crush', 12 * 256); take('pinch', 8 * cb1); take('vhull', 10 * cb1); take('level', cb1); take('level2', cb1); if (opt.maxParticles) take('psup', 13 * cs1);
+    take('hl', 1 + this.maxPairs); take('crushed', cb1); take('released', cb1); take('crush', 12 * 256); take('pinch', 8 * cb1); take('refund', 3 * cb1); take('shot', cb1); take('vhull', 10 * cb1); take('level', cb1); take('level2', cb1); if (opt.maxParticles) take('psup', 13 * cs1);
     this.maxEvents = 512; take('events', 12 * this.maxEvents);
     this.maxInherit = 4096; take('inherit', 12 * this.maxInherit);
     take('plan', 24 * cb1); take('spart', cs1); take('snap', 1 + 4 * 256);
@@ -2602,6 +2764,11 @@ class GpuWorld {
     this.bg1 = d.createBindGroup({ layout: bgl1, entries: [{ binding: 0, resource: { buffer: this.colBuf, size: 4 } }] });
     this.bg2 = d.createBindGroup({ layout: bgl2, entries: [ent(0, this.argBuf)] });
     const compile = async (code, tag) => {
+      // (GpuWorld.sweepOff, before the first world is made: the narrow phase without the test for fast pairs that
+      // only pass each other, as before 15 Nov; for comparisons)
+      if (GpuWorld.sweepOff || globalThis.__noSweep) code = code.replace('const SWEEP_MIN = 0.3;', 'const SWEEP_MIN = 1e9;');
+      // (GpuWorld.wakeFastOff: sleeping bodies woken by the narrow phase only, for the tests' numbers before)
+      if (GpuWorld.wakeFastOff || globalThis.__noWakeFast) code = code.replace('const WAKE_FAST = 3.0;', 'const WAKE_FAST = 1e9;');
       const m = d.createShaderModule({ code });
       const errs = (await m.getCompilationInfo()).messages.filter(x => x.type === 'error');
       if (errs.length) throw new Error(tag + ': ' + errs.map(x => `${x.lineNum}:${x.linePos} ${x.message}`).join('\n'));
@@ -2621,8 +2788,8 @@ class GpuWorld {
     const mod = await compile(WGSL, 'WGSL'), modA = await compile(WGSL_ARGS, 'WGSL args');
     const modP = this.capP ? await compile(WGSL_P, 'WGSL particles') : null;
     const mk = (entry, layout = mainL, module = mod) => d.createComputePipelineAsync({ layout, compute: { module, entryPoint: entry } });
-    const names = ['prep_bodies', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color_init', 'color_round', 'color_claim_s', 'color_claim', 'color_tie', 'color_resolve', 'color_count', 'color_check', 'ev_count', 'ev_cut', 'blist_sort', 'ovf_sort', 'sort_cells', 'color_scatter', 'adj_scan', 'integrate_warm',
-                   'integrate_pos', 'finish', 'vh_init', 'vh_acc', 'vh_clamp', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'events', 'wake_all', 'wake_boxes', 'inherit', 'retire', 'red_count', 'red_big', 'red_score', 'red_pick', 'red_apply', 'crush', 'crush_release', 'pinch_acc', 'pinch', 'level_pass', 'snap_acc', 'sup_acc', 'snap_split', 'snap_shapes'];
+    const names = ['prep_bodies', 'prep_woken', 'prep_shapes', 'scan', 'scatter', 'pairs', 'narrow', 'narrow_hull', 'color_init', 'color_round', 'color_claim_s', 'color_claim', 'color_tie', 'color_resolve', 'color_count', 'color_check', 'ev_count', 'ev_cut', 'blist_sort', 'ovf_sort', 'sort_cells', 'color_scatter', 'adj_scan', 'integrate_warm',
+                   'integrate_pos', 'finish', 'vh_init', 'vh_acc', 'vh_clamp', 'solve', 'relax', 'restitute', 'solve_ovf', 'relax_ovf', 'restitute_ovf', 'uf_union', 'uf_min', 'uf_sleep', 'ovf_apply', 'crush_refund', 'events', 'wake_all', 'wake_boxes', 'inherit', 'retire', 'red_count', 'red_big', 'red_score', 'red_pick', 'red_apply', 'crush', 'crush_release', 'pinch_acc', 'pinch', 'level_pass', 'snap_acc', 'sup_acc', 'snap_split', 'snap_shapes'];
     this.pl = {};
     await Promise.all([...names.map(async k => { this.pl[k] = await mk(k); }),
       ...['man_args', 'pair_args', 'hull_args', 'color_scan'].map(async k => { this.pl[k] = await mk(k, argsL, modA); }),
@@ -2667,7 +2834,7 @@ class GpuWorld {
     u[128] = L.ptab; u[129] = tp - 1; u[130] = L.big; u[131] = L.mslot;
     u[136] = this.oHull; u[137] = L.hl; f[139] = this.ovfPush ?? 1; u[138] = (this.dbgBits || 0) | (this.shock === false ? 16 : 0);
     u[140] = L.plan; u[141] = L.spart; u[142] = L.snap; u[143] = L.claim; u[144] = L.mtry; u[145] = L.claim2; u[146] = L.sorted2; u[147] = L.evhist; u[148] = L.cchk || 0; u[149] = L.pinch; u[150] = this.frame; u[151] = L.level; u[152] = L.level2; u[153] = this.capP && this.support !== false ? L.psup : 0; u[154] = this.capS + 1; u[155] = L.released;   // (psup's stride: the shape capacity, so its regions stay put as shapes are added)
-    u[156] = L.vhull; f[157] = this.boundSlack ?? 0.1;
+    u[156] = L.vhull; f[157] = this.boundSlack ?? 0.1; u[158] = L.shot; u[159] = L.refund;
     u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 3;
     MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
     if (this.capP) {
@@ -2712,7 +2879,7 @@ class GpuWorld {
     const clr = (off, len) => enc.clearBuffer(this.intBuf, off * 4, len * 4);
     // counters; impact events keep accumulating until a step copies them out (a pending read-back skips the copy)
     if (this.statCopied === false) { clr(0, 7); clr(8, 7); } else { clr(0, 16); clr(L.snap, 1); }   // (events, crushes and breaks gather until copied)
-    clr(L.evhist, 128); clr(L.pinch, 8 * this.n1); clr(L.level, this.n1); clr(L.level2, this.n1);
+    clr(L.evhist, 128); clr(L.pinch, 8 * this.n1); clr(L.refund, 3 * this.n1); clr(L.level, this.n1); clr(L.level2, this.n1);
     clr(L.gcount, this.Geff); clr(L.gfill, this.Geff); clr(L.cawake, this.Geff); clr(L.cnear, CNEAR + 1); clr(L.cbody, 2 * this.Geff); clr(L.ccount, 33); clr(L.cfill, 33); clr(cur ? L.t1 : L.t0, this.T);
     clr(L.hl, 1); clr(L.bcount, this.n1); clr(L.bfill, this.n1); clr(L.ocount, this.n1);
     if (this.reduce !== false) { clr(L.ptab, 3 * this.TPeff); clr(L.big, 64 * 4096); }
@@ -2760,7 +2927,7 @@ class GpuWorld {
     }
     p = pass('shapes'); run(p, 'prep_bodies', nb); run(p, 'prep_shapes', nsh); p.end();
     p = pass('grid'); run(p, 'scan', 1); run(p, 'scatter', nsh); run(p, 'sort_cells', nsh); p.end();
-    p = pass('broad'); run(p, 'pairs', nsh); p.end();
+    p = pass('broad'); run(p, 'pairs', nsh); run(p, 'prep_woken', nb); p.end();
     p = pass(null, true); run(p, 'pair_args', 1); p.end();
     p = pass('narrow'); ind(p, 'narrow', 99 * 4); p.end();
     // the chunk pairs listed by narrow, always sized by their real count (one indirect dispatch)
@@ -2810,7 +2977,7 @@ class GpuWorld {
     if (this.velocityBound !== false) run(p, 'vh_clamp', nb);
     run(p, 'finish', nb);
     if (this.evEnergy > 0) { ind(p, 'ev_count', 96 * 4); run(p, 'ev_cut', 1); ind(p, 'events', 96 * 4); }
-    if (this.crushing !== false) { ind(p, 'crush', 96 * 4); if (this.pinching !== false) { ind(p, 'pinch_acc', 96 * 4); run(p, 'pinch', nb); } ind(p, 'crush_release', 96 * 4); }   // (pinching on since the velocity bound, 14 Nov: docs/GPU.md, Crushing on contact)
+    if (this.crushing !== false) { ind(p, 'crush', 96 * 4); if (this.pinching !== false) { ind(p, 'pinch_acc', 96 * 4); run(p, 'pinch', nb); } ind(p, 'crush_release', 96 * 4); if (this.refund !== false && !globalThis.__noRefund) run(p, 'crush_refund', nb); }   // (pinching on since the velocity bound, 14 Nov: docs/GPU.md, Crushing on contact)
     if (this.capP && this.support !== false) ind(p, 'sup_acc', 96 * 4);
     if (this.plans) { ind(p, 'snap_acc', 96 * 4); run(p, 'snap_split', nb); run(p, 'snap_shapes', nsh); }
     p.end();
@@ -2923,10 +3090,74 @@ class GpuWorld {
     const rec = { body, mat, lp, lq: q.slice(), h: half, hull };
     this.shapes[slot - 1] = rec;
     this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([body, mat, 0, hull, ...lp, 0, ...q, ...half, 0]));
+    this.coverTouch(slot);
     return slot;
   }
+  // ---- which faces of the fixed boxes are covered by other fixed boxes (see cover_fix)
+  // A fixed, axis-aligned box shape as [lo, hi] (m, world), or null for anything else.
+  _coverBox(slot) {
+    const r = this.shapes[slot - 1]; if (!r || r.dead || r.hull) return null;
+    const b = this.bodies[r.body - 1]; if (!b || b.dead || b.im !== 0) return null;
+    const ident = (q) => !q || Math.abs(q[0]) + Math.abs(q[1]) + Math.abs(q[2]) < 1e-6;
+    if (!ident(r.lq) || !ident(b.q)) return null;
+    const c = [0, 1, 2].map(k => b.p[k] + r.lp[k]);
+    return [c[0] - r.h[0], c[1] - r.h[1], c[2] - r.h[2], c[0] + r.h[0], c[1] + r.h[1], c[2] + r.h[2]];
+  }
+  _coverCells(bx, pad, fn) {
+    const C = 2, f = (v) => Math.floor(v / C);
+    for (let x = f(bx[0] - pad); x <= f(bx[3] + pad); x++) for (let y = f(bx[1] - pad); y <= f(bx[4] + pad); y++) for (let z = f(bx[2] - pad); z <= f(bx[5] + pad); z++) fn(x + ',' + y + ',' + z);
+  }
+  // A shape was made, changed or killed: its place in the index, and it and what touches it to be looked at again.
+  coverTouch(slot) {
+    const C = this._cov; if (!C) return;
+    const near = (bx) => this._coverCells(bx, 0.05, (key) => { const set = C.grid.get(key); if (set) for (const o of set) { const ob = C.box.get(o); if (ob && ob[0] <= bx[3] + 0.05 && ob[3] >= bx[0] - 0.05 && ob[1] <= bx[4] + 0.05 && ob[4] >= bx[1] - 0.05 && ob[2] <= bx[5] + 0.05 && ob[5] >= bx[2] - 0.05) C.dirty.add(o); } });
+    const old = C.box.get(slot);
+    if (old) { this._coverCells(old, 0, (key) => { const set = C.grid.get(key); if (set) { set.delete(slot); if (!set.size) C.grid.delete(key); } }); C.box.delete(slot); near(old); }
+    const bx = this._coverBox(slot);
+    if (bx) { C.box.set(slot, bx); this._coverCells(bx, 0, (key) => { let set = C.grid.get(key); if (!set) C.grid.set(key, set = new Set()); set.add(slot); }); near(bx); C.dirty.add(slot); }
+  }
+  // The masks of the boxes to be looked at again. A face is covered when its middle and four points 0.6 of the
+  // way to its edges, 1 cm out from it, are all inside other fixed boxes.
+  coverFlush() {
+    if (!this._cov) { this._cov = { grid: new Map(), box: new Map(), dirty: new Set() }; for (let s = 1; s <= this.shapes.length; s++) this.coverTouch(s); }
+    const C = this._cov; if (!C.dirty.size) return;
+    const inside = (p, self) => { const set = C.grid.get(Math.floor(p[0] / 2) + ',' + Math.floor(p[1] / 2) + ',' + Math.floor(p[2] / 2)); if (!set) return false;
+      for (const o of set) { if (o === self) continue; const b = C.box.get(o); if (p[0] >= b[0] - 1e-4 && p[0] <= b[3] + 1e-4 && p[1] >= b[1] - 1e-4 && p[1] <= b[4] + 1e-4 && p[2] >= b[2] - 1e-4 && p[2] <= b[5] + 1e-4) return true; }
+      return false; };
+    for (const slot of C.dirty) {
+      const bx = C.box.get(slot); if (!bx) continue;
+      let mask = 0;
+      for (let k = 0; k < 3; k++) for (let sg = 0; sg < 2; sg++) {
+        const u = (k + 1) % 3, v = (k + 2) % 3, p = [0, 0, 0]; let all = true;
+        p[k] = sg ? bx[k] - 0.01 : bx[k + 3] + 0.01;
+        for (const [a, b] of [[0, 0], [0.6, 0.6], [-0.6, 0.6], [0.6, -0.6], [-0.6, -0.6]]) {
+          p[u] = 0.5 * (bx[u] + bx[u + 3]) + 0.5 * a * (bx[u + 3] - bx[u]); p[v] = 0.5 * (bx[v] + bx[v + 3]) + 0.5 * b * (bx[v + 3] - bx[v]);
+          if (!inside(p, slot)) { all = false; break; }
+        }
+        if (all) mask |= 1 << (2 * k + sg);
+      }
+      this.setStaticCover(slot, mask);
+    }
+    C.dirty.clear();
+  }
+  // The covered faces of a fixed, axis-aligned box shape (bits: +x, -x, +y, -y, +z, -z): see cover_fix.
+  setStaticCover(slot, mask) {
+    const rec = this.shapes[slot - 1]; if (!rec || rec.dead || (rec.cover || 0) === mask) return;
+    rec.cover = mask;
+    this.device.queue.writeBuffer(this.shpBuf, slot * 128 + 60, new Float32Array([this.coverOff || globalThis.__noCover ? 0 : mask]));
+  }
   // Retire a body: it stops moving and colliding (its slot is not reused).
+  // A body thrown (the game's ball). mode 1: while it flies fast, its contacts are solved at its real mass
+  // (shot_scale). mode 2: that, and it does not touch the fixed world except the ground (emit): for the steps in
+  // which it goes through what was broken for it. 0: a body like any other.
+  setShot(body, mode = 1) {
+    const b = this.bodies[body - 1]; mode = mode === true ? 1 : (mode | 0);
+    if (!b || (b.shot | 0) === mode) return;
+    b.shot = mode; this.inputs++;
+    this.device.queue.writeBuffer(this.intBuf, (this.L.shot + body) * 4, new Uint32Array([mode]));
+  }
   killBody(body) {
+    this.setShot(body, 0);
     if (globalThis.__parkDbg) (globalThis.__slotLog = globalThis.__slotLog || []).push(['kill', this.frame, body]);
     this.inputs++;
     const b = this.bodies[body - 1]; if (!b || b.dead) return;
@@ -3112,6 +3343,7 @@ class GpuWorld {
     s.dead = true;
     (this.freeShapes = this.freeShapes || []).push(slot);
     this.device.queue.writeBuffer(this.shpBuf, slot * 128, new Float32Array([s.body, s.mat, 1, 0]));
+    this.coverTouch(slot);
   }
 
   // the runtime hulls registered since the last upload, into this world's hull table
@@ -3125,6 +3357,7 @@ class GpuWorld {
   }
   step(dt = 1 / 60) {
     this.uploadHulls();
+    this.coverFlush();
     const enc = this.device.createCommandEncoder();
     this.encode(enc, dt);
     this.device.queue.submit([enc.finish()]);

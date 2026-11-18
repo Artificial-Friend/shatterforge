@@ -57,15 +57,14 @@ button:disabled { opacity: .5; cursor: default; }
 <div class="settings" id="menu" hidden>
   <h2>Menu</h2>
   <div class="row"><button id="m-resume" type="button">Resume</button><button id="m-reset" type="button" class="alt">Reset level</button></div>
-  <label>Level <select id="s-kind"><option value="0">reinforced-concrete frame · 12 storeys</option><option value="1">masonry piers and facade · 5 storeys</option><option value="2">mass timber · 6 storeys</option><option value="3">mixed: brick, steel, concrete, timber · 5 storeys</option><option value="4">complex: braced steel frame, timber roof, stone arcade · 2 storeys</option><option value="5">city: lots of every kind between streets</option></select><span class="hint">each fails through its own connections; changing it rebuilds the tower</span></label>
-  <label>City size <select id="s-city"><option value="2">2 × 2 lots</option><option value="3">3 × 3 lots</option><option value="4">4 × 4 lots</option><option value="5">5 × 5 lots</option><option value="6">6 × 6 lots</option><option value="8">8 × 8 lots</option></select><span class="hint">for the city: 40 m lots, a building of every kind; larger cities cost more GPU time and structure checks (the benchmark finds the limit); changing it rebuilds the city</span></label>
+  <p class="hint" id="m-level"><b>The Quarter.</b> North: a Doric temple of marble, a ten-storey concrete office tower, a brick tenement. Middle: a Roman aqueduct, the market hall (braced steel, a stone arcade, a timber roof), a brick mill with its chimney and a steel water tower. South: the white villa (Villa Savoye), the glass house (Farnsworth House), a timber barn.</p>
   <div class="row"><button id="m-gfx" type="button" class="alt">Graphics…</button><button id="m-phys" type="button" class="alt">Physics…</button></div>
   <label>Engineer's view (V) <b id="v-view"></b><input type="range" id="s-view" min="0" max="1" step="1"><span class="hint">on: every brick is coloured by how near its worst joint is to its strength (blue unloaded, green a third, yellow 70%, red at strength), and the building is drawn where the structure's solution puts it</span></label>
   <details id="s-tools"><summary>Tools: the ball, benchmark, lab checks, diagnostics</summary>
   <label>Ball speed <b id="v-bspeed"></b><input type="range" id="s-bspeed" min="20" max="300" step="10"></label>
   <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
   <h2>Benchmark</h2>
-  <span class="hint">the same scripted destruction every run: the ground storey cut by 36 fixed blasts, the tower dropping and crushing down, three steel balls; 12 s of simulated time, then a report</span>
+  <span class="hint">the same scripted destruction every run: the ground storeys of the office tower and the mill cut by 36 fixed blasts each, both dropping and crushing down, three steel balls into the market hall; 12 s of simulated time, then a report</span>
   <button id="bench-go" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run benchmark (reloads the page) · key K</button>
   <button id="lab-quick" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run lab checks, quick (2 scenarios, reloads)</button>
   <button id="lab-full" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run lab checks, full (5 scenarios, reloads)</button>
@@ -106,6 +105,7 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Crushed storey absorbs <b id="v-crush"></b><input type="range" id="s-crush" min="0.1" max="2" step="0.05"><span class="hint">depth of crushing a failed section takes: low = collapse runs on near free fall, high = it slows and can stop</span></label>
   <label>Dynamic structure <b id="v-dynamic"></b><input type="range" id="s-dynamic" min="0" max="1" step="1"><span class="hint">on: the standing building is stepped as a moving structure (it sags and sways, and answers a change in the step it happens, at a bounded cost); off: it is solved at rest after each change</span></label>
   <label>Rubble weighs on floors <b id="v-restLoads"></b><input type="range" id="s-restLoads" min="0" max="1" step="1"><span class="hint">on: once a second the weight of the debris lying on the building is sent to the structure check, and a floor heaped too high gives way</span></label>
+  <label>The ball goes through what it breaks <b id="v-punch"></b><input type="range" id="s-punch" min="0" max="1" step="1"><span class="hint">on: a steel ball looks 0.15 s ahead; what is in its way is crushed out of its kinetic energy before it arrives, and it goes on with what is left or stops in the crater. off: it hits rigidly and the wall breaks a few frames later (it bounces first)</span></label>
   <label>Irregular chunks <b id="v-chunks"></b><input type="range" id="s-chunks" min="0" max="1" step="1"><span class="hint">on: loose bricks too big for particles break into convex chunks (real shapes, they tumble and pile); off: they stay boxes</span></label>
   <label>Crumbs as particles <b id="v-particles"></b><input type="range" id="s-particles" min="0" max="1" step="1"><span class="hint">on: loose bricks up to 0.5 m are granular particles (pile and slide, much cheaper; they do not push larger pieces); off: every crumb is a rigid body</span></label>
   </details>
@@ -113,9 +113,9 @@ button:disabled { opacity: .5; cursor: default; }
 </div>
 <div class="start" id="start">
   <div class="card">
-    <div class="eyebrow">Shatterforge · phase 1</div>
-    <h1 id="title">A 12-storey office tower at real scale</h1>
-    <p>Every wall, slab, column and stair is a real-size brick: storeys are 3.75 m, doors 0.875 × 2.125 m, corridors 1.75 m, steps 0.25 m. Walk in through the lobby, take the stair in the core, and knock holes in it. What falls off is simulated on the GPU as rigid pieces.</p>
+    <div class="eyebrow">Shatterforge · the Quarter</div>
+    <h1 id="title">The Quarter: nine lots of real buildings at real scale</h1>
+    <p>A Doric temple of marble, a Roman aqueduct, the Villa Savoye, the Farnsworth House, a medieval timber barn, a brick mill with its chimney and a steel water tower, a market hall, a brick tenement and a ten-storey office tower: each built member by member at its real size, of its real material, and each stands and fails by its own structure. Walk in, climb, and take them apart. What comes off is simulated on the GPU as rigid pieces and rubble.</p>
     <dl class="keys">
       <dt>Mouse</dt><dd>look (click the view first)</dd>
       <dt>W A S D</dt><dd>walk · Shift to run · Space to jump</dd>
@@ -123,7 +123,7 @@ button:disabled { opacity: .5; cursor: default; }
       <dt>V</dt><dd>engineer's view: load against strength as colour, and the building's sag drawn larger</dd>
       <dt>Click</dt><dd>blast at the crosshair</dd>
       <dt>1 2 3</dt><dd>blast radius 0.4 / 0.7 / 1.2 m</dd>
-      <dt>4</dt><dd>fire a steel ball instead (it hits the walls for real)</dd>
+      <dt>4</dt><dd>fire a steel ball instead (it goes on through what it breaks)</dd>
       <dt>Esc</dt><dd>menu: level, reset, graphics and physics settings, tools</dd>
       <dt>R R</dt><dd>reset the level (R twice)</dd>
       <dt>K</dt><dd>run the benchmark (reloads the page, then reports)</dd>

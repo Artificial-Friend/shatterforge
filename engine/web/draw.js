@@ -63,11 +63,13 @@ function drawTargets(r) {
 // the same colours as the tower mesh (engine/src/mesh.rs colour): by material and paint, a little variation
 const GLASS = 3, TIMBER = 4;
 const PAINTCOL = [[0.62, 0.61, 0.58], [0.56, 0.56, 0.54], [0.79, 0.77, 0.71], [0.67, 0.65, 0.61], [0.58, 0.57, 0.55]];
+// (finishes of their own, whatever the material: mesh.rs colour, paints 9 to 15)
+const FINISH = { 9: [0.87, 0.84, 0.77], 10: [0.93, 0.92, 0.89], 11: [0.78, 0.70, 0.56], 12: [0.42, 0.31, 0.23], 13: [0.50, 0.24, 0.18], 14: [0.66, 0.36, 0.25], 15: [0.24, 0.34, 0.28] };
 const colTmp = new THREE.Color();
 const VIEW_FREE = [0.56, 0.47, 0.70];   // (violet: not blue, green, yellow or red, the view's scale of stress)
 function debrisColour(code, k) {
-  const m = code & 15, paint = code >> 4;
-  const c = m === GLASS ? [0.36, 0.50, 0.58] : m === 1 ? [0.60, 0.36, 0.28] : m === TIMBER ? (paint === 8 ? [0.62, 0.46, 0.30] : [0.86, 0.84, 0.79]) : m === 2 ? [0.36, 0.40, 0.44] : (PAINTCOL[paint] || [0.7, 0.7, 0.7]);
+  const m = code & 7, paint = (code >> 4) & 15;
+  const c = m === GLASS ? [0.36, 0.50, 0.58] : FINISH[paint] ? FINISH[paint] : m === 1 ? [0.60, 0.36, 0.28] : m === TIMBER ? (paint === 8 ? [0.62, 0.46, 0.30] : [0.86, 0.84, 0.79]) : m === 2 ? [0.36, 0.40, 0.44] : (PAINTCOL[paint] || [0.7, 0.7, 0.7]);
   const h = ((Math.imul(k, 2654435761) >>> 24) & 255) / 255, s = 0.96 + 0.06 * h;
   // In the engineer's view what has left the structure has one colour, off the scale of stress (VIEW_FREE): falling
   // pieces, crumbs and rubble. In their materials' colours the view seemed to switch off wherever a building came
@@ -205,7 +207,11 @@ function drawDebris(now) {
     if (tg === -1) dMesh.setMatrixAt(r.tidx ? r.tidx[k] : k, M4); else if (tg > 0) hullMesh(tg).setMatrixAt(r.tidx[k], M4);
     if (lab) {
       const sh = gpu.shapes[r.slots[k] - 1], b = sh ? sh.body : 0, vo = (b - 1) * 3;
-      const sp = r.vel && vo >= 0 && vo + 2 < r.vel.length ? Math.hypot(r.vel[vo], r.vel[vo + 1], r.vel[vo + 2]) : 0;
+      let sp = r.vel && vo >= 0 && vo + 2 < r.vel.length ? Math.hypot(r.vel[vo], r.vel[vo + 1], r.vel[vo + 2]) : 0;
+      // (what is drawn goes from the last read-back's place to this one's: its speed on the way is the faster of
+      // the two read-backs', not this one's alone. A piece that lands between them is read at rest, and is drawn
+      // covering its last step of flight.)
+      if (j !== undefined && p.vel && vo >= 0 && vo + 2 < p.vel.length) sp = Math.max(sp, Math.hypot(p.vel[vo], p.vel[vo + 1], p.vel[vo + 2]));
       const hv = tg > 0 ? GpuWorld.hulls.hulls[tg].vol : 1;
       labDrawn(r.gens[k] * 1048576 + r.slots[k], PP.x, PP.y, PP.z, sp, (r.balls && r.balls[k]) || tg === -2 ? 0 : 8 * SS.x * SS.y * SS.z * hv);
     }
@@ -239,7 +245,7 @@ function drawDebris(now) {
         const c = (r.hullCount ? r.hullCount.get(hid) || 0 : 0) + (pHull.get(hid) || 0);
         if (c < hullCap(hid)) { const m = hullMesh(hid); m.setMatrixAt(c, M4); m.setColorAt(c, debrisColour(inf.col || 0, i)); pHull.set(hid, (pHull.get(hid) || 0) + 1); }
       } else if (nb + np2 < MAXD) { M4.compose(PP, QQ, SS); dMesh.setMatrixAt(nb + np2, M4); np2++; }
-      if (lab) labDrawn(-(pr.gens[k] * 1048576 + i) - 1, PP.x, PP.y, PP.z, Math.hypot(d[o + 3], d[o + 4], d[o + 5]), vol);
+      if (lab) { let sp = Math.hypot(d[o + 3], d[o + 4], d[o + 5]); if (j !== undefined) { const q = pp.list[j] * 12; sp = Math.max(sp, Math.hypot(pd[q + 3], pd[q + 4], pd[q + 5])); } labDrawn(-(pr.gens[k] * 1048576 + i) - 1, PP.x, PP.y, PP.z, sp, vol); }
     }
   }
   dMesh.count = nb + np2; debrisShapes = n; particlesDrawn = np;

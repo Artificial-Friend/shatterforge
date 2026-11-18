@@ -23,6 +23,27 @@ pub const VIEW_BEND: f64 = 0.02;
 /// A hit on the standing structure slower than this (m/s) is a part coming to rest on it: its weight reaches the
 /// structure as rubble's does.
 pub const KICK_SPEED: f32 = 1.0;
+/// `Sim::punch`: every brick within this many of the body's radii of its path goes (the game's ball reaches 1.22
+/// radii at its corners, and the GPU's contacts begin 0.02 m before touching: a 0.5 m ball clears by 0.03 m), a
+/// gap this long (m) ends
+/// what it goes through in one hit (or the body's own diameter, if more), and no hit goes deeper than this (m).
+pub const PUNCH_WIDTH: f32 = 1.35;
+/// the part of the body's radius round its path that must meet something for that to be in its way, and the least
+/// share of its motion that must be into the face it meets (under it: a glancing hit, left to the contact)
+pub const PUNCH_CORE: f32 = 0.5;
+pub const PUNCH_GRAZE: f32 = 0.35;
+/// the body itself, of its radius: what reaches inside this of its path and was not beside the path already is in its
+/// way too (a door's jamb caught with its side). 1.1: the game's ball, three eight-sided discs, reaches 1.08 of its
+/// radius at its corners (at 0.9, lab qballglass, 18 Nov: through a door 0.125 m wider than it on each side, put
+/// 0.11 m off its line by two chairs, it met the jamb, which had not been looked for, and came back at 8 m/s).
+/// And how far back along the path (m) "already" looks
+pub const PUNCH_BODY: f32 = 1.1;
+pub const PUNCH_BACK: f32 = 0.5;
+pub const PUNCH_GAP: f32 = 0.5;
+pub const PUNCH_DEPTH: f32 = 3.0;
+/// and one call looks no further than this (m) and at no more things than this
+pub const PUNCH_REACH: f32 = 40.0;
+pub const PUNCH_THINGS: usize = 8;
 pub const DYN_MAX_DT: f32 = 0.1;
 pub struct Sim {
     pub b: Bricks,
@@ -122,6 +143,14 @@ pub struct Sim {
     /// (N s) on it. They are loads of its next step (`Dyn::kicks`), not a check at rest of their own.
     pub kicks: Vec<([f64; 3], [f64; 3], f64)>,
     pub motion: [f32; 12],
+    /// the moving cells of the last structure step, 9 numbers each: centre (m), velocity, spin. What a part that
+    /// leaves the structure starts with (`view_motion`); written whether or not anything is drawn of it, and sent
+    /// to the page's copy with each structure step. (Until 15 Nov this came from the engineer's view's cells: with
+    /// the view on every lot had them, with it off only lots sagging 2 cm, so parts left the structure with its
+    /// velocity in the view and from rest out of it, and the same cut came down differently.)
+    pub motion_cells: Vec<f32>,
+    /// `punch`: [n, (begins m, energy J, crushed to m, through) x n]
+    pub punch_out: Vec<f32>,
     pub view_out: Vec<f32>,
     pub view_in: Vec<f32>,
     /// the bricks of the lots whose view the last structure step writes (a lot at rest, written once, is left out)
@@ -212,13 +241,100 @@ impl Tiles {
 /// (game/src/tower.rs `STOREY`, which must equal it: one mesh chunk a storey).
 pub const BAND: i32 = 30;
 
+fn way_standing(b: &Bricks, i: u32) -> bool { b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE }
+/// a brick's distance from a point (ticks), and its nearest point
+fn way_reach(b: &Bricks, i: u32, c: [f32; 3]) -> (f32, [f32; 3]) {
+    let t = b.tbox(i);
+    let q = [c[0].max(t.min[0] as f32).min(t.max[0] as f32), c[1].max(t.min[1] as f32).min(t.max[1] as f32), c[2].max(t.min[2] as f32).min(t.max[2] as f32)];
+    let e = [q[0] - c[0], q[1] - c[1], q[2] - c[2]];
+    (sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]), q)
+}
+/// is the point (ticks) in a standing brick
+fn way_inside(b: &Bricks, c: [f32; 3], buf: &mut Vec<u32>) -> bool {
+    buf.clear();
+    let lo = [floor(c[0]) as i32, floor(c[1]) as i32, floor(c[2]) as i32];
+    b.query(lo, [lo[0] + 1, lo[1] + 1, lo[2] + 1], false, buf);
+    buf.iter().any(|&i| way_standing(b, i))
+}
+#[cfg(test)] pub static WAY_OLD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// A path that grazes a face `dist` (ticks) away along `n` at `c`, going along `d`: the body lands there and goes on
+/// along the face. Where its centre then is (its radius `r` from the face, and 0.2 tick) and which way it goes; None
+/// if it comes straight at it.
+fn way_bend(c: [f32; 3], d: [f32; 3], n: [f32; 3], dist: f32, r: f32) -> Option<([f32; 3], [f32; 3])> {
+    let dn = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
+    let t = [d[0] - dn * n[0], d[1] - dn * n[1], d[2] - dn * n[2]];
+    let l = sqrt(t[0] * t[0] + t[1] * t[1] + t[2] * t[2]); if l < 0.5 { return None; }
+    let back = (r + 0.2 - dist).max(0.0);
+    Some(([c[0] - n[0] * back, c[1] - n[1] * back, c[2] - n[2] * back], [t[0] / l, t[1] / l, t[2] / l]))
+}
+pub const WAY_CLEAR: u8 = 0;
+pub const WAY_BLOCKED: u8 = 1;
+pub const WAY_GRAZE: u8 = 2;
+/// What a body of radius `r` (ticks) going along `d` (unit) has in its way with its centre at `c` (ticks): nothing,
+/// something it must break to go on (`WAY_BLOCKED`), or a surface it comes down on at a shallow angle and is turned
+/// by (`WAY_GRAZE`). Called station after station along a path; `plough` is carried from one to the next.
+///
+/// In its way is a standing brick that
+/// - holds its centre line, or is met end on: by its core, `PUNCH_CORE` of its radius;
+/// - reaches into the body itself (`PUNCH_BODY` of its radius) from the side, and was not there beside the path
+///   `PUNCH_BACK` before: a jamb, a mullion, a slab's edge. Once its core is in such a brick, the body is ploughing
+///   along it, and what continues it counts as long as it lasts (`plough`: the side it is on).
+/// A graze: a face beside the path that was further out `PUNCH_BACK` before, by up to `PUNCH_GRAZE` of that: the
+/// floor it comes down on. It lands there and rolls on; where it goes then is asked again from there. (Looked along
+/// as if it fell on through the floor, the line was up to half a radius too low at the next wall, and 3 m of the
+/// glass house's floor, deck and steel beams, were crushed ahead of the ball for 603 kJ of its 925: the same run.) (A sphere that meets an edge 0.7 of its radius off its line meets it
+///   at 0.7 of its speed: that is no glancing hit. Lab qballglass, 15 Nov: the ball went through a 0.75 m door
+///   0.2 m off its middle, caught the jamb with its side, came out at 39 of its 60 m/s and 0.2 m off its line, and
+///   met the rim of the hole made for it in the next wall.)
+/// A floor it rolls on or flies over, a wall it passes along, are beside the path before and after: not in its way.
+/// `face`: for a graze, the way to the face (unit) and how far it is (ticks), the nearest if several.
+fn way_at(b: &Bricks, c: [f32; 3], d: [f32; 3], r: f32, plough: &mut Option<[f32; 3]>, face: &mut ([f32; 3], f32), near: &mut Vec<u32>, buf: &mut Vec<u32>) -> u8 {
+    let (core, body, back) = (PUNCH_CORE * r, PUNCH_BODY * r, PUNCH_BACK / TICK);
+    near.clear();
+    let lo = [floor(c[0] - body) as i32 - 1, floor(c[1] - body) as i32 - 1, floor(c[2] - body) as i32 - 1];
+    let w = 2 * body as i32 + 4;
+    b.query(lo, [lo[0] + w, lo[1] + w, lo[2] + w], true, near);
+    // (was there standing material beside the path `back` before, `e` ticks further out than this brick's face is now)
+    let before = |n: [f32; 3], dist: f32, e: f32, buf: &mut Vec<u32>| -> bool {
+        way_inside(b, [c[0] - back * d[0] + n[0] * (dist + e), c[1] - back * d[1] + n[1] * (dist + e), c[2] - back * d[2] + n[2] * (dist + e)], buf)
+    };
+    let (mut blocked, mut graze, mut side): (bool, bool, Option<[f32; 3]>) = (false, false, None);
+    // (tests: the rule before 15 Nov, anything standing within the core, to give the numbers before)
+    #[cfg(test)] if WAY_OLD.load(core::sync::atomic::Ordering::Relaxed) { return if near.iter().any(|&i| way_standing(b, i) && way_reach(b, i, c).0 < core) { WAY_BLOCKED } else { WAY_CLEAR }; }
+    for &i in near.iter() {
+        if !way_standing(b, i) { continue; }
+        let (dist, q) = way_reach(b, i, c);
+        if dist >= body { continue; }
+        if dist < 0.5 { blocked = true; continue; }
+        let n = [(q[0] - c[0]) / dist, (q[1] - c[1]) / dist, (q[2] - c[2]) / dist];
+        let dn = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
+        // (met end on)
+        if dn.abs() >= 0.5 { if dist < core { blocked = true; } continue; }
+        // met from the side. Where was its face `back` before: as near as now (within 0.1 tick: it runs along the
+        // path), or further out by up to PUNCH_GRAZE of `back` (the path closes on it at under 20 degrees: looked for
+        // 0.8 and 1.5 ticks out, which finds a face 1 tick thick anywhere in that range), or not there (new)
+        let along = before(n, dist, 0.1, buf);
+        // (and a face goes on ahead: the rim of a hole in a thin wall, with the floor a hand under it, is not one. Lab
+        // qballglass, 18 Nov: 0.16 m below the middle of the hole made for it, the ball's way was taken to graze the
+        // rim and bend over it; the ball met the rim and came back at 8 m/s)
+        // (looked for just inside where this brick's face is, 0.05 tick: the rim left of that wall was 3.5 cm of it)
+        let ahead = way_inside(b, [c[0] + back * d[0] + n[0] * (dist + 0.05), c[1] + back * d[1] + n[1] * (dist + 0.05), c[2] + back * d[2] + n[2] * (dist + 0.05)], buf);
+        let nears = !along && ahead && (before(n, dist, 0.8, buf) || before(n, dist, 0.1 + back * PUNCH_GRAZE, buf));
+        if dist < core && plough.map_or(false, |p| p[0] * n[0] + p[1] * n[1] + p[2] * n[2] > 0.7) { blocked = true; side = Some(n); }
+        else if nears || (along && dist < core) { if !graze || dist < face.1 { *face = (n, dist); } graze = true; }
+        else if !along { blocked = true; if dist < core { side = Some(n); } }
+    }
+    *plough = if blocked { side } else { None };
+    if blocked { WAY_BLOCKED } else if graze { WAY_GRAZE } else { WAY_CLEAR }
+}
+
 impl Sim {
     /// A simulation of the bricks `b`, meshed in `tiles` (see `Tiles`). What the bricks are is the caller's: the
     /// demo game builds its levels in game/src (tower.rs, complex.rs, city.rs).
     pub fn from_bricks(b: Bricks, tiles: Tiles) -> Self {
         let n = tiles.count();
         let mut g = Sim { b, rest: Vec::new(), rest_applied: 0.0, side_failed: 0, panel_ratio: 0.0, cracked_total: 0, warm: Default::default(), last_iterations: 0, tiles, active: vec![true; (tiles.n * tiles.n) as usize], tile_ratio: vec![0.0; (tiles.n * tiles.n) as usize], chunks: (0..n).map(|_| Mesh::default()).collect(),
-                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), view_bend: false, view_vel: Vec::new(), kicks: Vec::new(), motion: [0.0; 12], struct_dt: 0.0, rest_fresh: false, rest_kept: Vec::new(), dynamic: false, dynst: Default::default(), moving: false, dyn_speed: 0.0, dyn_its: 0, dyn_kinetic: 0.0, dyn_left: 0, dyn_cut: 0, dyn_capped: false, view: Default::default(), view_want: false, view_out: Vec::new(), view_in: Vec::new(), view_bricks: Vec::new(), view_chunks: Vec::new(), wearing: 0, wearing_at: Vec::new(), worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
+                           out: Vec::new(), piece_out: Vec::new(), loose_pending: false, last_detached: 0, dirty: (0, n as i32 - 1), pieces: Vec::new(), max_ratio: 0.0, failed_total: 0, inp: Vec::new(), piece_ratio: 0.0, piece_info: [0.0; 4], dbg: Vec::new(), caps: Vec::new(), dust: 0, mesh: true, cut_dbg: [0.0; 6], crumb_keep: CRUMB_KEEP, rubble_keep: RUBBLE_KEEP, crush_depth: CRUSH_DEPTH, spill_on: false, spill: Vec::new(), view_bend: false, view_vel: Vec::new(), kicks: Vec::new(), motion: [0.0; 12], motion_cells: Vec::new(), punch_out: Vec::new(), struct_dt: 0.0, rest_fresh: false, rest_kept: Vec::new(), dynamic: false, dynst: Default::default(), moving: false, dyn_speed: 0.0, dyn_its: 0, dyn_kinetic: 0.0, dyn_left: 0, dyn_cut: 0, dyn_capped: false, view: Default::default(), view_want: false, view_out: Vec::new(), view_in: Vec::new(), view_bricks: Vec::new(), view_chunks: Vec::new(), wearing: 0, wearing_at: Vec::new(), worn_total: 0, last_failed: Vec::new(), dup_bricks: 0, spill_why: [0; 4], spill_mat: [0; 8], spill_single: 0, masonry_parts: false, inner_wear: Default::default(), joint_wear: Default::default(), frac_made: 0, frac_max: FRAC_MAX, plans: Default::default(), plan_todo: Vec::new(), plan_out: Vec::new(), snapped: Default::default() };
         for k in 0..n as i32 { g.remesh(k); }
         g.loose_pending = (0..g.b.len()).any(|i| g.b.flags[i] & crate::brick::F_LOOSE != 0);
         g
@@ -237,7 +353,7 @@ impl Sim {
     fn push_box(out: &mut Vec<f32>, b: &Bricks, i: u32) {
         let t = b.tbox(i);
         let h = if b.hull[i as usize] == crate::brick::HULL_FREE { 256 + b.piece_of.get(&i).copied().unwrap_or(0).min(32_511) } else { b.hull[i as usize] as u32 };
-        out.extend_from_slice(&[t.min[0] as f32, t.min[1] as f32, t.min[2] as f32, (t.max[0] - t.min[0]) as f32, (t.max[1] - t.min[1]) as f32, (t.max[2] - t.min[2]) as f32, (b.mat[i as usize] as u32 + 16 * b.paint[i as usize] as u32 + 512 * h) as f32]);
+        out.extend_from_slice(&[t.min[0] as f32, t.min[1] as f32, t.min[2] as f32, (t.max[0] - t.min[0]) as f32, (t.max[1] - t.min[1]) as f32, (t.max[2] - t.min[2]) as f32, (b.mat[i as usize] as u32 + if b.flags[i as usize] & crate::brick::F_LOOSE != 0 { 8 } else { 0 } + 16 * b.paint[i as usize] as u32 + 512 * h) as f32]);
     }
     /// Free piece `k` into `piece_out`: [centre (m) x y z, rotation x y z w, corners n, corners (m, its own frame
     /// about the centre) ..., faces n, per face: corners n, corner indices ...]. Returns its length (0: no piece).
@@ -459,22 +575,18 @@ impl Sim {
         // (`dirty` is left as the last job set it: the page may not have meshed that yet)
     }
     /// The page's copy: where the structure's cell at a point (m) has gone and how it moves, into `motion`
-    /// ([displacement, rotation, velocity, turning rate]); false if no cell of the view holds the point.
+    /// ([displacement, rotation, velocity, turning rate]; the first two are zero: bodies start where they were
+    /// built); false if no moving cell is within 2 m of the point: the part starts at rest.
     pub fn view_motion(&mut self, p: [f32; 3]) -> bool {
-        let t = [p[0] / crate::brick::TICK, p[1] / crate::brick::TICK, p[2] / crate::brick::TICK];
-        let mut best: Option<(f32, &mesh::ViewCell)> = None;
-        for (&i, cs) in self.view.cells.iter() {
-            if (i as usize) >= self.b.len() { continue; }
-            let bx = self.b.tbox(i);
-            if t[1] < bx.min[1] as f32 - 1.0 || t[1] > bx.max[1] as f32 + 1.0 { continue; }
-            for c in cs {
-                if t[0] < c.lo[0] as f32 - 1.0 || t[0] > c.hi[0] as f32 + 1.0 || t[2] < c.lo[1] as f32 - 1.0 || t[2] > c.hi[1] as f32 + 1.0 { continue; }
-                let e = [c.c[0] - p[0], c.c[1] - p[1], c.c[2] - p[2]];
-                let d = e[0] * e[0] + e[1] * e[1] + e[2] * e[2];
-                if best.map_or(true, |b| d < b.0) { best = Some((d, c)); }
-            }
-        }
-        match best { Some((_, c)) => { self.motion = [c.u[0], c.u[1], c.u[2], c.r[0], c.r[1], c.r[2], c.v[0], c.v[1], c.v[2], c.w[0], c.w[1], c.w[2]]; true } None => false }
+        // (the moving cells first: the nearest within 2 m)
+        { let mut best = (4.0f32, usize::MAX);
+          for (k, c) in self.motion_cells.chunks_exact(9).enumerate() { let d = (c[0] - p[0]) * (c[0] - p[0]) + (c[1] - p[1]) * (c[1] - p[1]) + (c[2] - p[2]) * (c[2] - p[2]); if d < best.0 { best = (d, k); } }
+          if best.1 != usize::MAX { let c = &self.motion_cells[best.1 * 9..best.1 * 9 + 9]; self.motion = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, c[3], c[4], c[5], c[6], c[7], c[8]]; return true; } }
+        // (nothing else: the view's own cells were looked at here until 15 Nov, and those exist for every lot with
+        // the engineer's view on and only for lots sagging 2 cm with it off, so a part leaving a lot that was barely
+        // moving started with the lot's small velocity in the view and from rest out of it, and the two collapses
+        // went apart from there: lab `collapse --twice-view`, different from frame 26)
+        false
     }
     /// The page's copy: the building as it is built again (all chunks remeshed).
     pub fn view_off(&mut self) {
@@ -530,6 +642,189 @@ impl Sim {
         n
     }
 
+    /// How far along `d` (unit) from `o` (m) a body of radius `r` (m) first has something in its way, or comes down on
+    /// a face it grazes (`way_at`), looking `reach` (m) ahead; -1 if neither. Where `punch` is then asked from.
+    pub fn sweep(&self, o: V3, d: V3, r: f32, reach: f32) -> f32 {
+        let dl = d.len(); if !(dl > 0.0) { return -1.0; }
+        let (ot, dt3) = ([o.x / TICK, o.y / TICK, o.z / TICK], [d.x / dl, d.y / dl, d.z / dl]);
+        let (mut near, mut buf, mut plough, mut face) = (Vec::new(), Vec::new(), None, ([0.0f32; 3], 0.0f32));
+        let mut sx = 0.0f32;
+        while sx <= reach.min(PUNCH_REACH) / TICK {
+            if way_at(&self.b, [ot[0] + dt3[0] * sx, ot[1] + dt3[1] * sx, ot[2] + dt3[2] * sx], dt3, r / TICK, &mut plough, &mut face, &mut near, &mut buf) != WAY_CLEAR { return sx * TICK; }
+            sx += 1.0;
+        }
+        -1.0
+    }
+    /// A heavy fast body (the steel ball) about to reach the standing structure: at `o` (m, where its path meets the
+    /// first brick), going along `d` (unit), of radius `r` (m), with kinetic energy `energy` (J) and mass `mass` (kg);
+    /// `reach` (m): how far beyond `o` to look; `gain` (J/m): what it gains along the path between things (falling:
+    /// its weight times how steeply down it goes; negative going up). It goes on through what it breaks. Every brick that reaches into
+    /// its way (within `PUNCH_WIDTH` radii of the path) is crushed, from the near side, for as long as the energy
+    /// lasts: each costs its material's crush energy times its volume. One thing after another: a wall, the gap
+    /// behind it (`PUNCH_GAP` ends a thing), the next wall, to `reach` or to where the energy ends. What the body
+    /// loses in momentum at each goes to the dynamic structure as a hit there. Output as `blast`; `punch_out`:
+    /// [n, then for each thing met: where it begins along the path (m from `o`), the energy it took (J), where
+    /// what was crushed ends (m from `o`), 1 if the body came out of its far side].
+    ///
+    /// Why: the GPU stops a body rigidly in the step it lands and the engine breaks the wall some frames later, so
+    /// the ball had bounced off what it then broke (lab `tallball`, 14 Nov: down onto a 0.25 m roof slab at 47 m/s,
+    /// back up at 12 m/s and 7.3 m high). Called ahead of the contact, the hole is there when the ball arrives.
+    pub fn punch(&mut self, o: V3, d: V3, r: f32, energy: f32, mass: f32, reach: f32, gain: f32) -> usize {
+        let mut crumbs = match self.punch_core(o, d, r, energy, mass, reach, gain) { Some(c) if !c.is_empty() => c, _ => { self.emit(&[], &[]); return 0; } };
+        crumbs.extend(self.shatter_pending());
+        let keep = self.crumb_keep;
+        if crumbs.len() > keep { let n = crumbs.len(); let kept: Vec<u32> = (0..keep).map(|k| crumbs[k * n / keep]).collect(); self.dust += n - keep; crumbs = kept; }
+        let pieces = self.detach();
+        let n = crumbs.len() + pieces.len();
+        self.emit(&crumbs, &pieces);
+        n.max(1)
+    }
+    /// What `punch` would answer (`punch_out`), with nothing changed: the bricks are copied, broken, and put back.
+    /// For the page, which needs the answer in the frame it asks (at 54 m/s the next wall of a house is 3 steps
+    /// away, and the engine's turn comes 4 to 8 steps later: lab qballglass, 15 Nov); the hole itself is then made
+    /// by `punch`, in its turn.
+    pub fn punch_probe(&mut self, o: V3, d: V3, r: f32, energy: f32, mass: f32, reach: f32, gain: f32) {
+        let saved = self.b.clone();
+        let dynamic = core::mem::replace(&mut self.dynamic, false);   // (no hit on the structure from a question)
+        let _ = self.punch_core(o, d, r, energy, mass, reach, gain);
+        self.dynamic = dynamic;
+        self.b = saved;
+    }
+    /// `punch`'s work on the bricks: what was crushed (removed from the store; `punch_out` filled). None: no question.
+    fn punch_core(&mut self, o: V3, d: V3, r: f32, energy: f32, mass: f32, reach: f32, gain: f32) -> Option<Vec<u32>> {
+        self.punch_out.clear(); self.punch_out.push(0.0);
+        self.b.log.clear();
+        let dl = d.len(); if !(dl > 0.0) || !(energy > 0.0) || !(mass > 0.0) { return None; }
+        let d = d * (1.0 / dl);
+        // (the path: at(sx) = ot + dt3 * sx, sx in ticks along it; a graze bends it, see below)
+        let (mut ot, mut dt3) = ([o.x / TICK, o.y / TICK, o.z / TICK], [d.x, d.y, d.z]);
+        let rh = r * PUNCH_WIDTH / TICK;
+        let mut bends = 0;
+        let standing = way_standing;
+        let gap = (PUNCH_GAP / TICK).max(2.0 * r / TICK);
+        let end = reach.max(0.0).min(PUNCH_REACH) / TICK;
+        let mut left = energy;
+        let mut crumbs: Vec<u32> = Vec::new();
+        let mut near = Vec::new();
+        let mut from = 0.0f32;
+        let mut gained = 0.0f32;
+        let mut things = 0;
+        let reach_of = way_reach;
+        let inside = way_inside;
+        let mut buf = Vec::new();
+        while things < PUNCH_THINGS {
+            let at = |sx: f32| [ot[0] + dt3[0] * sx, ot[1] + dt3[1] * sx, ot[2] + dt3[2] * sx];
+            // The next thing on the way: stations a tick apart, from the first where the body's core (`PUNCH_CORE` of
+            // its radius round its path) meets a standing brick, until nothing has been met for PUNCH_GAP (or it is
+            // PUNCH_DEPTH deep: then it is taken as far as that). The core, not the whole body: a floor the ball
+            // rolls on, or flies a hand above, touches its side all the way, and is not in its way. (Taken by the
+            // whole hole's width, the glass house's floor was one thing 3 m long under a ball that crossed a
+            // partition 0.4 m above it, and took 316 kJ of its 925: lab qballglass, 15 Nov.)
+            let (mut sx, mut first, mut last, mut found, mut open, mut grazed) = (from, 0.0f32, 0.0f32, false, false, false);
+            let mut plough = None;
+            let mut face = ([0.0f32; 3], 0.0f32);
+            while sx <= end || (found && sx - first <= PUNCH_DEPTH / TICK) {
+                match way_at(&self.b, at(sx), dt3, r / TICK, &mut plough, &mut face, &mut near, &mut buf) {
+                    WAY_BLOCKED => { if !found { found = true; first = sx; } last = sx; }
+                    // (a face it comes down on at a shallow angle: it lands there and goes on along it. What it
+                    // has met before that it goes through; the path bends there, below)
+                    WAY_GRAZE => { grazed = true; open = found; break; }
+                    _ => if found && sx - last >= gap { open = true; break; },
+                }
+                if found && sx - first > PUNCH_DEPTH / TICK { break; }
+                sx += 1.0;
+            }
+            // The path bends where it grazes: on along the face, the body's radius from it. (Stopped there, nothing
+            // beyond the place it lands was broken until it had landed, 0.25 s of flight too late for the next wall;
+            // looked along straight on through the floor, the holes were up to half a radius too low. Lab
+            // qballglass, 15 Nov: the glass house's partitions are 2.75 m apart, 3 steps at 54 m/s.)
+            let bend = |sg: f32, ot: &mut [f32; 3], dt3: &mut [f32; 3]| -> bool {
+                let c = [ot[0] + dt3[0] * sg, ot[1] + dt3[1] * sg, ot[2] + dt3[2] * sg];
+                match way_bend(c, *dt3, face.0, face.1, r / TICK) {
+                    Some((p, t)) => { *ot = [p[0] - t[0] * sg, p[1] - t[1] * sg, p[2] - t[2] * sg]; *dt3 = t; true }
+                    None => false,
+                }
+            };
+            if !found {
+                if grazed && bends < 4 && sx <= end && bend(sx, &mut ot, &mut dt3) { bends += 1; from = sx; continue; }
+                break;
+            }
+            // Met at a shallow angle (under `PUNCH_GRAZE`: about 20 degrees to the face its middle line comes in by),
+            // it is a glancing hit: the body is turned by it, as any body is, and nothing is crushed ahead of it.
+            {
+                let back = rh + 2.0;
+                let c = at(first - back);
+                if let Some((_, tt, axis)) = self.b.raycast(c, dt3, back + 3.0) { if tt <= back + 2.5 && dt3[axis].abs() < PUNCH_GRAZE { break; } }
+            }
+            things += 1;
+            // its bricks, fine enough to take a round hole out of
+            let mut q = first; while q <= last + 0.5 { self.b.refine_sphere(at(q), rh + 1.0, 2); q += (rh * 0.5).max(1.0); }
+            let (a0, a1) = (at(first), at(last));
+            let lo = [floor(a0[0].min(a1[0]) - rh) as i32 - 2, floor(a0[1].min(a1[1]) - rh) as i32 - 2, floor(a0[2].min(a1[2]) - rh) as i32 - 2];
+            let hi = [floor(a0[0].max(a1[0]) + rh) as i32 + 3, floor(a0[1].max(a1[1]) + rh) as i32 + 3, floor(a0[2].max(a1[2]) + rh) as i32 + 3];
+            near.clear();
+            self.b.query(lo, hi, false, &mut near);
+            let mut way: Vec<(f32, u32, f32)> = Vec::new();
+            let core = PUNCH_CORE * r / TICK;
+            for &i in &near {
+                if !standing(&self.b, i) { continue; }
+                let c = centre(&self.b, i);
+                let e = [c[0] - ot[0], c[1] - ot[1], c[2] - ot[2]];
+                let ax = e[0] * dt3[0] + e[1] * dt3[1] + e[2] * dt3[2];
+                // (every brick that reaches into the way goes, not only those centred in it: a hole of bricks taken
+                // by their centres had teeth of up to half a brick, 0.43 m clear for a ball whose corners reach
+                // 0.49 m, and the ball caught the roof slab's edge at 47 m/s: lab tallball, 15 Nov)
+                let pa = at(ax);
+                let (dist, q) = reach_of(&self.b, i, pa);
+                if ax < first - rh || ax > last + 1.0 || dist * dist >= rh * rh - 0.01 { continue; }   // (touching is not in the way)
+                // (but not what only runs alongside: a brick outside the body's core, with standing
+                // material at the same place beside the path both before the thing and after it, is the floor it
+                // crosses the wall on, or a wall it passes along)
+                if dist >= core {
+                    // (0.3 of a tick inside the brick: its nearest point is on its face)
+                    let k = (dist + 0.3) / dist.max(1e-3);
+                    let off = [(q[0] - pa[0]) * k, (q[1] - pa[1]) * k, (q[2] - pa[2]) * k];
+                    let (p1, p2) = (at(first - 3.0), at(last + 3.0));
+                    if inside(&self.b, [p1[0] + off[0], p1[1] + off[1], p1[2] + off[2]], &mut buf) && inside(&self.b, [p2[0] + off[0], p2[1] + off[1], p2[2] + off[2]], &mut buf) { continue; }
+                }
+                let m = self.b.mat[i as usize];
+                way.push((ax, i, structure::crush_energy(m) * structure::mass(&self.b, i) / crate::brick::mat::density(m)));
+            }
+            way.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap().then(x.1.cmp(&y.1)));
+            // (where it begins: the near face of its nearest brick; the stations met it a hole's radius early)
+            let front = way.first().map_or(first, |w| { let sz = self.b.size(w.1); w.0 - 0.5 * (sz[0] as f32 * dt3[0].abs() + sz[1] as f32 * dt3[1].abs() + sz[2] as f32 * dt3[2].abs()) }).max(first);
+            // (what it gained or lost on the way here since the last thing)
+            left += gain * (front - gained) * TICK; gained = front;
+            if !(left > 0.0) { break; }
+            let (mut spent, mut depth, mut all) = (0.0f32, first, true);
+            let n0 = crumbs.len();
+            for &(ax, i, e) in &way {
+                if spent + e > left { all = false; break; }
+                spent += e; depth = depth.max(ax); crumbs.push(i);
+            }
+            // (nothing of it could be crushed: the body hits it as any body does, with what it has left)
+            if crumbs.len() == n0 && !all { break; }
+            // (stopped inside: what was left would not crush the next brick; it goes into the body and the wall as heat)
+            if !all { spent = left; }
+            for &i in &crumbs[n0..] { self.b.remove(i); }
+            // the momentum the body lost, as a hit on the structure where it went in
+            let (v0, v1) = (sqrt(2.0 * left / mass), sqrt(2.0 * (left - spent).max(0.0) / mass));
+            if self.dynamic && spent > 0.0 {
+                let (j, c) = (mass * (v0 - v1), at(first));
+                self.kicks.push(([(c[0] * TICK) as f64, (c[1] * TICK) as f64, (c[2] * TICK) as f64], [(d.x * j) as f64, (d.y * j) as f64, (d.z * j) as f64], structure::KICK_TIME));
+                if self.tiles.tile != 0 { let t = self.tiles.tile_of(c[0] as i32, c[2] as i32) as usize; if t < self.active.len() { self.active[t] = true; } }
+            }
+            left -= spent;
+            let through = open && all;
+            self.punch_out.extend_from_slice(&[front * TICK, spent, (depth * TICK).max(front * TICK), if through { 1.0 } else { 0.0 }]);
+            self.punch_out[0] += 1.0;
+            if !through || sx > end { break; }
+            if grazed { if bends < 4 && bend(sx, &mut ot, &mut dt3) { bends += 1; } else { break; } }
+            from = sx;
+        }
+        Some(crumbs)
+    }
+
     /// Load-path check of the standing structure under its own weight: joints over strength fail, and what
     /// is no longer held up detaches. Call repeatedly while it reports failures (progressive collapse).
     /// At most `max_fail` joints fail per call, the most overloaded first.
@@ -566,7 +861,7 @@ impl Sim {
         // (the time since the last step, between a 120th of a second and `DYN_MAX_DT`: a structure at rest that is
         // changed now moves from now, however long ago its last step was)
         let h = if self.dynamic && self.struct_dt > 0.0 { (self.struct_dt as f64).clamp(1.0 / 120.0, DYN_MAX_DT as f64) } else { 0.0 };
-        self.view_bricks.clear(); self.view_vel.clear();
+        self.view_bricks.clear(); self.view_vel.clear(); self.motion_cells.clear();
         self.moving = false; self.dyn_speed = 0.0; self.dyn_its = 0; self.dyn_kinetic = 0.0; self.dyn_left = 0; self.dyn_cut = 0; self.dyn_capped = false;
         let a = if self.dynamic {
             let mut by: crate::Map<usize, Vec<usize>> = Default::default();
@@ -591,6 +886,7 @@ impl Sim {
                 // (the view: a lot is written when it is first asked for and when its step changed something. Every
                 // analysed lot written at each step, the 8 x 8 city's lots with rubble or furniture on their floors
                 // came again every second, 279,622 numbers, and the page remeshed for them: 3 frames a second)
+                if st.1.moving() { for (c, v) in a.cells.iter().zip(st.1.cell_vel.iter()) { self.motion_cells.extend_from_slice(&[c.1[0] as f32, c.1[1] as f32, c.1[2] as f32, v[0] as f32, v[1] as f32, v[2] as f32, v[3] as f32, v[4] as f32, v[5] as f32]); } }
                 let sag = if self.view_bend { a.cells.iter().map(|c| c.2[0] * c.2[0] + c.2[1] * c.2[1] + c.2[2] * c.2[2]).fold(0.0, f64::max) } else { 0.0 };
                 if self.view_bend && sag >= VIEW_BEND * VIEW_BEND { st.1.bent = true; }
                 if self.view_want && (!self.view_bend || st.1.bent) && (!st.1.viewed || st.1.its > 0 || !a.failed.is_empty() || !a.cracks.is_empty()) { st.1.viewed = true; self.view_bricks.extend_from_slice(&s2); self.view_vel.extend_from_slice(&st.1.cell_vel); } else { a.cells.clear(); a.inner_all.clear(); }
@@ -1431,6 +1727,210 @@ mod tests {
         assert!(q1 > q0, "the crater adds faces");
         let mut r = g.b.clone(); r.build_joints(); assert_eq!(g.b.joint_set(), r.joint_set());
         assert!(g.b.detached().is_empty());
+    }
+    /// The steel ball goes on through what it breaks (15 Nov; lab `tallball` before: it met the 0.25 m roof slab at
+    /// 47 m/s and went back up at 12 m/s, 7.3 m high, and the slab broke under where it had been). A ball of 0.8 m
+    /// (2,104 kg) straight down onto the middle of a roof bay at 47 m/s has 2.32 MJ; the hole through 0.25 m of
+    /// concrete, 1.35 radii wide, is pi x 0.54^2 x 0.25 = 0.229 m3 and costs 0.229 MJ at 1 MJ/m3 (and up to a brick
+    /// more all round: 0.375 MJ here, 24 bricks of 0.25 m): it comes out under the slab with 1.95 MJ, 43.0 m/s. The same ball at 8 m/s (67 kJ) cannot: it crushes what 67 kJ crushes
+    /// (0.067 m3 at most) and stops in the slab.
+    #[test] fn a_fast_ball_goes_through_a_slab_and_a_slow_one_stops_in_it() {
+        let (r, m) = (0.4f32, 2104.0f32);
+        let top = 3.0 * 3.75 + 0.25;
+        let vol = |g: &Sim| -> f64 { (0..g.b.len() as u32).filter(|&i| g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).map(|i| g.b.volume(i)).sum() };
+        // fast: the roof only (reach 1 m)
+        let mut g = crate::tower::new(3);
+        let v0 = vol(&g);
+        let e = 0.5 * m * 47.0 * 47.0;
+        let n = g.punch(v3(7.5, top, 7.5), v3(0.0, -1.0, 0.0), r, e, m, 1.0, 0.0);
+        assert_eq!(g.punch_out[0], 1.0, "one thing within a metre: {:?}", g.punch_out);
+        let (begins, spent, depth, through) = (g.punch_out[1], g.punch_out[2], g.punch_out[3], g.punch_out[4]);
+        let gone = v0 - vol(&g);
+        let ideal = core::f32::consts::PI * (r * PUNCH_WIDTH) * (r * PUNCH_WIDTH) * 0.25;
+        std::println!("fast: {n} crumbs and pieces, spent {:.0} kJ (a round hole: {:.0} kJ), from {begins:.3} to {depth:.3} m, through {through}, {gone:.3} m3 gone", spent / 1e3, ideal * 1e3);
+        assert!(through == 1.0, "it comes out under the slab");
+        // (every brick reaching into the 0.54 m hole goes, so the hole is that and up to a brick, 0.25 m, more all round)
+        let most = core::f32::consts::PI * (r * PUNCH_WIDTH + 0.25) * (r * PUNCH_WIDTH + 0.25) * 0.25;
+        assert!(spent >= ideal * 1e6 && spent <= most * 1e6, "the energy of a round hole through the slab, and up to a brick more round it: {spent} J, between {} and {} J", ideal * 1e6, most * 1e6);
+        // the way is clear for the ball's corners (1.22 radii): no standing brick's box within that of the path
+        let clear = (0..g.b.len() as u32).filter(|&i| g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE).all(|i| {
+            let t = g.b.tbox(i);
+            if (t.max[1] as f32) * TICK <= top - 0.3 || (t.min[1] as f32) * TICK >= top { return true; }
+            let near = |lo: i32, hi: i32, c: f32| (c.max(lo as f32 * TICK).min(hi as f32 * TICK) - c).abs();
+            let (dx, dz) = (near(t.min[0], t.max[0], 7.5), near(t.min[2], t.max[2], 7.5));
+            dx * dx + dz * dz >= (1.22 * r) * (1.22 * r)
+        });
+        assert!(clear, "nothing of the slab is left in the ball's way");
+        assert!(depth <= 0.26, "the slab and no more: {depth}");
+        // (what is gone is the hole that was paid for and what spalls off its fracture surface, `shatter_pending`,
+        // as round any break)
+        assert!(gone as f32 >= spent / 1e6 - 0.005 && gone as f32 <= spent / 1e6 + 0.15, "what is gone is what was paid for, and the spall (0.118 m3 here): {gone} m3, {spent} J");
+        let mut rb = g.b.clone(); rb.build_joints(); assert_eq!(g.b.joint_set(), rb.joint_set());
+        // fast, looking 12 m ahead: the roof and the three floors under it, 3.75 m apart, each paid for from what
+        // the one before left (no gravity in the engine's sum: the page adds what the ball gains on the way)
+        let mut g = crate::tower::new(3);
+        g.punch(v3(7.5, top, 7.5), v3(0.0, -1.0, 0.0), r, e, m, 12.0, 0.0);
+        let po = g.punch_out.clone();
+        std::println!("fast, 12 m: {po:?}");
+        assert_eq!(po[0], 4.0, "the roof, two floors and the ground slab");
+        for k in 0..4 { let q = &po[1 + 4 * k..5 + 4 * k]; assert!((q[0] - 3.75 * k as f32).abs() < 0.13 && q[1] > 0.2e6 && q[1] < 0.5e6 && (q[3] == 1.0 || k == 3), "thing {k}: {q:?}"); }
+        // slow
+        let mut g = crate::tower::new(3);
+        let v0 = vol(&g);
+        let e = 0.5 * m * 8.0 * 8.0;
+        g.punch(v3(7.5, top, 7.5), v3(0.0, -1.0, 0.0), r, e, m, 12.0, 0.0);
+        assert_eq!(g.punch_out[0], 1.0);
+        let (spent, depth, through) = (g.punch_out[2], g.punch_out[3], g.punch_out[4]);
+        let gone = v0 - vol(&g);
+        std::println!("slow: spent {:.0} kJ of {:.0}, to {depth:.3} m, through {through}, {gone:.3} m3 gone", spent / 1e3, e / 1e3);
+        assert!(through == 0.0 && spent == e, "it stops in the slab with nothing left");
+        assert!(gone as f32 <= e / 1e6 + 0.15 && gone > 0.02, "it crushed no more than its energy pays for (and the spall), and something: {gone} m3");
+        // slow, with its weight: 67 kJ and 20.6 kJ a metre gained falling (2,104 kg): the roof takes what it has; had
+        // it 400 kJ, the roof takes 375 and the next floor, 3.75 m and 77 kJ of fall further, takes the 102 left
+        let mut g = crate::tower::new(3);
+        g.punch(v3(7.5, top, 7.5), v3(0.0, -1.0, 0.0), r, 400e3, m, 12.0, m * 9.81);
+        let po = g.punch_out.clone();
+        std::println!("400 kJ falling: {po:?}");
+        assert!(po[0] == 2.0 && po[2] == 375e3 && po[4] == 1.0 && (po[6] - (25e3 + m * 9.81 * 3.75)).abs() < 500.0 && po[8] == 0.0, "{po:?}");
+        // nothing there: nothing happens
+        let mut g = crate::tower::new(3);
+        assert_eq!(g.punch(v3(40.0, 5.0, 40.0), v3(0.0, -1.0, 0.0), r, e, m, 5.0, 0.0), 0);
+        assert_eq!(g.punch_out, [0.0]);
+    }
+    /// What is in a ball's way and what is not (15 Nov; lab `qballglass` before: a 0.5 m ball crossing a partition
+    /// 0.4 m above a floor had the floor counted as one thing 3 m long and paid 316 kJ of its 925 for it, and stopped).
+    /// On the first floor of the frame, a ball of 0.5 m flying level 0.3 m above the floor (its underside 0.05 m off
+    /// it) to the first wall in its way: the wall is one thing and it goes through it; the floor, which its hole's
+    /// width reaches into, is not touched. And the same ball coming down onto the floor at 4 degrees: a glancing hit,
+    /// nothing is crushed (the contact turns it).
+    #[test] fn a_ball_goes_through_the_wall_and_not_the_floor_it_flies_over() {
+        let (r, m, e) = (0.25f32, 514.0f32, 925e3f32);
+        let floor_top = 3.75 + 0.25;
+        let slab_vol = |g: &Sim| -> f64 { (0..g.b.len() as u32).filter(|&i| g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && g.b.paint[i as usize] == 0 && g.b.mat[i as usize] == crate::brick::mat::CONCRETE).map(|i| g.b.volume(i)).sum() };
+        let mut g = crate::tower::new(3);
+        let (o, d) = (v3(9.0, floor_top + 0.3, 0.5), v3(-1.0, 0.0, 0.0));
+        let t = g.raycast(o, d, 20.0);
+        assert!(t > 0.5 && t < 8.0, "a wall ahead: {t}");
+        let s0 = slab_vol(&g);
+        g.punch(o + d * t, d, r, e, m, 1.0, 0.0);
+        let po = g.punch_out.clone();
+        std::println!("level, 0.3 m over the floor: the wall at {t:.3} m; {po:?}; floor gone {:.4} m3", s0 - slab_vol(&g));
+        assert!(po[0] == 1.0 && po[4] == 1.0 && po[2] > 1e3 && po[2] < 150e3, "one thing, gone through, for little: {po:?}");
+        // (without the rule: 112.5 kJ, 0.1675 m3 of the floor gone with the partition. With it: 18.75 kJ, the
+        // partition's own 0.094 m3 of timber, and 0.018 m3 of the floor, which is what spalls off it where the
+        // partition is torn from it, `shatter_pending`)
+        assert!(po[2] < 30e3 && s0 - slab_vol(&g) < 0.03, "the floor it flies over is not crushed: {} J, {} m3 of the floor gone", po[2], s0 - slab_vol(&g));
+        // glancing: onto the floor at 4 degrees, in the middle of an office
+        let mut g = crate::tower::new(3);
+        let a = 4.0f32.to_radians();
+        let d = v3(-a.cos(), -a.sin(), 0.0);
+        let hit = v3(9.0, floor_top, 8.0);
+        let s0 = slab_vol(&g);
+        let n = g.punch(hit, d, r, e, m, 4.0, 0.0);
+        std::println!("glancing at 4 degrees: {n} crumbs, {:?}; floor gone {:.4} m3", g.punch_out, s0 - slab_vol(&g));
+        assert!(n == 0 && g.punch_out == [0.0] && (s0 - slab_vol(&g)).abs() < 1e-6, "a glancing hit crushes nothing");
+        // and steeply onto the same floor, at 45 degrees: it goes through it
+        let mut g = crate::tower::new(3);
+        let d = v3(-0.7071, -0.7071, 0.0);
+        g.punch(hit, d, r, e, m, 1.0, 0.0);
+        std::println!("at 45 degrees: {:?}", g.punch_out);
+        assert!(g.punch_out[0] == 1.0 && g.punch_out[4] == 1.0, "at 45 degrees it goes through the floor: {:?}", g.punch_out);
+    }
+    #[test] fn a_ball_breaks_the_jamb_it_catches_and_is_turned_by_the_floor_it_comes_down_on() {
+        // Lab qballglass, 15 Nov (a 0.5 m, 514 kg ball at 60 m/s through the glass house, end to end): it went through
+        // the core's 0.75 m door 0.2 m off its middle and caught the jamb with its side, which nothing had looked
+        // for (the look-ahead saw only the 0.5 of its radius round its line): out at 39 m/s, 0.2 m off its line, onto
+        // the rim of the hole made for it in the next wall, and back at 14 m/s. And the path looked along, falling,
+        // went into the floor beyond that wall: 3 m of the floor's deck and steel beams were crushed ahead of it,
+        // 603 kJ of its 925.
+        // Here: a floor (0.25 m of concrete, its top at 0.25 m), a timber partition across it at x = 0 with a door
+        // 0.75 m wide (z -0.375 to 0.375) and 2 m high, a second partition 2 m behind.
+        use crate::brick::mat;
+        let build = || {
+            let mut b = Bricks::new();
+            for x in -5..5 { for z in -2..2 { b.add([x * 8, 0, z * 8], [8, 2, 8], mat::CONCRETE, 0, 1); } }
+            for &(z0, z1, y0) in &[(-16, -3, 2), (3, 16, 2), (-3, 3, 18)] { b.add([0, y0, z0], [1, 22 - y0, z1 - z0], mat::TIMBER, 0, 2); }
+            b.add([16, 2, -16], [1, 20, 32], mat::TIMBER, 0, 3);
+            b.build_joints(); b.log.clear();
+            Sim::from_bricks(b, Tiles { tile: 0, n: 1, slices: 2 })
+        };
+        let vol = |g: &Sim, m: u8| -> f64 { (0..g.b.len() as u32).filter(|&i| g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) == F_ALIVE && g.b.mat[i as usize] == m).map(|i| g.b.volume(i)).sum() };
+        let (r, m, e) = (0.25f32, 514.0f32, 925e3f32);
+        let old = |on: bool| WAY_OLD.store(on, core::sync::atomic::Ordering::Relaxed);
+        // 1. level through the door, 1 m over the floor, 0.2 m off the door's middle: its side overlaps the jamb by
+        // 0.075 m (the jamb is 0.7 of its radius from its line)
+        let (o, d) = (v3(-3.0, 1.25, 0.2), v3(1.0, 0.0, 0.0));
+        let mut res = [(0.0f32, [0.0f32; 2], 0.0f64); 2];
+        for (k, &was) in [true, false].iter().enumerate() {
+            old(was);
+            let mut g = build();
+            let t = g.sweep(o, d, r, 15.0);
+            let ray = g.raycast(o, d, 15.0);
+            let t0 = if was { ray } else { t };
+            let (w0, f0) = (vol(&g, mat::TIMBER), vol(&g, mat::CONCRETE));
+            g.punch(o + d * t0, d, r, e, m, 3.0, 0.0);
+            std::println!("{}: first thing at {t0:.3} m (the centre line's ray: {ray:.3}); {:?}; timber gone {:.4} m3, floor gone {:.4} m3", if was { "before" } else { "after" }, g.punch_out, w0 - vol(&g, mat::TIMBER), f0 - vol(&g, mat::CONCRETE));
+            // what is left of the jamb within the ball's own radius of its line, between the partitions
+            let mut left = 0.0f64;
+            for i in 0..g.b.len() as u32 { if g.b.flags[i as usize] & (F_ALIVE | F_DYNAMIC) != F_ALIVE || g.b.mat[i as usize] != mat::TIMBER { continue; }
+                let c = [(g.b.tbox(i).min[0] as f32) * TICK, 1.25 / TICK, 0.2 / TICK];
+                if g.b.tbox(i).min[0] > 4 { continue; }
+                if way_reach(&g.b, i, [c[0] / TICK, c[1], c[2]]).0 * TICK < r { left += g.b.volume(i); } }
+            res[k] = (t0, [g.punch_out[0], if g.punch_out[0] > 0.0 { g.punch_out[1] } else { -1.0 }], left);
+        }
+        old(false);
+        std::println!("the jamb: before {:?}, after {:?}", res[0], res[1]);
+        // before: the first thing is the second partition (5 m on), the jamb still stands in the ball's way.
+        // (0.51 m3 of timber within the ball's radius of its line). after: the first thing is the jamb (3 m on, where
+        // the ball is level with it; 6.6 kJ), then the second partition (20.3 kJ); nothing of the jamb is left
+        // within the ball's radius of its line
+        assert!(res[0].0 > 4.9 && res[0].2 > 0.0, "before: {:?}", res[0]);
+        assert!(res[1].0 > 2.5 && res[1].0 < 3.01 && res[1].1[0] == 2.0 && res[1].2 == 0.0, "after: {:?}", res[1]);
+        // 2. coming down at 3.5 degrees: its line meets the second partition 0.2 m over the floor (its centre is
+        // lower than its radius there: it has landed before, 1 m short)
+        let a = 3.5f32.to_radians();
+        let d = v3(a.cos(), -a.sin(), 0.0);
+        let hit = v3(2.0, 0.25 + 0.2, -1.0);
+        let o = hit - d * 4.0;   // (through the first partition, its head being left out: z = -1 is in the wall, so start behind it)
+        let o = v3(0.3, o.y + (0.3 - o.x) * 0.0, -1.0); let o = v3(o.x, hit.y + (hit.x - o.x) * a.tan(), o.z);
+        for &was in &[true, false] {
+            old(was);
+            let mut g = build();
+            let f0 = vol(&g, mat::CONCRETE);
+            let t = if was { g.raycast(o, d, 10.0) } else { g.sweep(o, d, r, 10.0) };
+            let n = if t >= 0.0 { g.punch(o + d * t, d, r, e, m, 6.0, 0.0) } else { 0 };
+            let gone = f0 - vol(&g, mat::CONCRETE);
+            let spent: f32 = (0..g.punch_out.first().map_or(0, |&n| n as usize)).map(|k| g.punch_out[2 + 4 * k]).sum();
+            std::println!("{} at 3.5 degrees: the first thing at {t:.3} m; {n} crumbs, {:?}; floor gone {gone:.4} m3, {spent:.0} J", if was { "before" } else { "after" }, g.punch_out);
+            // before: on through the partition and along the floor (547 kJ, 0.88 m3 of the floor). after: it
+            // comes to the floor 0.5 m on (the path bends there, and goes on along the floor), goes through the
+            // partition (1.2 m further) for what the partition takes, and the floor stays but for what is torn off with it
+            if was { assert!(gone > 0.2 && spent > 100e3, "before: {gone} m3, {spent} J"); }
+            else { assert!(t > 0.3 && t < 1.7 && g.punch_out[0] == 1.0 && g.punch_out[4] == 1.0 && spent < 30e3 && gone < 0.03, "after: {t}, {gone}, {:?}", g.punch_out); }
+        }
+        old(false);
+        // (and asked without doing it, `punch_probe`: the same answer, nothing changed)
+        {
+            let mut g = build();
+            let (n0, j0, t0) = (g.b.alive_count(), g.b.live_joints, vol(&g, mat::TIMBER));
+            let (o, d) = (v3(-3.0, 1.25, 0.2), v3(1.0, 0.0, 0.0));
+            g.punch_probe(o + d * 3.0, d, r, e, m, 3.0, 0.0);
+            let asked = g.punch_out.clone();
+            assert!(g.b.alive_count() == n0 && g.b.live_joints == j0 && vol(&g, mat::TIMBER) == t0, "a question changes nothing");
+            g.punch(o + d * 3.0, d, r, e, m, 3.0, 0.0);
+            assert_eq!(asked, g.punch_out, "and is answered as the hit is");
+        }
+        // 3. and rolling on the floor (its centre its radius over it; the floor is beside its path, before and
+        // after): the partitions go, the floor stays
+        let mut g = build();
+        let f0 = vol(&g, mat::CONCRETE);
+        let (o, d) = (v3(-3.0, 0.25 + r, -1.0), v3(1.0, 0.0, 0.0));
+        let t = g.sweep(o, d, r, 15.0);
+        g.punch(o + d * t, d, r, e, m, 3.0, 0.0);
+        std::println!("rolling on the floor: first thing at {t:.3} m; {:?}; floor gone {:.4} m3", g.punch_out, f0 - vol(&g, mat::CONCRETE));
+        assert!((t - 3.0).abs() < 0.3 && g.punch_out[0] == 2.0 && g.punch_out[4] == 1.0 && g.punch_out[8] == 1.0 && f0 - vol(&g, mat::CONCRETE) < 0.04, "{:?}", g.punch_out);
+        // (0.036 m3 of the floor: what spalls off it where the two partitions are torn from it, 0.018 m3 each, as in
+        // the test before this one)
     }
     #[test] fn raycast_hits_the_facade() {
         let mut g = crate::tower::new(2);

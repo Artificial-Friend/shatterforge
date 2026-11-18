@@ -15,6 +15,7 @@ onmessage = async (m) => {
   const t0 = performance.now();
   let n = 0;
   if (d.op === 'blast') n = E.blast(d.x, d.y, d.z, d.r);
+  else if (d.op === 'punch') n = E.punch(d.x, d.y, d.z, d.dx, d.dy, d.dz, d.r, d.energy, d.mass, d.reach, d.gain);
   else if (d.op === 'structure') { E.set_param(4, d.dt || 0); if (d.rest) E.rest_begin(); if (d.rest) for (let k = 0; k < d.rest.length; k += 4) E.rest_load(d.rest[k], d.rest[k + 1], d.rest[k + 2], d.rest[k + 3]); n = E.structure_step(d.max); }
   else if (d.op === 'pblast') n = E.piece_blast(d.piece, d.x, d.y, d.z, d.r);
   else if (d.op === 'impacts') { const p = E.impacts_in(d.recs.length / 11); new Float32Array(E.memory.buffer, p, d.recs.length).set(d.recs); n = E.impacts(d.dt); }
@@ -25,7 +26,7 @@ onmessage = async (m) => {
   // (a structure step that failed nothing may still send pieces off: loose room contents, at the first one)
   const detached = d.op === 'structure' && E.last_detached ? E.last_detached() : 0;
   if (n > 0 || detached > 0) { const len = E.snap_save(); snap = new Uint8Array(E.memory.buffer, E.snap_ptr(), len).slice(); }
-  const r = { op: d.op, n, detached, out, snap, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans, ms: performance.now() - t0, moving: E.structure_dyn ? E.structure_dyn(0) > 0 : false, dynSpeed: E.structure_dyn ? E.structure_dyn(1) : 0, dynIts: E.structure_dyn ? E.structure_dyn(2) : 0, sag: E.structure_dyn ? E.structure_dyn(4) : 0, dynLeft: E.structure_dyn ? E.structure_dyn(5) : 0, dynCut: E.structure_dyn ? E.structure_dyn(6) : 0, dynCapped: E.structure_dyn ? E.structure_dyn(7) : 0, view: (d.op === 'structure' && E.view_len && E.view_len()) ? new Float32Array(E.memory.buffer, E.view_ptr(), E.view_len()).slice() : null };
+  const r = { op: d.op, n, detached, punch: d.op === 'punch' ? Array.from(new Float32Array(E.memory.buffer, E.punch_ptr(), E.punch_len())) : null, out, snap, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), plans, ms: performance.now() - t0, moving: E.structure_dyn ? E.structure_dyn(0) > 0 : false, dynSpeed: E.structure_dyn ? E.structure_dyn(1) : 0, dynIts: E.structure_dyn ? E.structure_dyn(2) : 0, sag: E.structure_dyn ? E.structure_dyn(4) : 0, dynLeft: E.structure_dyn ? E.structure_dyn(5) : 0, dynCut: E.structure_dyn ? E.structure_dyn(6) : 0, dynCapped: E.structure_dyn ? E.structure_dyn(7) : 0, motion: (d.op === 'structure' && E.motion_cells_len) ? new Float32Array(E.memory.buffer, E.motion_cells_ptr(), E.motion_cells_len()).slice() : null, view: (d.op === 'structure' && E.view_len && E.view_len()) ? new Float32Array(E.memory.buffer, E.view_ptr(), E.view_len()).slice() : null };
   postMessage(r, snap ? [out.buffer, snap.buffer, plans.buffer] : [out.buffer, plans.buffer]);
 };`;
 let worker = null, busy = null;
@@ -46,18 +47,19 @@ function runInline(job) {
   const t0 = performance.now();
   let n = 0;
   if (job.op === 'blast') n = E.blast(job.x, job.y, job.z, job.r);
+  else if (job.op === 'punch') n = E.punch(job.x, job.y, job.z, job.dx, job.dy, job.dz, job.r, job.energy, job.mass, job.reach, job.gain);
   else if (job.op === 'structure') { E.set_param(4, job.dt || 0); if (job.rest) E.rest_begin(); if (job.rest) for (let k = 0; k < job.rest.length; k += 4) E.rest_load(job.rest[k], job.rest[k + 1], job.rest[k + 2], job.rest[k + 3]); n = E.structure_step(job.max); }
   else if (job.op === 'pblast') n = E.piece_blast(job.piece, job.x, job.y, job.z, job.r);
   else if (job.op === 'snap') { const o = []; for (const pc of job.pieces) { n += E.piece_snap(pc); o.push(...new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len())); } job.outs = o; }
   else { const p = E.impacts_in(job.recs.length / 11); new Float32Array(E.memory.buffer, p, job.recs.length).set(job.recs); n = E.impacts(job.dt); }
-  return { op: job.op, n, detached: job.op === 'structure' && E.last_detached ? E.last_detached() : 0, out: job.op === 'snap' ? Float32Array.from(job.outs) : new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), moving: E.structure_dyn ? E.structure_dyn(0) > 0 : false, dynSpeed: E.structure_dyn ? E.structure_dyn(1) : 0, dynIts: E.structure_dyn ? E.structure_dyn(2) : 0, sag: E.structure_dyn ? E.structure_dyn(4) : 0, dynLeft: E.structure_dyn ? E.structure_dyn(5) : 0, dynCut: E.structure_dyn ? E.structure_dyn(6) : 0, dynCapped: E.structure_dyn ? E.structure_dyn(7) : 0, view: (job.op === 'structure' && E.view_len && E.view_len()) ? new Float32Array(E.memory.buffer, E.view_ptr(), E.view_len()).slice() : null, plans: new Float32Array(E.memory.buffer, E.plan_ptr(), E.plan_len()).slice(), ms: performance.now() - t0, inline: true };
+  return { op: job.op, n, punch: job.op === 'punch' ? Array.from(new Float32Array(E.memory.buffer, E.punch_ptr(), E.punch_len())) : null, detached: job.op === 'structure' && E.last_detached ? E.last_detached() : 0, out: job.op === 'snap' ? Float32Array.from(job.outs) : new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice(), snap: null, lo: E.dirty_lo(), hi: E.dirty_hi(), ratio: E.structure_ratio(), wearing: E.structure_wearing(), worn: E.worn_total(), dust: E.dust_bricks(), cracked: E.cracked_total(), restOn: E.rest_applied(), moving: E.structure_dyn ? E.structure_dyn(0) > 0 : false, dynSpeed: E.structure_dyn ? E.structure_dyn(1) : 0, dynIts: E.structure_dyn ? E.structure_dyn(2) : 0, sag: E.structure_dyn ? E.structure_dyn(4) : 0, dynLeft: E.structure_dyn ? E.structure_dyn(5) : 0, dynCut: E.structure_dyn ? E.structure_dyn(6) : 0, dynCapped: E.structure_dyn ? E.structure_dyn(7) : 0, motion: (job.op === 'structure' && E.motion_cells_len) ? new Float32Array(E.memory.buffer, E.motion_cells_ptr(), E.motion_cells_len()).slice() : null, view: (job.op === 'structure' && E.view_len && E.view_len()) ? new Float32Array(E.memory.buffer, E.view_ptr(), E.view_len()).slice() : null, plans: new Float32Array(E.memory.buffer, E.plan_ptr(), E.plan_len()).slice(), ms: performance.now() - t0, inline: true };
 }
 // Rubble lying on the building weighs on it: once a second the weight of the debris at rest (bodies slower than
 // 0.5 m/s and particles asleep) goes to the engine with a structure check, binned in 0.5 m cells; the engine
 // puts each on the standing brick under it, and a floor heaped too high gives way.
 const REST_EVERY = 1000;   // ms (clock() is in ms, real or the lab's virtual one)
 let restNext = 0, restSent = 0, restOnFloors = 0, crackedJoints = 0, restParts = 0, restBodies = 0;
-const DENS = [2400, 1900, 7850, 2500, 500];
+const DENS = [2400, 1900, 7850 * 0.16, 2500, 500];   // (steel: a rolled section in its box, bodies.js debrisDensity)
 function restLoads() {
   const bins = new Map();
   const add = (x, y, z, f) => {
@@ -76,7 +78,7 @@ function restLoads() {
   if (pr && pr.list) for (const i of pr.list) {
     const d = pr.data, inf = pInfo[i];
     if (d[i * 12 + 10] !== 2 || !inf) continue;
-    const m = 8 * inf.h[0] * inf.h[1] * inf.h[2] * (DENS[(inf.col || 0) & 15] || 2000);
+    const m = 8 * inf.h[0] * inf.h[1] * inf.h[2] * (DENS[(inf.col || 0) & 7] || 2000) * ((inf.col || 0) & 8 ? 0.2 : 1);   // (a loose object's: bodies.js codeDensity)
     if (d[i * 12 + 1] > 1) partW += m * 9.81;
     add(d[i * 12], d[i * 12 + 1], d[i * 12 + 2], m * 9.81);
   }
@@ -126,7 +128,10 @@ function finishInner(r) {
   readPlans(r);
   // (a hit on the dynamic structure is a load of its next step: it must have one)
   if (r.op === 'impacts' && +setting.dynamic) jobs.structure = true;
+  // (the structure's moving cells, into the page's copy before what left it is made into bodies: motionAt)
+  if (r.op === 'structure' && r.motion && E.motion_cells_in) { const p = E.motion_cells_in(r.motion.length); if (r.motion.length) new Float32Array(E.memory.buffer, p, r.motion.length).set(r.motion); }
   if (r.op === 'blast') onBlast(job, r);
+  else if (r.op === 'punch') onPunch(job, r);
   else if (r.op === 'snap') onSnap(job, r);
   else if (r.op === 'pblast') onImpacts(job, r);
   else if (r.op === 'structure') onStructure(r);

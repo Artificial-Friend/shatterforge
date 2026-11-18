@@ -4,6 +4,7 @@ const SETTINGS = {
   realtime: { el: 's-realtime', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
   adaptive: { el: 's-adaptive', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: v => { if (gpu && !+v) gpu.substeps = setting.substeps || 12; } },
   restLoads: { el: 's-restLoads', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
+  punch: { el: 's-punch', def: 1, fmt: v => (+v ? 'on' : 'off'), apply: () => {} },
   // (the engineer's view: load / strength as colour, and the displacements drawn larger; key V)
   view: { el: 's-view', def: 0, fmt: v => (+v ? 'on' : 'off'), apply: () => applyView() },
   viewScale: { el: 's-viewScale', def: 1, fmt: v => (VIEW_SCALE[+v] ? `× ${VIEW_SCALE[+v]}` : 'not drawn'), apply: () => { if (+setting.view) applyView(); } },
@@ -48,11 +49,6 @@ try { new PerformanceObserver(l => { for (const e of l.getEntries()) { longTasks
 function setParam(id, v) { if (E) E.set_param(id, +v); if (worker) worker.postMessage({ op: 'param', id, v: +v }); }
 function initSettings() {
   let saved = {}; try { saved = JSON.parse(localStorage.getItem('sf-settings') || '{}'); } catch (e) {}
-  const ks = $('s-kind'); ks.value = String(KIND);
-  const cs = $('s-city'); cs.value = String(CITY); setting.city = CITY;
-  cs.addEventListener('change', () => { setting.city = +cs.value; try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} if (KIND === 5) location.reload(); });
-  ks.addEventListener('change', () => { setting.kind = +ks.value; try { localStorage.setItem('sf-settings', JSON.stringify(setting)); } catch (e) {} location.reload(); });
-  setting.kind = KIND;
   for (const [k, d] of Object.entries(SETTINGS)) {
     // (the view starts off: it is a look, not a setting)
     const el = $(d.el); el.value = k === 'view' ? 0 : (saved[k] ?? d.def); setting[k] = +el.value; $('v-' + k).textContent = d.fmt(el.value); d.apply(setting[k]);

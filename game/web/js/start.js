@@ -4,13 +4,15 @@
     const bytes = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
     E = (await WebAssembly.instantiate(bytes, {})).instance.exports;
     E.game_new_kind(STOREYS, KIND);
-    $('title').textContent = ['A 12-storey concrete-frame tower at real scale', 'A 5-storey masonry building at real scale', 'A 6-storey mass-timber building at real scale', 'A 5-storey building of brick, steel, concrete and timber at real scale', 'A braced steel frame with a pitched timber roof and a masonry arcade, at real scale', `A city of ${STOREYS} × ${STOREYS} lots, a building of every kind, at real scale`][KIND];
-    if (KIND === 5) setupCity();
+    $('title').textContent = KIND === 6 ? 'The Quarter: nine lots of real buildings at real scale' : `Test building: ${KIND_NAMES[KIND]}`;
+    if (TILED) setupCity();
     for (let k = 0; k < E.chunk_count(); k++) chunkMesh(k);
     if (!LABSTATE) await startWorker(bytes);   // (the lab runs the engine inline, its jobs delayed by whole frames)
     initSettings(); initDiag(); initPreset(); initMenu();
     // (in the city: in the street east of the first lot, facing it)
-    if (KIND === 5) { const L0 = lots()[0]; E.player_set(L0.x + 20, 0.0, L0.z - 16); } else E.player_set(0, 0.0, -16);
+    // (the Quarter: on the crossing south-east of the market hall, looking north-west across it to the tower)
+    if (KIND === 6) { E.player_set(20, 0.0, -20); yaw = 0.75 * Math.PI; }
+    else if (KIND === 5) { const L0 = lots()[0]; E.player_set(L0.x + 20, 0.0, L0.z - 16); } else E.player_set(0, 0.0, -16);
   } catch (e) { $('warn').textContent = 'Could not start the engine: ' + e.message; return; }
   try {
     if (navigator.gpu) {

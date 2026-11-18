@@ -28,15 +28,18 @@ async function dispatchCost() {
 async function benchStart() {
   if (!gpu) return;
   BENCH.dispatchUs = await dispatchCost();
-  Math.random = seededRandom(20261103);
+  simRandom = seededRandom(20261103);
   BENCH.on = true; BENCH.phase = 'cutting the ground storey'; flick.vanished = 0; flick.jumps = 0;
   $('bench').hidden = false; $('bench-title').textContent = 'Benchmark: running';
   physicsPaused = true;
   // a fixed view from outside, looking at the tower
-  fly = true; E.player_set(-26, 10, -38); yaw = Math.PI + 0.62; pitch = -0.12;
+  // (the Quarter: from over the south-west, looking across the market hall to the mill and the office tower)
+  fly = true; if (KIND === 6) { E.player_set(-22, 30, -44); yaw = Math.PI + 0.75; pitch = -0.3; } else { E.player_set(-26, 10, -38); yaw = Math.PI + 0.62; pitch = -0.12; }
   const t = performance.now();
   // (the city: every lot's ground storey)
-  for (const L of lots()) for (let x = -10; x <= 10.1; x += 4) for (let z = -10; z <= 10.1; z += 4) jobs.blast.push({ op: 'blast', x: L.x + x, y: 1.8, z: L.z + z, r: 2.5, ctx: { d: [0, 0, 1], t0: t } });
+  // (the Quarter: the ground storeys of the office tower and the mill, and the balls at the market hall)
+  const cuts = KIND === 6 ? ['office', 'mill'].map(n => { const q = quarterAt(n, 0, 0, 0); return { x: q[0], z: q[2] }; }) : lots();
+  for (const L of cuts) for (let x = -10; x <= 10.1; x += 4) for (let z = -10; z <= 10.1; z += 4) jobs.blast.push({ op: 'blast', x: L.x + x, y: 1.8, z: L.z + z, r: 2.5, ctx: { d: [0, 0, 1], t0: t } });
   pump();
   await new Promise(res => { const c = () => (!busy && !jobs.blast.length) ? res() : setTimeout(c, 30); c(); });
   BENCH.cutMs = performance.now() - t;
@@ -54,7 +57,7 @@ function benchTick(now, dt) {
     const rest = (gpu.stats.awake || 0) === 0 && (gpu.stats.pActive || 0) === 0;
     if (BENCH.phase === 'settling' && rest) { BENCH.phase = 'at rest'; BENCH.settledAt = f / 60; BENCH.restF = f; }
     if (BENCH.phase === 'at rest') { BENCH.restMs.push(dt * 1000); BENCH.restGpu.push(g); }
-    if ((BENCH.phase === 'at rest' && f - BENCH.restF >= BENCH.restFrames) || f >= BENCH.settleEnd) { BENCH.on = false; BENCH.phase = 'done'; Math.random = mathRandom; benchShow(true); }
+    if ((BENCH.phase === 'at rest' && f - BENCH.restF >= BENCH.restFrames) || f >= BENCH.settleEnd) { BENCH.on = false; BENCH.phase = 'done'; simRandom = () => Math.random(); benchShow(true); }
     else if (f % 60 === 0) { $('bench-title').textContent = `Benchmark: ${BENCH.phase} (${(f / 60).toFixed(0)} s)`; }
     // (a row every 2 s while it settles, so a report copied before the end shows the way there)
     if (f - BENCH.lastRow >= 120) { BENCH.lastRow = f; BENCH.rows.push({ sim: f / 60, wall: (now - BENCH.wall0) / 1000, fps, steps: rate.steps, gpu: g, gpuStages: gpu.gpuMs ? { ...gpu.gpuMs } : null, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, breaks, dust: dustBricks, impacts: impactMs, structure: failedJoints, roof: BENCH.rows.length ? BENCH.rows[BENCH.rows.length - 1].roof : 0, bad: 0, vanished: flick.vanished, jumps: flick.jumps, parts: gpu.stats.pLive || 0, pAwake: gpu.stats.pActive || 0, skipped: gpu.skipped || 0, sub: gpu.substeps }); benchShow(); }
@@ -66,7 +69,7 @@ function benchTick(now, dt) {
   while (BENCH.next < BENCH.balls.length && f >= BENCH.balls[BENCH.next][0]) {
     const [, x, y, z, yw, pt] = BENCH.balls[BENCH.next++];
     const d = [Math.sin(yw) * Math.cos(pt), Math.sin(pt), Math.cos(yw) * Math.cos(pt)];
-    gpu.addBodies([{ shapes: ballShapes([x, y, z], 0.4), v: [d[0] * 120, d[1] * 120, d[2] * 120], w: [0, 0, 0] }]); lastActive = clock();
+    throwBall([x, y, z], 0.4, [d[0] * 120, d[1] * 120, d[2] * 120]);
   }
   if (f - BENCH.lastRow >= 60 || f >= BENCH.end) {
     BENCH.lastRow = f;
@@ -79,7 +82,6 @@ function benchTick(now, dt) {
   }
   if (f >= BENCH.end) { BENCH.phase = 'settling'; benchShow(); }
 }
-const mathRandom = Math.random;
 function benchShow(done) {
   const r = BENCH.rows, last = r[r.length - 1] || {};
   const fm = BENCH.frameMs.slice().sort((a, b) => a - b), pct = (q) => fm.length ? fm[Math.min(fm.length - 1, Math.floor(q * fm.length))] : 0;

@@ -9,6 +9,14 @@ pub mod tower;
 pub mod complex;
 pub mod city;
 pub mod player;
+pub mod kit;
+pub mod farnsworth;
+pub mod savoye;
+pub mod temple;
+pub mod aqueduct;
+pub mod barn;
+pub mod works;
+pub mod quarter;
 
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]

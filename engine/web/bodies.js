@@ -2,6 +2,11 @@
 // A piece's bricks stay in the engine in the tower's own frame; the GPU body moves them. For each body we keep
 // the map from the tower frame to the world at the body's creation (C, qs, P) and the body's pose then (p0, q0):
 //   world(x) = p(t) + R(q(t)) R(q0)^T (P + R(qs) (x - C) - p0)
+// The simulation's own random numbers (the scatter of crumbs, a broken brick's fracture pattern). Not Math.random:
+// the benchmark and the lab seed them, and three.js draws from Math.random for every object it makes, so what was
+// drawn changed what fell (lab `collapse --twice-view`, 15 Nov: with the engineer's view on, more meshes were made
+// before the first crumbs, and the crumbs got other velocities).
+let simRandom = () => Math.random();
 const bodyInfo = new Map();   // GPU body (1-based) -> { piece, C, qs, P, p0, q0, cool }
 let lastBodies = null, lastVel = null, lastAng = null, velHist = [], lastReadFrame = -1;
 // A body's state from the latest read-back, when that read-back saw it: a body made since (a piece just cut
@@ -33,14 +38,25 @@ function readBodies(f, o) {
   }
   return { bodies, o };
 }
+// What a material weighs as debris (kg per m3 of the shape drawn): the GPU's material, but steel. A steel member is
+// a rolled section in the box it is drawn as: the engine weighs and rates it at 16% of the box (structure::
+// STEEL_AREA), and until 15 Nov the same member, once it fell, weighed the solid box, 6.25 times as much (a 6 m
+// beam 2,944 kg for 471 kg), and hit what it landed on with that.
+const STEEL_AREA = 0.16;
+function debrisDensity(m) { return m === 2 ? 7850 * STEEL_AREA : (MATERIALS[m] || MATERIALS[0]).density; }
+// A box's code from the engine: material (0 to 4) + 8 if it is of a loose object (furniture: a shell round air, a
+// fifth of its box, structure::LOOSE_FILL) + 16 x paint + 512 x hull. What it weighs per m3 drawn:
+const LOOSE_FILL = 0.2;
+function codeDensity(code) { return debrisDensity(code & 7) * (code & 8 ? LOOSE_FILL : 1); }
 function boxShape(f, o) {
   const [x, y, z, sx, sy, sz, code] = [f[o], f[o + 1], f[o + 2], f[o + 3], f[o + 4], f[o + 5], f[o + 6]];
   // the engine sends material + 16 x paint (the material drives physics, both the colour) + 512 x hull: a convex
   // cell of the hull library (the engine's and the GPU's are the same, engine/gpu/test_hulls.cjs), mapped into the box
   const p = [(x + sx / 2) * TICK, (y + sy / 2) * TICK, (z + sz / 2) * TICK], h = [sx * TICK / 2, sy * TICK / 2, sz * TICK / 2];
-  const hull = Math.floor(code / 512), s = { p, q: [0, 0, 0, 1], h, mat: code & 15, col: code & 255, hull: 0 };
+  const hull = Math.floor(code / 512), s = { p, q: [0, 0, 0, 1], h, mat: code & 7, col: code & 255, hull: 0 };
+  { const dn = codeDensity(code); if (dn !== MATERIALS[s.mat].density) s.density = dn; }
   // a free piece (docs/PHASE2.md): 256 + its index in the engine; its shape is its own hull, turned
-  if (hull >= 256) { const ps = pieceShapeOf(hull - 256, code); if (ps) return ps; piecesAsBoxes++; return s; }
+  if (hull >= 256) { const ps = pieceShapeOf(hull - 256, code); if (ps) { if (s.density) ps.density = s.density; return ps; } piecesAsBoxes++; return s; }
   if (hull && GpuWorld.hulls && hull < GpuWorld.hulls.lib) {
     const bx = GpuWorld.hulls.hulls[hull].box;
     s.p = p.map((c, k) => c + bx.c[k] * h[k]); s.h = h.map((x, k) => x * bx.h[k]); s.hull = hull;
@@ -59,7 +75,7 @@ function pieceShapeOf(k, code) {
   for (let i = 0; i < nv; i++, o += 3) corners.push([f[o], f[o + 1], f[o + 2]]);
   const nf = f[o++], loops = [];
   for (let i = 0; i < nf; i++) { const c = f[o++]; loops.push(Array.from(f.subarray(o, o + c))); o += c; }
-  return GpuWorld.pieceShape(corners, loops, centre, q, code & 15, code & 255);
+  return GpuWorld.pieceShape(corners, loops, centre, q, code & 7, code & 255);
 }
 // a shape's volume (a cell: its share of its own box)
 const shapeVol = (s) => 8 * s.h[0] * s.h[1] * s.h[2] * (s.hull ? GpuWorld.hulls.hulls[s.hull].vol : 1);
@@ -219,8 +235,8 @@ function addPieces(list, xf, vel, cool) {
       if (b.chunk || b.id >= 0 || b.boxes.length !== 1) { out.push(b); continue; }
       const s0 = boxShape(b.boxes[0], 0);
       if (Math.max(...s0.h) < 0.15 || s0.hull) { out.push(b); continue; }
-      const pat = Math.floor(Math.random() * GpuWorld.hulls.patterns.length);
-      for (const sh of GpuWorld.hullShapes(s0.p, [0, 0, 0, 1], s0.h, pat, s0.mat, s0.col)) out.push({ id: -1, boxes: b.boxes, chunk: sh, of: b });
+      const pat = Math.floor(simRandom() * GpuWorld.hulls.patterns.length);
+      for (const sh of GpuWorld.hullShapes(s0.p, [0, 0, 0, 1], s0.h, pat, s0.mat, s0.col)) { if (s0.density) sh.density = s0.density; out.push({ id: -1, boxes: b.boxes, chunk: sh, of: b }); }
     }
     list = out;
   }
@@ -261,6 +277,7 @@ function addPieces(list, xf, vel, cool) {
     const idx = idxs[k], gb = idx ? gpu.bodies[idx - 1] : null;
     if (!gb) return;
     bodyInfo.set(idx, { piece: b.id, n: b.boxes.length, v0: bodies[k].v, f0: gpu.frame, C, qs, P: T, p0: gb.p.slice(), q0: gb.q.slice(), cool: clock() + (cool || 0) });
+    if (window.__labMass) window.__labMass(idx, b.id);   // (the lab: a piece weighs on the GPU what it weighs in the engine)
     armPlan(idx, b.id);
   });
   // (vel was called for the bodies kept, in order, then for the particles)

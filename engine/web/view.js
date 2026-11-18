@@ -7,12 +7,13 @@ const VIEW_SCALE = [0, 1, 10, 100, 1000];
 // colours and at its true size: the engine then writes only the lots that have moved 2 cm, set_param 8 at 2)
 function drawView() { if (+setting.view) E.view_apply(VIEW_SCALE[setting.viewScale] || 0, 1); else E.view_apply(1, 0); }
 function viewParam() { return +setting.view ? 1 : (+setting.dynamic ? 2 : 0); }
-// the motion of the structure's cell at a point, for a part that leaves it there (from the view's cells: only lots
-// that have sagged to see are in it)
+// the motion of the structure's cell at a point, for a part that leaves it there (Sim::motion_cells)
 function motionAt(c) {
-  if (!E.view_motion || !viewParam() || !E.view_motion(c[0], c[1], c[2])) return { v: [0, 0, 0], w: [0, 0, 0] };
+  // (whether the view is on or not: the motion is the structure's, sent with each of its steps)
+  if (!E.view_motion || !E.view_motion(c[0], c[1], c[2])) { if (window.__motionLog) window.__motionLog.push([LAB.f, ...c.map(x => +x.toFixed(2)), 'none', E.motion_cells_len ? E.motion_cells_len() : -1]); return { v: [0, 0, 0], w: [0, 0, 0] }; }
   const m = new Float32Array(E.memory.buffer, E.motion_ptr(), 12);
   const sc = +setting.view ? (VIEW_SCALE[setting.viewScale] || 0) : 1;
+  if (window.__motionLog) window.__motionLog.push([LAB.f, ...c.map(x => +x.toFixed(2)), +m[6].toFixed(3), +m[7].toFixed(3), +m[8].toFixed(3), E.motion_cells_len ? E.motion_cells_len() : -1]);
   return { u: [m[0] * sc, m[1] * sc, m[2] * sc], r: [m[3] * sc, m[4] * sc, m[5] * sc], v: [m[6], m[7], m[8]], w: [m[9], m[10], m[11]] };
 }
 function showView(v) {
