@@ -4,7 +4,9 @@
 //   node game/lab/page_check.cjs view     the engineer's view (key V): the worker's structure step must send it, with cells
 // SF_NODE_MODULES: a node_modules folder with three (and Playwright installed), as for game/lab/lab.cjs.
 //
-// rest: the complex building (kind 4) has furniture that falls asleep while the page still steps; the GPU then skips
+// The page's level is the Quarter (since 15 Nov; before, these ran on the complex building alone, which is its
+// market hall).
+// rest: the market hall and the houses have furniture that falls asleep while the page still steps; the GPU then skips
 // its steps, no read-backs are issued, and the page, which steps at most 3 past the newest read-back, stopped
 // stepping for good: a ball fired then never stepped or showed ("clicking does nothing"; the benchmark stood still
 // at 39.6 s the same way). Before the fix: 3 steps skipped, no read-back in the 20 s after the click; after: read-backs
@@ -21,7 +23,6 @@ const which = process.argv[2] || 'rest';
   let err = null; p.on('pageerror', e => { err = e.message; });
   let threeJs; try { threeJs = fs.readFileSync(require.resolve('three/build/three.min.js'), 'utf8'); } catch (e) { threeJs = fs.readFileSync(path.join(process.env.SF_NODE_MODULES || '', 'three/build/three.min.js'), 'utf8'); }
   await p.route('**/three.min.js', r => r.fulfill({ body: threeJs, contentType: 'text/javascript' }));
-  await p.addInitScript(() => { localStorage.setItem('sf-settings', JSON.stringify({ kind: 4 })); });
   await p.goto('file://' + html);
   for (let i = 0; i < 180; i++) { await new Promise(r => setTimeout(r, 1000)); if (await p.evaluate(() => !!gpu && !$('go').disabled)) break; }
   await p.evaluate(() => $('go').click());
@@ -40,7 +41,7 @@ const which = process.argv[2] || 'rest';
       out.folded = !el('g-adv').open && !el('p-adv').open && !el('s-tools').open;
       out.physIn = ['s-debris', 's-crumbs', 's-rubble', 's-substeps', 's-colors', 's-far', 's-dynamic', 's-crush'].every(id => el('p-adv').contains(el(id)));
       out.gfxIn = ['s-gShadows', 's-gMap', 's-gPx', 's-viewScale'].every(id => el('g-adv').contains(el(id)));
-      out.top = el('menu').contains(el('s-kind')) && el('menu').contains(el('m-reset')) && el('win-gfx').contains(el('s-gfx')) && !el('g-adv').contains(el('s-gfx')) && el('win-phys').contains(el('s-phys')) && !el('p-adv').contains(el('s-phys'));
+      out.top = el('menu').contains(el('m-level')) && el('menu').contains(el('m-reset')) && el('win-gfx').contains(el('s-gfx')) && !el('g-adv').contains(el('s-gfx')) && el('win-phys').contains(el('s-phys')) && !el('p-adv').contains(el('s-phys'));
       pick('s-phys', 'low'); out.low = [setting.debris, setting.crumbs, setting.rubble, setting.substeps, setting.colors, debrisMax, setting.phys];
       pick('s-phys', 'ultra'); out.ultra = [setting.debris, setting.crumbs, debrisMax === Infinity, setting.phys];
       pick('s-gfx', 'low'); out.gfxLow = [renderer.shadowMap.enabled, renderer.getPixelRatio(), sun.shadow.mapSize.x, setting.gfx];
@@ -117,11 +118,17 @@ const which = process.argv[2] || 'rest';
   await p.mouse.click(200, 125);
   const r0 = s.readSeq;
   for (let i = 0; i < 20; i++) { await new Promise(r => setTimeout(r, 1000)); }
+  // (and until the ball has reached something: on the software GPU a step takes a second)
+  for (let i = 0; i < 240; i++) { if (await p.evaluate(() => punchStat.through + punchStat.stopped > 0)) break; await new Promise(r => setTimeout(r, 1000)); }
   const s1 = await st();
   // (and the complex building's loose furniture is there as bodies from its first structure step: 208; on 13 Nov a
   // structure step asked for while the settings were applied ran ahead of that one, and none of it came)
-  const ok = !err && s.skipped >= 3 && s1.readSeq > r0 && s1.bodies > s.bodies && s.bodies > 100;
-  console.log(`${ok ? 'PASS' : 'FAIL'} rest: at rest ${JSON.stringify(s)}; 20 s after a click ${JSON.stringify(s1)}${err ? '; page error: ' + err : ''}`);
+  // (15 Nov) and the ball's look-ahead works as the player has it: the engine in its worker, the questions asked of
+  // the page's own copy (`punch_probe`), the holes made by the worker in its turn. The ball goes through something
+  // or stops in it, and its holes are in the page's copy of the bricks as well as the worker's.
+  const pn = await p.evaluate(() => ({ engine: worker ? 'worker' : 'inline', probe: typeof E.punch_probe, sent: punchStat.sent, through: punchStat.through, stopped: punchStat.stopped, none: punchStat.none, off: punchStat.off, bricks: E.bricks_alive() }));
+  const ok = !err && s.skipped >= 3 && s1.readSeq > r0 && s1.bodies > s.bodies && s.bodies > 100 && pn.engine === 'worker' && pn.probe === 'function' && pn.sent > 0 && pn.through + pn.stopped > 0;
+  console.log(`${ok ? 'PASS' : 'FAIL'} rest: at rest ${JSON.stringify(s)}; after a click ${JSON.stringify(s1)}; the ball's look-ahead ${JSON.stringify(pn)}${err ? '; page error: ' + err : ''}`);
   await b.close();
   process.exit(ok ? 0 : 1);
 })();

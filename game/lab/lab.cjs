@@ -9,10 +9,12 @@ const opt = (k, d) => { const i = args.indexOf(k); if (i < 0) return d; const v 
 const readLag = +opt('--read-lag', 2), jobLag = +opt('--job-lag', 4), outDir = path.resolve(opt('--out', path.join(__dirname, '..', '..', 'lab-results')));
 const frames = opt('--frames', null), trace = opt('--trace', null);
 // --twice: run each scenario twice and compare them frame by frame (the lab must be deterministic)
-const twice = args.includes('--twice'); if (twice) args.splice(args.indexOf('--twice'), 1);
+// --twice-view: the same, the second run with the engineer's view on (the view must not change what happens)
+const twiceView = args.includes('--twice-view'); if (twiceView) args.splice(args.indexOf('--twice-view'), 1);
+const twice = twiceView || args.includes('--twice'); if (args.includes('--twice')) args.splice(args.indexOf('--twice'), 1);
 const root = path.join(__dirname, '..', '..');
 const page0 = fs.readFileSync(path.join(root, 'dist/tower.html'), 'utf8');
-const SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complexstand', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'], city: ['citystand', 'city'] };
+const SUITES = { quarter: ['quarter', 'qtemple', 'qaqueduct', 'qvilla', 'qglass', 'qbarn', 'qtower', 'qchimney', 'qmill', 'qoffice', 'qballhall', 'qballglass', 'qballtemple', 'qballoffice'], quick: ['collapse', 'ball', 'quarter'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complexstand', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'], city: ['citystand', 'city'] };
 const names = args.length ? args.flatMap(a => a.startsWith('=') ? [a.slice(1)] : SUITES[a] || [a]) : SUITES.quick;   // (=name: the scenario, where a suite has its name)
 (async () => {
   fs.mkdirSync(outDir, { recursive: true });
@@ -25,6 +27,8 @@ const names = args.length ? args.flatMap(a => a.startsWith('=') ? [a.slice(1)] :
   for (const name of runs) {
     const p = await b.newPage({ viewport: { width: 800, height: 500 } });
     p.on('pageerror', e => console.log(`[${name}] page error: ${e.message}`));
+    // (SF_DBG: the page's own debug lines, console.warn, as it breaks things: engine/web/breaking.js)
+    if (process.env.SF_DBG) { p.on('console', m => { if (m.type() === 'warning') console.log(`[${name}] ${m.text()}`); }); await p.addInitScript(() => { window.__dbg = true; }); }
     let threeJs; try { threeJs = fs.readFileSync(require.resolve('three/build/three.min.js'), 'utf8'); } catch (e) { threeJs = fs.readFileSync(path.join(process.env.SF_NODE_MODULES || '', 'three/build/three.min.js'), 'utf8'); }
     await p.route('**/three.min.js', r => r.fulfill({ body: threeJs, contentType: 'text/javascript' }));
     // one scenario per page load, queued the way the page's own button queues them (no render: nothing looks)
@@ -41,9 +45,15 @@ const names = args.length ? args.flatMap(a => a.startsWith('=') ? [a.slice(1)] :
     await p.addInitScript((d) => { if (d) window.__shots = d.split(',').map(Number); }, process.env.SF_SHOTS || '');
     await p.addInitScript((d) => { if (d) window.__shotView = d.split(',').map(Number); }, process.env.SF_SHOT_VIEW || '');
     await p.addInitScript((d) => { if (d) window.__pinch = true; }, !!process.env.SF_PINCH);
+    await p.addInitScript((d) => { if (d) window.__partDumpAt = +d; }, process.env.SF_PARTDUMP || '');   // (with --twice: the particles that differ at this frame)
+    await p.addInitScript((d) => { if (d[0]) window.__noPunch = true; if (d[1]) window.__oldBall = true; }, [!!process.env.SF_NOPUNCH, !!process.env.SF_OLDBALL]);
+    await p.addInitScript((d) => { if (d) window.__viewOn = true; }, twiceView && !!digests[name]);
     await p.addInitScript((d) => { if (d) window.__noPinch = true; }, !!process.env.SF_NOPINCH);
     // (SF_NOBOUND: the solver without the velocity bound and the pinch test, as before 14 Nov: docs/GPU.md)
     await p.addInitScript((d) => { if (d) window.__noBound = true; }, !!process.env.SF_NOBOUND);
+    // (SF_NOCOVER, SF_NOWAKEFAST, SF_NOSWEEP, SF_NOREFUND: the GPU world without covered faces, without waking what
+    // sleeps in a fast body's way, without the swept test, without what a crushed piece gives back: docs/GPU.md)
+    await p.addInitScript((d) => { if (d[0]) window.__noCover = true; if (d[1]) window.__noWakeFast = true; if (d[2]) window.__noSweep = true; if (d[3]) window.__noRefund = true; }, [!!process.env.SF_NOCOVER, !!process.env.SF_NOWAKEFAST, !!process.env.SF_NOSWEEP, !!process.env.SF_NOREFUND]);
     await p.addInitScript((d) => { if (d) window.__oldMasonry = true; }, !!process.env.SF_OLD_MASONRY);
     await p.addInitScript((d) => { if (d) window.__parkDbg = true; }, !!process.env.SF_PARK_DBG);
     await p.addInitScript((d) => { if (d) window.__traceBodies = d; }, process.env.SF_TRACE_BODIES || '');   // (with --trace: these bodies, every frame)
@@ -74,13 +84,18 @@ const names = args.length ? args.flatMap(a => a.startsWith('=') ? [a.slice(1)] :
         const eq = (x, y) => JSON.stringify(x) === JSON.stringify(y);
         let k = 0; while (k < n && eq(a[k], d[k])) k++;
         const same = k === n && a.length === d.length;
-        const parts = ['poses', 'particles', 'bodies', 'breaks', 'dust', 'bricks', 'joints', 'contacts', 'particles made', 'awake', 'events', 'jobs', 'inputs', 'gpu frame', 'skipped', 'colour limit', 'sub-steps', 'shapes', 'particle slots', 'stats', 'pending inherit', 'GPU bodies', 'GPU solver', 'GPU shapes', 'GPU colours', 'GPU contacts'];
+        const parts = ['poses', 'particles', 'bodies', 'breaks', 'dust', 'bricks', 'joints', 'contacts', 'particles made', 'awake', 'events', 'jobs', 'inputs', 'gpu frame', 'skipped', 'colour limit', 'sub-steps', 'shapes', 'particle slots', 'stats', 'pending inherit', 'GPU bodies', 'GPU solver', 'GPU shapes', 'GPU colours', 'GPU contacts', 'what went in (bodies and particles added)'];
         const what = same ? '' : parts.filter((_, q) => a[k] && d[k] && a[k][q] !== d[k][q]).join(', ');
-        console.log(`  ${same ? 'ok  ' : 'FAIL'} deterministic: ${same ? `the two runs agree in all ${n} frames` : `the two runs differ from frame ${k}: ${what}`}`);
+        console.log(`  ${same ? 'ok  ' : 'FAIL'} deterministic: ${same ? `the two runs agree in all ${n} frames${twiceView ? ' (the second with the engineer\'s view on)' : ''}` : `the two runs differ from frame ${k}: ${what}`}`);
         if (!same) for (let q = Math.max(0, k - 3); q < Math.min(n, k + 3); q++) console.log(`    frame ${q}: ${JSON.stringify(a[q])} / ${JSON.stringify(d[q])}`);
         if (!same) failed = true;
+        if (rep.motionLog) { console.log('    motion, first run: ' + JSON.stringify((digests[name + ':motion'] || []).slice(0, 12))); console.log('    motion, second run: ' + JSON.stringify(rep.motionLog.slice(0, 12))); }
+        if (rep.partDump && digests[name + ':parts']) {
+          const A = digests[name + ':parts'], B = rep.partDump; let shown = 0;
+          for (let i = 0; i * 12 < Math.max(A.length, B.length) && shown < 12; i++) { const x = A.slice(i * 12, i * 12 + 12), y = B.slice(i * 12, i * 12 + 12); if (JSON.stringify(x) !== JSON.stringify(y)) { shown++; console.log(`    particle ${i}: ${JSON.stringify(x.map(v => +v.toFixed(4)))} / ${JSON.stringify(y.map(v => +v.toFixed(4)))}`); } }
+        }
         if (rep.dumpRaw && digests[name + ':raw']) fs.writeFileSync(path.join(outDir, 'det_raw.json'), JSON.stringify([digests[name + ':raw'], rep.dumpRaw]));
-      } else if (twice) { digests[name] = rep.digest; digests[name + ':raw'] = rep.dumpRaw; const { digest, dumpRaw, ...keep } = rep; fs.writeFileSync(path.join(outDir, `${name}_run1.json`), JSON.stringify(keep, null, 1)); }
+      } else if (twice) { digests[name] = rep.digest; digests[name + ':raw'] = rep.dumpRaw; digests[name + ':parts'] = rep.partDump; digests[name + ':motion'] = rep.motionLog; const { digest, dumpRaw, ...keep } = rep; fs.writeFileSync(path.join(outDir, `${name}_run1.json`), JSON.stringify(keep, null, 1)); }
       { const { digest, dumpRaw, ...keep } = rep; fs.writeFileSync(path.join(outDir, `${name}.json`), JSON.stringify(keep, null, 1)); }
     }
     await p.close();

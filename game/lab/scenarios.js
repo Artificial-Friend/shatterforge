@@ -25,7 +25,7 @@ const LAB_SCENARIOS = {
   // an 8-storey concrete frame, a steel ball of 0.4 m sent down onto the middle of a roof bay at 45 m/s: it breaks
   // through the roof, which takes most of its speed, and stops inside on a floor (13 Nov; docs/LAB.md: at 25 m/s it
   // stays in a crater on the roof, at 80 m/s it bounces 20 m up and off the building)
-  tallball: { kind: 0, storeys: 8, frames: 600, title: 'concrete frame, 8 storeys: a steel ball onto the roof at 45 m/s', script: [[10, 'ball', [7.5, 45, 7.5, 0, -1.5707, 45, 0.4]]], expect: { ballStops: { above: 3.0, top: 29.5, box: [-11.5, 11.5, -11.5, 11.5] } } },
+  tallball: { kind: 0, storeys: 8, frames: 600, title: 'concrete frame, 8 storeys: a steel ball onto the roof at 45 m/s', script: [[10, 'ball', [7.5, 45, 7.5, 0, -1.5707, 45, 0.4]]], expect: { ballOn: true, ballStops: { above: 3.0, top: 29.5, box: [-11.5, 11.5, -11.5, 11.5] } } },
   // the debris budget (14 Nov): the collapse with at most 1,000 pieces and particles kept at once
   debriscap: { kind: 0, storeys: 4, frames: 480, debris: 1000, title: 'concrete frame, 4 storeys: the collapse with a debris budget of 1,000', script: [[0, 'cut']], expect: { debrisCap: 1000, debrisHeaviest: 300, debrisShare: 30 } },   // (300 kg: `DEBRIS_SMALL`, no big piece goes while crumbs are left; 30%: all the particles this collapse makes are about 22% of the building, docs/LAB.md 14 November)
   // the complex building (kind 4, docs/PHASE2.md): steel frame with free-piece braces, a roof of rafters and boards
@@ -47,8 +47,54 @@ const LAB_SCENARIOS = {
   citystand: { kind: 5, storeys: 3, frames: 600, title: 'city, 3 x 3 lots: left alone', script: [], expect: { stand: true, settle: true } },
   city: { kind: 5, storeys: 3, frames: 600, title: 'city, 3 x 3 lots: two lots cut (complex and a 7-storey frame)', script: [[0, 'cut', [0, 1]]], expect: { settle: true } },
   rubble: { kind: 0, storeys: 3, frames: 720, title: 'concrete frame, 3 storeys: cut, then a blast into the rubble', script: [[0, 'cut'], [480, 'blast', [-14, 6, -14, 1, -0.45, 1, 2.5]]], expect: { settle: true } },
+  // ---- the Quarter (kind 6, the game's level: game/src/quarter.rs; docs/QUARTER.md). Actions in a building's own
+  // frame (qblast, qball, qcut: lab.js), so a building moved or turned on its lot keeps its scenarios.
+  // left alone for 10 s: its loose contents settle, nothing fails
+  quarter: { kind: 6, frames: 600, title: 'the Quarter: left alone', script: [], expect: { stand: true, settle: true } },
+  // the temple: the three columns at its south-east corner and the next one along the front shot out at mid height
+  // (two shots of the 0.75 m tool each): the corner of the entablature, the gable's end and the roof over it come down
+  qtemple: { kind: 6, frames: 600, roofAt: ['temple', 5, -13, 3], title: 'the Quarter: the temple\'s south-east corner columns shot out',
+    script: [[6.25, -15], [6.25, -12.5], [6.25, -10]].flatMap(([x, z], k) => [[20 + 8 * k, 'qblast', ['temple', 12, 4.0, z, -1, 0, 0, 0.75]], [24 + 8 * k, 'qblast', ['temple', 12, 4.0, z, -1, 0, 0, 0.75]]])
+      .concat([[44, 'qblast', ['temple', 3.75, 4.0, -22, 0, 0, 1, 0.75]], [48, 'qblast', ['temple', 3.75, 4.0, -22, 0, 0, 1, 0.75]]]), expect: { settle: true } },
+  // the aqueduct: the keystone of the middle arch shot out from both sides (0.9 m): the arch falls, and the channel over it
+  // (15 s: the stones of a dry arch go one after another, the last at 9 s)
+  qaqueduct: { kind: 6, frames: 900, roofAt: ['aqueduct', 0, 0, 1.5], title: 'the Quarter: the keystone of the aqueduct\'s middle arch shot out',
+    script: [[20, 'qblast', ['aqueduct', 0, 7.9, -8, 0, 0, 1, 0.9]], [26, 'qblast', ['aqueduct', 0, 7.9, 8, 0, 0, -1, 0.9]]], expect: { settle: true } },
+  // the white villa: three rows of its pilotis shot out at 1.5 m from the entrance's end (the five of each row, one
+  // shot after another along the same line: each goes on to the next piloti standing). With one row gone the
+  // box's end hangs 6 m from the next and holds (0 joints fail: engine, 18 Nov); with three, 24 fail and it comes down
+  qvilla: { kind: 6, frames: 900, roofAt: ['villa', 0, -8, 4], title: 'the Quarter: three rows of the villa\'s pilotis shot out',
+    script: [0, 1, 2].flatMap(row => [-9.5, -4.75, 0, 4.75, 9.5].map((x, k) => [20 + 6 * (5 * row + k), 'qblast', ['villa', x, 1.5, -16, 0, 0, 1, 0.5]])), expect: { roofDrop: 1, settle: true } },
+  // the glass house: its four north columns cut under the floor
+  qglass: { kind: 6, frames: 600, roofAt: ['glass', 0, 0, 4], title: 'the Quarter: the glass house\'s four north columns cut',
+    script: [-10.125, -3.375, 3.375, 10.125].map((x, k) => [20 + 6 * k, 'qblast', ['glass', x, 0.8, 9, 0, 0, -1, 0.5]]), expect: { roofDrop: 1, settle: true } },
+  // the barn: the four inner arcade posts of each row shot out at 3.5 m, from the nave. (With one row gone the
+  // frame holds, 0 joints failed: the arcade plate and the ties carry the roof over; with both, 16 fail. Until
+  // 18 Nov the shots started inside the posts' line and broke nothing, and the scenario passed.)
+  qbarn: { kind: 6, frames: 900, roofAt: ['barn', 0, 0, 5], title: 'the Quarter: eight of the barn\'s arcade posts shot out',
+    script: [-1, 1].flatMap((sx, r) => [-6.75, -2.25, 2.25, 6.75].map((z, k) => [20 + 6 * (4 * r + k), 'qblast', ['barn', 0, 3.5, z, sx, 0, 0, 0.5]])), expect: { roofDrop: 1, settle: true } },
+  // the water tower: three of its four legs shot out at 2 m. (On two legs it stands: braced, its joints stiff, the
+  // tank empty; 0 joints fail. Engine, 18 Nov.)
+  qtower: { kind: 6, frames: 900, roofAt: ['tower', 0, 0, 4], title: 'the Quarter: three of the water tower\'s legs shot out',
+    script: [[20, 'qblast', ['tower', 8, 2.0, -2.5, -1, 0, 0, 0.5]], [26, 'qblast', ['tower', 8, 2.0, 2.5, -1, 0, 0, 0.5]], [32, 'qblast', ['tower', -8, 2.0, -2.5, 1, 0, 0, 0.5]]], expect: { roofDrop: 8, settle: true } },
+  // the chimney: its west side blown out above the plinth (one shot of 1.5 m): it falls to the west like a tree
+  // (15 s: 26 m of chimney goes over like a tree, 7 m of its top's fall in the first 10 s)
+  qchimney: { kind: 6, frames: 900, roofAt: ['chimney', 0, 0, 2], title: 'the Quarter: the chimney\'s foot blown out on one side',
+    script: [[20, 'qblast', ['chimney', -8, 2.75, 0, 1, 0, 0, 1.5]]], expect: { roofDrop: 10, settle: true } },
+  // the mill and the office tower: their ground storeys cut, as the test buildings' are
+  qmill: { kind: 6, frames: 900, roofAt: ['mill', 0, 0, 9], title: 'the Quarter: the mill\'s ground storey cut', script: [[0, 'qcut', ['mill', -10, 10, -10, 10]]], expect: { roofDrop: 3, settle: true } },
+  qoffice: { kind: 6, frames: 600, roofAt: ['office', 0, 0, 9], title: 'the Quarter: the office tower\'s ground storey cut', script: [[0, 'qcut', ['office', -10, 10, -10, 10]]], expect: { roofDrop: 2 } },
+  // the ball (the game's: 0.5 m, 60 m/s, 514 kg, 925 kJ): through the market hall from the crossing where the player
+  // starts; through the glass house from end to end; into the temple between two columns, at its cella's wall; and
+  // a 0.8 m ball down onto the office tower's roof at 45 m/s. It goes on through what it breaks or stops in it: it
+  // does not come back (ballOn).
+  qballhall: { kind: 6, frames: 300, title: 'the Quarter: the ball through the market hall', script: [[10, 'ball', [20, 3, -20, -Math.PI / 4, 0, 60, 0.25]]], expect: { ballOn: true } },
+  qballglass: { kind: 6, frames: 300, title: 'the Quarter: the ball through the glass house, end to end', script: [[10, 'qball', ['glass', -25, 3.0, 0.5, 1, 0, 0, 60, 0.25]]], expect: { ballOn: true } },
+  qballtemple: { kind: 6, frames: 300, title: 'the Quarter: the ball into the temple', script: [[10, 'qball', ['temple', 16, 4.0, 1.25, -1, 0, 0, 60, 0.25]]], expect: { ballOn: true } },
+  qballoffice: { kind: 6, frames: 480, roofAt: ['office', 0, 0, 9], title: 'the Quarter: a 0.8 m ball onto the office tower\'s roof at 45 m/s', script: [[10, 'qball', ['office', 7.5, 52, 7.5, 0, -1, 0, 45, 0.4]]], expect: { ballOn: true } },
 };
-const LAB_SUITES = { quick: ['collapse', 'ball'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble', 'far'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'], city: ['citystand', 'city'] };
+const QUARTER_SUITE = ['quarter', 'qtemple', 'qaqueduct', 'qvilla', 'qglass', 'qbarn', 'qtower', 'qchimney', 'qmill', 'qoffice', 'qballhall', 'qballglass', 'qballtemple', 'qballoffice'];
+const LAB_SUITES = { quarter: QUARTER_SUITE, quick: ['collapse', 'ball', 'quarter'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble', 'far'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'], city: ['citystand', 'city'] };
 let LABSTATE = null; try { LABSTATE = JSON.parse(localStorage.getItem('sf-lab') || 'null'); } catch (e) {}
 if (LABSTATE && !(LABSTATE.queue && LABSTATE.queue.length && LAB_SCENARIOS[LABSTATE.queue[0]])) LABSTATE = null;
 const LAB = { on: false, t: 0, f: 0 };

@@ -16,8 +16,17 @@ function labInstall() {
   // (what the page still asks of the GPU in the last second of a run: any of these makes a step that cannot be
   // skipped, settled or not)
   if (!gpu.__labCalls) { gpu.__labCalls = true; for (const k of ['addBodies', 'setStaticShape', 'killBody', 'setSnap', 'breakBody', 'setVelocity', 'wakeAll', 'addParticles', 'killParticle', 'killShape']) { const f0 = gpu[k].bind(gpu); gpu[k] = (...a) => { const L = LAB; if (L.on && L.spec && L.f > L.spec.frames - 60) { L.lateCalls = L.lateCalls || {}; L.lateCalls[k] = (L.lateCalls[k] || 0) + 1; } return f0(...a); }; } }
+  // (a piece weighs on the GPU what it weighs in the engine: the worst ratio, and what it was)
+  L.massWorst = 1; L.massChecked = 0;
+  window.__labMass = (body, piece) => {
+    const gb = gpu.bodies[body - 1]; if (!gb || !(piece >= 0) || !E.piece_mass) return;
+    const m = E.piece_mass(piece); if (!(m > 1) || !(gb.mass > 0)) return;
+    L.massChecked++;
+    const r = gb.mass / m; if (Math.abs(Math.log(r)) > Math.abs(Math.log(L.massWorst))) { L.massWorst = r; L.massWorstOf = { gpu_kg: Math.round(gb.mass), engine_kg: Math.round(m), frame: L.f }; }
+  };
   const addB = gpu.addBodies.bind(gpu), brk = gpu.breakBody.bind(gpu), addP = gpu.addParticles.bind(gpu), killP = gpu.killParticle.bind(gpu);
   gpu.addBodies = (list) => {
+    for (const bd of list) { for (const x of (bd.v || [0, 0, 0])) mixIn(x); for (const x of (bd.w || [0, 0, 0])) mixIn(x); for (const sh of bd.shapes) for (const x of sh.p) mixIn(x); }
     const idx = addB(list);
     idx.forEach((b, k) => {
       if (b <= 0) return;
@@ -26,7 +35,7 @@ function labInstall() {
       const v = list[k].shapes.reduce((s, sh) => s + labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1), 0); L.bodyVol.set(b, v); L.gpuVol += v; if (L.jobVol) L.jobVol.bodiesIn += v;
       // (where parts come loose: frame, the job that made them, height of the body's top and bottom, volume)
       if (L.made && L.made.length < 4000) { const ys = list[k].shapes.map(sh => sh.p[1]); L.made.push([L.f, L.jobOp || '', +Math.min(...ys).toFixed(1), +Math.max(...ys).toFixed(1), +v.toFixed(2), list[k].shapes.length]); }
-      if (gb) { gb.labVol = v; gb.labH = list[k].shapes.length === 1 ? list[k].shapes[0].h.map(x => +x.toFixed(2)) : `${list[k].shapes.length} boxes`; gb.labF = L.f; }
+      if (gb) { gb.labVol = v; gb.labRho = gb.mass > 0 && v > 0 ? gb.mass / v : 2400; gb.labH = list[k].shapes.length === 1 ? list[k].shapes[0].h.map(x => +x.toFixed(2)) : `${list[k].shapes.length} boxes`; gb.labF = L.f; }
     });
     L.ballNext = false; return idx;
   };
@@ -66,7 +75,7 @@ function labInstall() {
     (rest[0] || []).forEach((kid, k) => {
       const d = (rest[3] || [])[k], gb = kid > 0 && gpu.bodies[kid - 1];
       if (!gb || !d || Array.isArray(d) || !d.v) return;
-      const m = (gb.labVol || 0) * 2400, e = 0.5 * m * (d.v[0] ** 2 + d.v[1] ** 2 + d.v[2] ** 2 - vp[0] ** 2 - vp[1] ** 2 - vp[2] ** 2);
+      const m = (gb.labVol || 0) * (gb.labRho || 2400), e = 0.5 * m * (d.v[0] ** 2 + d.v[1] ** 2 + d.v[2] ** 2 - vp[0] ** 2 - vp[1] ** 2 - vp[2] ** 2);
       if (e > 0) { L.given = (L.given || 0) + e; L.givenTotal = (L.givenTotal || 0) + e; }
     });
     return brk(parent, ...rest);
@@ -78,7 +87,7 @@ function labInstall() {
     (L.ops = L.ops || []).push({ f: L.f, op: 'snapped', body: i, spare: j, books_i: +(L.bodyVol.get(i) || 0).toFixed(3), had_i: L.bodyVol.has(i), spare_shapes: (gpu.bodyShapes.get(j) || []).length });
     const moved = (gpu.bodyShapes.get(j) || []).reduce((t, k) => { const sh = gpu.shapes[k - 1]; return t + (sh ? labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1) : 0); }, 0);
     if (L.bodyVol.has(i) && moved > 0) {
-      L.bodyVol.set(i, L.bodyVol.get(i) - moved); L.bodyVol.set(j, moved); const gb = gpu.bodies[j - 1]; if (gb) { gb.labVol = moved; gb.labF = L.f; gb.labH = 'spare'; }
+      L.bodyVol.set(i, L.bodyVol.get(i) - moved); L.bodyVol.set(j, moved); const gb = gpu.bodies[j - 1]; if (gb) { gb.labVol = moved; gb.labRho = (gpu.bodies[i - 1] || {}).labRho || 2400; gb.labF = L.f; gb.labH = 'spare'; }
       // (the piece left is another body from here: its mass is less and its centre elsewhere. Compared with the whole
       // at the last read-back, its centre's jump read as a gain: 7.9 MJ for the 816 m3 upper part at frame 58 of the
       // lab collapse, 21 MJ at frame 223, at the speed it had)
@@ -89,7 +98,9 @@ function labInstall() {
   const shapesVol = (b) => (gpu.bodyShapes.get(b) || []).reduce((t, k) => { const sh = gpu.shapes[k - 1]; return t + (sh && !sh.dead ? labBoxVol(sh.h) * (sh.hull ? GpuWorld.hulls.hulls[sh.hull].vol : 1) : 0); }, 0);
   const op = (o) => { (L.ops = L.ops || []).push({ f: L.f, ...o }); if (L.ops.length > 40) L.ops.shift(); };
   gpu.killBody = (b) => { const v = L.bodyVol.get(b) || 0; op({ op: 'kill', body: b, books: +v.toFixed(3), shapes_m3: +shapesVol(b).toFixed(3), spare: !!(gpu.bodies[b - 1] || {}).spare }); L.gpuVol -= v; L.bodyVol.delete(b); return kill(b); };
-  gpu.addParticles = (list) => { const s = addP(list); L.pendingParts = (L.pendingParts || []).concat(s); return s; };
+  // (what goes in, hashed: two runs that differ in what they give the GPU differ here first)
+  L.inHash = 2166136261 >>> 0; const mixIn = (x) => { L.inHash = Math.imul(L.inHash ^ (Math.round(x * 1e4) >>> 0), 16777619) >>> 0; };
+  gpu.addParticles = (list) => { for (const e of list) { for (const x of e.p) mixIn(x); for (const x of e.v) mixIn(x); } const s = addP(list); L.pendingParts = (L.pendingParts || []).concat(s); return s; };
   gpu.killParticle = (i) => { const v = L.partVol.get(i) || 0; L.gpuVol -= v; L.partVol.delete(i); if (window.__farKill === 'budget') { L.lostBy.budget = (L.lostBy.budget || 0) + v; L.budgetParts = (L.budgetParts || 0) + 1; } else if (window.__farKill) { L.lostBy.far = (L.lostBy.far || 0) + v; L.farParts = (L.farParts || 0) + 1; labEvent('removed_far', L.f, { particle: i, vol: +v.toFixed(3) }); } else L.lostParticles = (L.lostParticles || 0) + v; return killP(i); };
 }
 // (particle volumes are known once the page has their brick sizes: after addPieces)
@@ -171,7 +182,12 @@ function labFrameChecks() {
           let vn = 0; for (let q = 0; q < d.n; q++) { if (d.keys[q] < 0 || d.bound[q] <= vn) continue; if (Math.hypot(d.pos[q * 3] - d.pos[k * 3], d.pos[q * 3 + 1] - d.pos[k * 3 + 1], d.pos[q * 3 + 2] - d.pos[k * 3 + 2]) < 3) vn = d.bound[q]; }
           lim = Math.max(lim, 0.25 + 3 * vn / 60);
         }
-        if (m > lim) { L.teleports++; const sh = key >= 0 ? gpu.shapes[(key % 1048576) - 1] : null, gb = sh ? gpu.bodies[sh.body - 1] : null; labEvent('teleport', f, { key, moved_m: +m.toFixed(2), limit_m: +lim.toFixed(2), speed_was: +prev.bound[j].toFixed(2), speed_now: +d.bound[k].toFixed(2), part: key < 0 ? (() => { const pi = (-key - 1) % 1048576, inf = pInfo[pi]; let best = null, bd = 1e9; for (let q = 0; q < d.n; q++) { if (d.keys[q] < 0) continue; const dd = Math.hypot(d.pos[q * 3] - d.pos[k * 3], d.pos[q * 3 + 1] - d.pos[k * 3 + 1], d.pos[q * 3 + 2] - d.pos[k * 3 + 2]); if (dd < bd) { bd = dd; best = q; } } const sh = best !== null ? gpu.shapes[(d.keys[best] % 1048576) - 1] : null, gb = sh ? gpu.bodies[sh.body - 1] : null; const pd = snapCur && snapCur.parts ? snapCur.parts.data : null; return inf ? { made: inf.labF, why: inf.labWhy, v0: inf.labV, h: inf.h, state: pd ? pd[pi * 12 + 10] : null, v: pd ? [pd[pi * 12 + 3], pd[pi * 12 + 4], pd[pi * 12 + 5]].map(x => +x.toFixed(2)) : null, nearest_shape_m: +bd.toFixed(2), nearest_speed: best !== null ? +d.bound[best].toFixed(2) : null, nearest_body: sh ? sh.body : null, nearest_size: gb && gb.labH, nearest_made: gb && gb.labF, nearest_at: best !== null ? [d.pos[best * 3], d.pos[best * 3 + 1], d.pos[best * 3 + 2]].map(x => +x.toFixed(2)) : null } : null; })() : undefined, body: sh ? sh.body : null, made: gb && gb.labF, size: gb && gb.labH, from: [prev.pos[j * 3], prev.pos[j * 3 + 1], prev.pos[j * 3 + 2]].map(v => +v.toFixed(2)), to: [d.pos[k * 3], d.pos[k * 3 + 1], d.pos[k * 3 + 2]].map(v => +v.toFixed(2)) }); }
+        // (a body whose velocity the page has just set, a ball going on through a wall it has paid for, moves at that
+        // velocity before a read-back shows it: the speed that counts is the one it was given, over the 3 steps a
+        // read-back can span. Lab qballtemple, 15 Nov: the ball, read at 4.8 m/s where it had met the wall before
+        // the engine's answer, went on at 43.8 m/s and was counted four times, once a shape.)
+        if (m > lim && key >= 0) { const sh0 = gpu.shapes[(key % 1048576) - 1], g0 = sh0 ? gpu.bodies[sh0.body - 1] : null; if (g0 && g0.labSetV && f - g0.labSetV.f <= 4) lim = Math.max(lim, 0.25 + 3 * Math.hypot(...g0.labSetV.v) / 60); }
+        if (m > lim) { L.teleports++; const sh = key >= 0 ? gpu.shapes[(key % 1048576) - 1] : null, gb = sh ? gpu.bodies[sh.body - 1] : null; labEvent('teleport', f, { key, track: (L.drawHist || []).map(h => { const q = h.map.get(key); return q === undefined ? [h.f, h.read] : [h.f, h.read, +h.pos[q * 3].toFixed(3), +h.pos[q * 3 + 1].toFixed(3), +h.pos[q * 3 + 2].toFixed(3), +h.bound[q].toFixed(2)]; }), moved_m: +m.toFixed(2), limit_m: +lim.toFixed(2), speed_was: +prev.bound[j].toFixed(2), speed_now: +d.bound[k].toFixed(2), part: key < 0 ? (() => { const pi = (-key - 1) % 1048576, inf = pInfo[pi]; let best = null, bd = 1e9; for (let q = 0; q < d.n; q++) { if (d.keys[q] < 0) continue; const dd = Math.hypot(d.pos[q * 3] - d.pos[k * 3], d.pos[q * 3 + 1] - d.pos[k * 3 + 1], d.pos[q * 3 + 2] - d.pos[k * 3 + 2]); if (dd < bd) { bd = dd; best = q; } } const sh = best !== null ? gpu.shapes[(d.keys[best] % 1048576) - 1] : null, gb = sh ? gpu.bodies[sh.body - 1] : null; const pd = snapCur && snapCur.parts ? snapCur.parts.data : null; return inf ? { made: inf.labF, why: inf.labWhy, v0: inf.labV, h: inf.h, state: pd ? pd[pi * 12 + 10] : null, v: pd ? [pd[pi * 12 + 3], pd[pi * 12 + 4], pd[pi * 12 + 5]].map(x => +x.toFixed(2)) : null, nearest_shape_m: +bd.toFixed(2), nearest_speed: best !== null ? +d.bound[best].toFixed(2) : null, nearest_body: sh ? sh.body : null, nearest_size: gb && gb.labH, nearest_made: gb && gb.labF, nearest_at: best !== null ? [d.pos[best * 3], d.pos[best * 3 + 1], d.pos[best * 3 + 2]].map(x => +x.toFixed(2)) : null } : null; })() : undefined, body: sh ? sh.body : null, made: gb && gb.labF, size: gb && gb.labH, from: [prev.pos[j * 3], prev.pos[j * 3 + 1], prev.pos[j * 3 + 2]].map(v => +v.toFixed(2)), to: [d.pos[k * 3], d.pos[k * 3 + 1], d.pos[k * 3 + 2]].map(v => +v.toFixed(2)) }); }
       } else {
         const gone = L.goneAt.get(key);
         if (gone !== undefined && f - gone <= 30) { L.flickers++; labEvent('flicker', f, { key, absent_frames: f - gone }); }
@@ -180,6 +196,8 @@ function labFrameChecks() {
   }
   if (prev) for (const [key] of prev.map) if (!cur.has(key)) L.goneAt.set(key, f);
   L.prevDraw = { map: cur, pos: d.pos.slice(0, d.n * 3), bound: d.bound.slice(0, d.n) };
+  // (the last 16 frames as drawn, for a jump's event: where the piece was before)
+  (L.drawHist = L.drawHist || []).push({ f, read: snapCur ? snapCur.frame : -1, ...L.prevDraw }); if (L.drawHist.length > 16) L.drawHist.shift();
 }
 // every read-back: the physics
 const LAB_RHO = [2400, 1800, 2500, 2500, 500, 7800, 2400, 2400];
@@ -226,8 +244,13 @@ function labOnRead(r, pr) {
     if (gb.spare !== undefined && y < -500) continue;
     if (y < -1) { below++; labEvent('below_ground_body', f, { body: b, y: +y.toFixed(2), size: gb.labH, made_at: gb.labF }); }
     // (a ball's track: frame, where it is, how fast)
-    if (gb.labBall) { (L.ballTrack = L.ballTrack || []).push([f, +r.body[o].toFixed(2), +y.toFixed(2), +r.body[o + 2].toFixed(2), +Math.hypot(vx, vy, vz).toFixed(2)]); continue; }
-    const m = (gb.labVol || 0) * 2400, ek = 0.5 * m * (vx * vx + vy * vy + vz * vz), e = ek + m * 9.81 * y;
+    if (gb.labBall) { const sp0 = Math.hypot(vx, vy, vz); if (!L.ballDir && sp0 > 1) L.ballDir = [vx / sp0, vy / sp0, vz / sp0]; const bd = L.ballDir || [0, 0, 0];
+      // (and its speed along the way it was sent: negative is back towards where it came from)
+      (L.ballTrack = L.ballTrack || []).push([f, +r.body[o].toFixed(2), +y.toFixed(2), +r.body[o + 2].toFixed(2), +sp0.toFixed(2), +(vx * bd[0] + vy * bd[1] + vz * bd[2]).toFixed(2)]); }
+    // (its mass: its volume at the density it was made with on the GPU; the ball's own. Until 15 Nov every volume
+    // as concrete, and the ball left out: a 383 kg timber wardrobe pushed by the ball at 37 m/s showed as 6.2 MJ
+    // gained from nothing, of the ball's 0.9 MJ)
+    const m = gb.labBall ? gb.mass : (gb.labVol || 0) * (gb.labRho || 2400), ek = 0.5 * m * (vx * vx + vy * vy + vz * vz), e = ek + m * 9.81 * y;
     now.set(b, { gb, vy, e, ek, v: [vx, vy, vz], y, vol: gb.labVol || 0, cut: gb.labCut });
     // the same body as at the last read-back (a reused slot holds another one)
     const was = L.prevBodies && L.prevBodies.get(b);
@@ -240,7 +263,7 @@ function labOnRead(r, pr) {
     // part lying still on its heap. For a 50 kg piece the same 2 mm is 1 J, and a launch is still a launch.)
     if (e > was.e) slack += Math.min(e - was.e, m * 9.81 * 0.002);
     if (e - was.e > 1000) (L.gainers = L.gainers || []).push({ body: b, gain_J: Math.round(e - was.e), size: gb.labH, made_at: gb.labF, y: [+was.y.toFixed(2), +y.toFixed(2)], vy: [+was.vy.toFixed(2), +vy.toFixed(2)], vol: +(gb.labVol || 0).toFixed(2), vol_was: +(was.vol || 0).toFixed(2), asleep: r.sleeping ? r.sleeping[b - 1] : null });
-    if (quiet) {
+    if (quiet && !gb.labBall) {
       if (was.vy < -2 && vy > 0.5 * -was.vy) { L.bounces++; L.bounceMax = Math.max(L.bounceMax, vy / -was.vy); labEvent('bounce', f, { body: b, vy_before: +was.vy.toFixed(2), vy_after: +vy.toFixed(2), y: +y.toFixed(2), size: gb.labH, made_at: gb.labF, pushed_by_page: gb.labSetV || null }); }
       if (vy > 5 && vy > was.vy + 2) { L.launches++; L.launchMax = Math.max(L.launchMax, vy); labEvent('launch', f, { body: b, vy_before: +was.vy.toFixed(2), vy: +vy.toFixed(2), y: +y.toFixed(2), size: gb.labH, made_at: gb.labF, pushed_by_page: gb.labSetV || null }); }
     }
@@ -280,7 +303,7 @@ function labOnRead(r, pr) {
 async function labAct(act, a) {
   const L = LAB; L.injectedAt = L.f;
   // the energy and bounce checks wait for what is pushed from outside to play out
-  L.quietFrom = Math.max(L.quietFrom, L.f + (act === 'ball' ? 120 : 30));
+  L.quietFrom = Math.max(L.quietFrom, L.f + (act === 'ball' || act === 'qball' ? 120 : 30));
   if (act === 'cut') {
     // the benchmark's cut: the ground storey's columns and walls blown out, before the physics runs
     physicsPaused = true;
@@ -296,11 +319,38 @@ async function labAct(act, a) {
   } else if (act === 'ball') {
     // (position, yaw, pitch; then its speed, 120 m/s if not given, and its radius, 0.4 m)
     const [x, y, z, yw, pt] = a, sp = a[5] || 120, rad = a[6] || 0.4, d = [Math.sin(yw) * Math.cos(pt), Math.sin(pt), Math.cos(yw) * Math.cos(pt)];
-    L.ballNext = true; gpu.addBodies([{ shapes: ballShapes([x, y, z], rad), v: [d[0] * sp, d[1] * sp, d[2] * sp], w: [0, 0, 0] }]); lastActive = clock();
+    labBall([x, y, z], rad, [d[0] * sp, d[1] * sp, d[2] * sp]);
+  } else if (act === 'qball') {
+    // (a ball in a building of the Quarter's own frame: building, from x y z, along dx dy dz, speed, radius)
+    const [name, x, y, z, dx, dy, dz, sp, rad] = a, dl = Math.hypot(dx, dy, dz), d = quarterDir(name, dx / dl, dy / dl, dz / dl);
+    labBall(quarterAt(name, x, y, z), rad || 0.25, d.map(q => q * (sp || 60)));
+  } else if (act === 'qblast') {
+    // (a shot in a building's own frame: building, from x y z, along dx dy dz, radius)
+    const [name, x, y, z, dx, dy, dz, r] = a, o = quarterAt(name, x, y, z), d = quarterDir(name, dx, dy, dz);
+    setRadius(r); doBlast(new THREE.Vector3(...o), new THREE.Vector3(...d).normalize());
+  } else if (act === 'qcut') {
+    // (a building's ground storey blown out over x0..x1, z0..z1 of its own frame, as `cut` does a lot's)
+    const [name, x0, x1, z0, z1] = a;
+    physicsPaused = true;
+    for (let x = x0; x <= x1 + 0.1; x += 4) for (let z = z0; z <= z1 + 0.1; z += 4) { const q = quarterAt(name, x, 1.8, z); jobs.blast.push({ op: 'blast', x: q[0], y: q[1], z: q[2], r: 2.5, ctx: { d: [0, 0, 1], t0: clock() } }); }
+    pump();
+    const T0 = L.T;
+    while (L.jobq.length) { const j = L.jobq.shift(); finish(runInline(j.job)); labParticlesMade(); }
+    L.staticT = labTruthStatic(); labTruth();
+    L.lostBy.tool = (L.lostBy.tool || 0) + Math.max(0, T0 - L.T);
+    physicsPaused = false; lastActive = clock();
   } else if (act === 'blast') {
     const [ox, oy, oz, dx, dy, dz, r] = a;
     setRadius(r); doBlast(new THREE.Vector3(ox, oy, oz), new THREE.Vector3(dx, dy, dz).normalize());
   }
+}
+// the lab's ball: the game's (throwBall), marked so its track is kept and it is not counted as the building's
+function labBall(c, rad, v) {
+  const L = LAB;
+  L.ballNext = true;
+  const b = throwBall(c, rad, v, { oldMass: !!window.__oldBall });
+  const gb = b ? gpu.bodies[b - 1] : null;
+  L.ballMass = gb && gb.mass; L.ballR = rad;
 }
 function labReport(wallS) {
   const L = LAB, S = L.spec, se = L.series, last = se[se.length - 1] || {};
@@ -375,6 +425,33 @@ function labReport(wallS) {
     checks.push({ name: 'ball: speed half a second after it first hits, of its speed before', value: after && v0 ? +(after[4] / v0).toFixed(2) : 'no hit', limit: '<= 0.5', pass: !!after && after[4] <= 0.5 * v0, what: 'the first of the building takes most of it' });
     L.ballSummary = { v0, first_hit_frame: hit >= 0 ? tr[hit][0] : null, end, rests_at_m: levels, track: tr.filter((t, i) => i % 6 === 0) };
   }
+  // Debris weighs what the structure weighed (15 Nov). Before: a steel member that fell weighed the solid box it is
+  // drawn as, 6.25 times what the engine weighs it at standing (a rolled section, structure::STEEL_AREA). The limit
+  // 2%: a piece's corners are kept in single precision and its cells' volumes are the hull library's.
+  if (L.massChecked > 0) checks.push({ name: 'a piece\'s mass on the GPU over the engine\'s (worst)', value: +L.massWorst.toFixed(3), limit: '0.98 to 1.02', pass: Math.abs(L.massWorst - 1) <= 0.02, what: `debris weighs what it weighed standing (${L.massChecked} pieces${L.massWorstOf ? `; worst ${L.massWorstOf.gpu_kg} kg for ${L.massWorstOf.engine_kg} kg` : ''})` });
+  if (L.ballTrack && L.ballTrack.length && !L.ballSummary) { const tr = L.ballTrack; L.ballSummary = { v0: tr[0][4], end: tr[tr.length - 1], track: tr.filter((t, i) => i % 6 === 0) }; }
+  if (L.ballSummary) {
+    const tr = L.ballTrack, back = Math.min(...tr.map(t => t[5] ?? 0)), sphere = 7850 * 4 / 3 * Math.PI * (L.ballR || 0) ** 3;
+    if (L.smashed) L.ballSummary.smashed = L.smashed;
+    Object.assign(L.ballSummary, { mass_kg: Math.round(L.ballMass || 0), sphere_kg: Math.round(sphere), fastest_back_m_s: +(-back).toFixed(2), punches: { ...punchStat } });
+    // a steel ball is a steel sphere (15 Nov: its four overlapping boxes weighed 3.2 spheres)
+    checks.push({ name: 'ball: its mass, of a steel sphere of its size', value: +((L.ballMass || 0) / sphere).toFixed(3), limit: '0.99 to 1.01', pass: Math.abs((L.ballMass || 0) / sphere - 1) <= 0.01, what: 'the ball weighs what a ball weighs' });
+    // it does not come back off what it breaks (15 Nov, `anticipate`; lab tallball before: back at 12 m/s off a
+    // 0.25 m slab it went through four frames later). The limit: a tenth of the speed it was sent at.
+    // and it is not stopped dead by what it had not paid for (18 Nov: lab qballglass passed the check above with the
+    // ball at 2 m/s of 58 in one step, on the rim of a hole made where it had been going before two chairs put it
+    // 0.11 m off; a wall, 20,839 N s). Counted: read-backs in which a ball faster than 10 m/s lost over 70% of its
+    // speed with no thing arrived at in the page's log about then. (A wardrobe of 383 kg takes 51%.)
+    if (S.expect && S.expect.ballOn) {
+      // (the log's frames are the GPU's, 4 on from the lab's; a stop is seated up to a second after it is arrived at)
+      const arr = (punchStat.log || []).filter(l => l.ev === 'arrives'), near = (f) => arr.some(l => l.f >= f - 8 && l.f <= f + 12) || arr.some(l => l.stop && l.f >= f - 70 && l.f <= f + 12);
+      let dead = 0, first = null;
+      for (let k = 1; k < tr.length; k++) if (tr[k - 1][4] >= 10 && tr[k][4] < 0.3 * tr[k - 1][4] && !near(tr[k][0])) { dead++; first = first || [tr[k][0], tr[k - 1][4], tr[k][4]]; }
+      L.ballSummary.stopped_dead = first;
+      checks.push({ name: 'ball: stopped dead by what it had not paid for (read-backs)', value: dead, limit: 0, pass: dead === 0, what: `it loses its speed to what it breaks, as the page's log has it${first ? `; first at frame ${first[0]}: ${first[1]} to ${first[2]} m/s` : ''}` });
+    }
+    if (S.expect && S.expect.ballOn) checks.push({ name: 'ball: fastest it came back the way it was sent (m/s)', value: +(-back).toFixed(2), limit: +(0.1 * tr[0][4]).toFixed(1), pass: -back <= 0.1 * tr[0][4], what: 'it goes on through what it breaks, or stops in it' });
+  }
   if (S.expect && S.expect.far) {
     // past the clean-up distance things go at the next read-back (what their speed carries them over the lag is
     // allowed for, see labOnRead)
@@ -412,7 +489,7 @@ function labReport(wallS) {
       peak: { bodies: Math.max(0, ...se.map(x => x.bodies)), awake: Math.max(0, ...se.map(x => x.awake)), contacts: Math.max(0, ...se.map(x => x.contacts)), particles: Math.max(0, ...se.map(x => x.parts)), particles_moving: Math.max(0, ...se.map(x => x.pAwake)), drawn: Math.max(0, ...se.map(x => x.drawn)) },
       work: { contact_substeps: L.work.cs, particle_substeps: L.work.ps },
     },
-    events: L.events, timeline: L.timeline, trace: L.trace.length ? L.trace : undefined, btrace: L.btrace || undefined, parked: globalThis.__parked || undefined, slotLog: globalThis.__slotLog || undefined, bursts: L.bursts || undefined, traceEvents: L.traceEv.length ? L.traceEv : undefined,
+    partDump: L.partDump || undefined, motionLog: window.__motionLog || undefined, events: L.events, timeline: L.timeline, trace: L.trace.length ? L.trace : undefined, btrace: L.btrace || undefined, parked: globalThis.__parked || undefined, slotLog: globalThis.__slotLog || undefined, bursts: L.bursts || undefined, traceEvents: L.traceEv.length ? L.traceEv : undefined,
     series: se,
   };
 }
@@ -437,7 +514,7 @@ function labDigest() {
   if (pr && pr.data) { const u = new Uint32Array(pr.data.buffer, pr.data.byteOffset, pr.data.length); for (let k = 0; k < u.length; k++) parts.mix(u[k]); }
   for (const j of jobs.blast) job.mix(j.op.length);
   // (each part apart, so a difference says where it starts)
-  return [pose.v, parts.v, gpu.n, breaks, dustBricks, E.bricks_alive(), E.joints_live(), gpu.stats.manifolds || 0, partsMade, gpu.stats.awake || 0, L_events(), job.v, gpu.inputs, gpu.frame, gpu.skipped || 0, gpu.colorLimit, gpu.substeps, gpu.ns, gpu.np || 0, JSON.stringify(gpu.stats).length, (gpu.pendingInherit || []).length];
+  return [pose.v, parts.v, gpu.n, breaks, dustBricks, E.bricks_alive(), E.joints_live(), gpu.stats.manifolds || 0, partsMade, gpu.stats.awake || 0, L_events(), job.v, gpu.inputs, gpu.frame, gpu.skipped || 0, gpu.colorLimit, gpu.substeps, gpu.ns, gpu.np || 0, JSON.stringify(gpu.stats).length, (gpu.pendingInherit || []).length, LAB.inHash || 0];
 }
 function L_events() { return (gpu.events && gpu.events.length) || 0; }
 async function labRun() {
@@ -462,9 +539,13 @@ async function labRun() {
   // scenario sets one, `debris`, or a preset does)
   if (!(window.__preset && PRESETS[window.__preset])) { setting.debris = LAB.spec.debris || 20000; SETTINGS.debris.apply(setting.debris); }
   setting.adaptive = 0; gpu.substeps = setting.substeps;
-  Math.random = seededRandom(window.__seed || 20261104);   // (SF_SEED: another run of the same scenario, to tell a trend from one run's luck)
+  simRandom = seededRandom(window.__seed || 20261104);   // (SF_SEED: another run of the same scenario, to tell a trend from one run's luck)
+  // (lab.cjs --twice-view: the view on from the start, without the structure step that switching it by hand asks
+  // for, which would shift every job after it by one and is not what is being compared)
+  if (window.__viewOn) { setting.view = 1; viewShown = true; E.set_param(8, viewParam()); }
   if (window.__pinch && gpu) gpu.pinching = true;
   if (window.__noPinch && gpu) gpu.pinching = false;
+  if (window.__noPunch) setting.punch = 0;   // (SF_NOPUNCH: the ball as before 15 Nov, hitting rigidly; SF_OLDBALL: and at its old mass)
   if (window.__noBound && gpu) { gpu.velocityBound = false; gpu.pinching = false; }   // (as before 14 Nov: neither the bound nor the pinch test)
   if (window.__oldMasonry) E.set_param(6, 1);   // (SF_OLD_MASONRY: masonry in falling parts parts at once, for comparison)   // (SF_PINCH: crushing of pinched pieces, off by default)
   fly = true; E.player_set(-20, 8, -30); yaw = Math.PI + 0.62; pitch = -0.12;
@@ -498,6 +579,9 @@ async function labRun() {
     labParticlesMade(); labTruth();
     labFrameChecks();
     L.digest.push(labDigest());
+    // (debugging a difference between two runs: the particles' records at one frame, SF_PARTDUMP)
+    if (window.__partDumpAt && !window.__motionLog) window.__motionLog = [];
+    if (window.__partDumpAt === L.f && snapCur && snapCur.parts && snapCur.parts.data) L.partDump = Array.from(snapCur.parts.data.subarray(0, snapCur.parts.n * 12));
     // let the GPU finish this frame's work and its stats come back (the next frame sees them)
     // (and wait for all of them: what the next frame sees must not depend on how fast the browser maps buffers)
     if (dev) { await dev.queue.onSubmittedWorkDone(); await gpu.flushStats(); await new Promise(r => setTimeout(r, 0)); }
@@ -512,7 +596,11 @@ async function labRun() {
     // (debugging a bounce: chosen bodies, every frame of the trace window, straight from the GPU: pose, velocity,
     // mass, and every contact they have, with its normal, points, impulses and approach speeds)
     if (window.__traceBodies && dev && L.traceWin && L.f >= L.traceWin[0] && L.f <= L.traceWin[1]) {
-      const want = new Set(String(window.__traceBodies).split(',').map(Number));
+      const want = new Set(String(window.__traceBodies).split(',').map(Number).filter(x => x > 0));
+      // ('ball': the heavy bodies, whatever their numbers)
+      if (String(window.__traceBodies).includes('ball')) gpu.bodies.forEach((gb, k) => { if (gb && !gb.dead && gb.heavy) want.add(k + 1); });
+      // ('big': the bodies over 10 t)
+      if (String(window.__traceBodies).includes('big')) gpu.bodies.forEach((gb, k) => { if (gb && !gb.dead && gb.mass > 1e4) want.add(k + 1); });
       const nm = Math.min(gpu.stats.manifolds || 0, gpu.maxMan), cur = (gpu.frame - 1) & 1;
       const [man, bod, sol] = await Promise.all([gpu.read(gpu.manBuf, 2 * gpu.maxMan * 17 * 16), gpu.read(gpu.bodBuf, gpu.n1 * 80), gpu.read(gpu.solBuf, gpu.n1 * 96)]);
       const r3 = (a, o) => [a[o], a[o + 1], a[o + 2]].map(x => +x.toFixed(3));
@@ -525,6 +613,9 @@ async function labRun() {
         for (let q = 0; q < cnt; q++) pts.push({ ra: r3(man, o + (6 + 2 * q) * 4), jn: +man[o + 14 * 4 + q].toFixed(0), rv: +man[o + 15 * 4 + q].toFixed(2) });
         row.contacts.push({ a, b, ma: a > 0 ? (bod[a * 20 + 3] > 0 ? Math.round(1 / bod[a * 20 + 3]) : 0) : 0, mb: bod[b * 20 + 3] > 0 ? Math.round(1 / bod[b * 20 + 3]) : 0, n: r3(man, o + 4), cnt, pts, e: +man[o + 64].toFixed(2), J: Math.round(man[o + 65]), ap: +man[o + 66].toFixed(2) });
       }
+      // (and the static shapes within a metre of the first of them)
+      if (row.bodies[0]) { const c = row.bodies[0].p, o1 = gpu.bodies[0].p; const wp = (sh) => [0, 1, 2].map(k => o1[k] + sh.lp[k]);
+        row.near = gpu.shapes.map((sh, k) => ({ sh, k })).filter(({ sh }) => { if (!sh || sh.dead || sh.body !== 1 || !sh.lp) return false; const w = wp(sh); return Math.abs(w[0] - c[0]) < 0.6 + sh.h[0] && Math.abs(w[1] - c[1]) < 0.6 + sh.h[1] && Math.abs(w[2] - c[2]) < 0.6 + sh.h[2]; }).slice(0, 80).map(({ sh, k }) => ({ k, p: wp(sh).map(x => +x.toFixed(3)), h: sh.h.map(x => +x.toFixed(3)), hull: sh.hull || 0 })); }
       (L.btrace = L.btrace || []).push(row);
     }
     // (debugging determinism: the GPU's own body, solver and shape records, every frame)
@@ -560,15 +651,17 @@ async function labRun() {
     if ((gpu.stats.awake || 0) === 0) L.bodiesQuietAt = L.f;   // (the last frame every body was asleep)
     if (L.f % 10 === 0 || L.f === S.frames - 1) {
       let roof = 0;
-      for (let x = -9; x <= 9; x += 3) for (let z = -9; z <= 9; z += 3) { const ts = E.raycast(x + 0.3, 200, z + 0.3, 0, -1, 0, 300); if (ts >= 0) roof = Math.max(roof, 200 - ts); }
-      if (snapCur) for (let k = 0; k < snapCur.pose.length / 10; k++) { const y = snapCur.pose[k * 10 + 1] + snapCur.pose[k * 10 + 8]; if (Number.isFinite(y) && Math.abs(snapCur.pose[k * 10]) < 12 && Math.abs(snapCur.pose[k * 10 + 2]) < 12) roof = Math.max(roof, y); }
+      // (over the building the scenario is about: roofAt, a building of the Quarter and half the square to look in)
+      const ra = S.roofAt ? [...quarterAt(S.roofAt[0], S.roofAt[1] || 0, 0, S.roofAt[2] || 0), S.roofAt[3] || 9] : [0, 0, 0, 9];
+      for (let x = -ra[3]; x <= ra[3]; x += ra[3] / 3) for (let z = -ra[3]; z <= ra[3]; z += ra[3] / 3) { const ts = E.raycast(ra[0] + x + 0.3, 200, ra[2] + z + 0.3, 0, -1, 0, 300); if (ts >= 0) roof = Math.max(roof, 200 - ts); }
+      if (snapCur) for (let k = 0; k < snapCur.pose.length / 10; k++) { const y = snapCur.pose[k * 10 + 1] + snapCur.pose[k * 10 + 8]; if (Number.isFinite(y) && Math.abs(snapCur.pose[k * 10] - ra[0]) < ra[3] + 3 && Math.abs(snapCur.pose[k * 10 + 2] - ra[2]) < ra[3] + 3) roof = Math.max(roof, y); }
       L.roofMin = Math.min(L.roofMin ?? 1e9, L.f > 10 ? roof : 1e9);
       L.series.push({ f: L.f, D: +L.D.toFixed(2), T: +L.T.toFixed(2), drawn: L.draw.n, bodies: gpu.n, awake: gpu.stats.awake, contacts: gpu.stats.manifolds, parts: gpu.stats.pLive || 0, pAwake: gpu.stats.pActive || 0, sub: gpu.substeps, gpu: +g.toFixed(2), js: +L.jsMs[L.jsMs.length - 1].toFixed(2), roof: +roof.toFixed(2), upper: +labUpper().toFixed(1), breaks, dust: dustBricks, failed: failedJoints, cracked: crackedJoints, worn: wornJoints, wearing: structWearing });
     }
     if (performance.now() - lastShow > 1000) { lastShow = performance.now(); $('bench-out').textContent = `Lab: ${name} · frame ${L.f} of ${S.frames} · ${((performance.now() - tw) / 1000).toFixed(0)} s\nholes ${L.holeFrames} · duplicates ${L.dupFrames} · flickers ${L.flickers} · jumps ${L.teleports} · bounces ${L.bounces} · launches ${L.launches}`; L.status = { f: L.f, frames: S.frames }; }
   }
   const rep = labReport((performance.now() - tw) / 1000);
-  L.on = false; Math.random = mathRandom;
+  L.on = false; simRandom = () => Math.random();
   // the next scenario, after a reload (each starts from a fresh building)
   st.done.push(name); st.queue.shift(); st.results.push(rep);
   try { localStorage.setItem('sf-lab', JSON.stringify(st.queue.length ? st : null)); } catch (e) {}
