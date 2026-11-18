@@ -1016,6 +1016,30 @@ body's reach plus 0.5 m); a crumb with no body near is counted at 10 m/s as befo
 `pushed_at`. What this gives up: a crumb thrown at under the pusher's speed plus 2.5 m/s in the wrong direction is
 not counted.
 
+### Crumbs thrown by crumbs, and what "settled" waits for (18 November, later)
+
+The first pass on build 228b18a (software GPU, full lengths) showed two more things.
+
+- **One crumb thrown in `tallball` and one in `qballoffice`**, up at 13.2 and 11.3 m/s with nothing moving within
+  reach (`pushed_at` 0), long after the ball had stopped. Cause and fix: docs/GPU.md, "Crumbs do not throw one
+  another"; GPU test `crumbnest`, 7.09 → 1.8 m/s.
+- **`qbarn` "not settled" with nothing awake from frame 300 to 900.** Three of its joints wear without failing, and
+  while joints wear the structure is checked every quarter second. "Settled" required no engine job in flight, so
+  whether a check happened to be in flight at a frame decided it. It now requires nothing awake and no engine job
+  since that changed anything (failed a joint, sent a body, changed a static shape, or found the structure
+  moving). A job still in flight at the last frame is no longer counted against the scenario; one that then
+  failed something would be missed by this check (its own change of measure; rule 3).
+
+**Seen once, not reproduced: a pinched piece that never slept.** In `qtemple` on 228b18a body 275, 11 kg and three
+boxes, lay 4 cm above the ground under the standing structure, held between the two (six contacts, 600 to 3,400
+N s each, one frame's impulse of about 20 t), still to a millimetre and awake from frame 360 to the end, with 168
+crumbs round it awake as well: "not settled". On the next build (the crumb change) the same scenario settles at
+frame 420 and no piece ends up pinched, so the cause was not found; what restarts such a piece's rest timer is not
+known. GPU test `pinched` (a piece under a fixed block, 0, 5 and 20 mm into it) sleeps within a second and does
+not reproduce it; it stays as a check. The lab's trace can now follow whatever is awake
+(`SF_TRACE_BODIES=awake --trace a:b`), with each body's rest timer and its distance from where the timer
+restarted, for the next time it shows.
+
 ### The rebound measure (its own commit; rule 3)
 
 "Rebounds over half the impact speed" took the impact speed to be the fall speed of the piece's centre at the

@@ -187,6 +187,24 @@ crumb was still falling, from about 80 m, at 28 m/s in the last frame. The lab h
 and 73, as the upper part lands. GPU test `crumbpop`, a 300 t part of 128 bricks landing at 6 m/s on 64 crumbs:
 the fastest crumb goes up at **39.9 m/s** before (all that `p_apply` allows) and **6.8 m/s** with the limit.
 
+### Crumbs do not throw one another (18 November)
+
+The limit above took the fastest pusher's speed, whatever its direction, and crumbs were among the pushers. Each
+push of one crumb on another is bounded by how fast the two close plus the separation limit, and that limit was
+added again by every neighbour and in every sub-step: up a column of crumbs made on top of one another each left
+2 m/s faster than the one under it, and two crumbs parting let each other go faster by it each sub-step.
+
+The move the other crumbs give a crumb in a sub-step is now bounded along the way it ends up going: as far as it
+was going that way by itself, or as far as any crumb that pushed it went that way, or the separation limit,
+whichever is most. The shapes' pushes that follow keep the limit by speed: bounded along its way too, a crumb a
+box came down on could not get out from between the box and a table as fast as the box came, and ended 5 cm
+inside the table (GPU test `particles`, 3 inside; tried, not kept).
+
+Found by the lab's check for crumbs thrown up: `tallball` and `qballoffice` (build 228b18a, 480 frames, software
+GPU) each had one crumb going up at 13.2 and 11.3 m/s, 85 and 45 frames after the ball had stopped, with no body
+moving within reach. GPU test `crumbnest`, 24 crumbs made 0.1 m apart in a well 0.5 m square: the top of the
+column leaves at **7.09 m/s** before and **1.8 m/s** after (2.07 the fastest in any direction).
+
 ## Validation (`node engine/gpu/test_gpu.cjs`, headless Chrome with SwiftShader WebGPU)
 
 | Check | Expected | GPU result |
