@@ -857,3 +857,123 @@ Scenario by scenario (what fails; nothing listed means it passes):
 - **`timber`'s roof falls 2.94 m, against a lower limit of 3** (3.23 in the morning): the pieces under the upper storeys are no longer thrown out from under them. Not changed: the limit is one number, and one run.
 - **Crumbled share**, `complex` 0.69 and `city` 0.88: the part that breaks at frame 77 of `complex` is 66 m³, 13% of it masonry, and 69% of the rest goes to crumbs. What the rest is made of (the building has a timber roof, a steel frame and concrete floors) was not looked at; the lab now records the masonry share of every big break, and the other materials are the next thing to record. By the page's rule a loose brick of 0.5 m or less is a particle, so a part built of small bricks crumbles by that rule alone. Not settled.
 - **The presets' numbers** are still choices: no real GPU has run this build.
+
+## 15 November: the engineer's view, the Quarter, and what stopped the ball
+
+Asked for, from the published build of 14 November: the engineer's view still gives a different destruction than
+with it off; all levels replaced by one, of real buildings in every structure and material (docs/QUARTER.md);
+and the physics re-checked, because "the metal ball often bounces off structures instead of going on through".
+The last was true, and had seven causes. All numbers are from the software GPU (SwiftShader), on this build.
+
+### The engineer's view changed the destruction: two causes
+
+1. **Parts left the structure with its velocity only where the view had cells.** A part cut free starts with the
+   velocity the structure had there (`view_motion`). That was read from the engineer's view's cells: with the
+   view on every lot had them; with it off, only lots sagging 2 cm. The step now records its own moving cells
+   (`Sim::motion_cells`, 9 numbers a cell), sent to the page with every structure step, view or no view.
+2. **The page's random numbers.** Crumbs scatter with a seeded `Math.random` in the lab, the browser's in the
+   game. three.js draws from the same `Math.random` when it makes objects (their ids), and the view makes more of
+   them: with the view on, the scatter that followed was another. The simulation has its own generator now
+   (`simRandom`, engine/web).
+
+After the first alone the two runs still parted at frame 26; after both, **`collapse` over 150 frames is the same
+frame for frame with the view off and with it on** (`node game/lab/lab.cjs collapse --frames 150 --twice-view`,
+now part of `tools/check.sh lab`).
+
+### The ball: before
+
+- `tallball` (14 November): a 0.8 m ball down onto a 0.25 m roof slab at 47 m/s went back up at 12 m/s, 7.3 m
+  high, and came down again through the hole it had made.
+- `qballglass` (this morning, with the look-ahead of the first half of the day): the 0.5 m ball (514 kg, 925 kJ)
+  through the glass house at 60 m/s was at 39 m/s after two chairs, came back from the core's first partition at
+  14 m/s, and lay in the core.
+
+### The seven causes
+
+| | Cause | Where | What it did (measured) | Now | The check that holds it |
+| --- | --- | --- | --- | --- | --- |
+| 1 | The wall is broken some frames after the ball has been stopped by it | page, engine | `tallball`: back up at 12 m/s | A hit seen coming (below) | lab `tallball`, the `qball...` scenarios ("fastest it came back") |
+| 2 | A fast pair that only passes had contacts | GPU narrow phase | The ball in its own hole: 104 contacts with the rim, 44.7 to 8.3 m/s | A swept test (docs/GPU.md, "Fast pairs that only pass") | GPU `passby` |
+| 3 | The ball weighed 3.2 steel spheres, and had corners | page | 1,668 kg for 514; four crossed boxes, thrown level onto the ground it went up at 10 m/s | Its mass given (`mass`); three eight-sided discs | lab "its mass, of a steel sphere of its size" |
+| 4 | **A sleeping body was a wall in the step it was first hit** | GPU | The wardrobe (383 kg, asleep): the ball back at 15.9 m/s, 26,335 N s through one contact | Woken before the contacts are made (docs/GPU.md) | GPU `sleeper`: -15.9 → +23.7 m/s |
+| 5 | **A floor's seams were edges to catch on** | GPU | A block pushed along a floor of panels stopped at the seam with the ball behind it: 4.2 m/s left of 60; chairs caught so took 19 m/s off the ball | Covered faces (docs/GPU.md) | GPU `wedge`: 4.2 → 30.3 m/s |
+| 6 | A light piece cost the ball as one of a twentieth of its own mass | GPU solver | Two 12 kg chairs: 60 to 54.7 m/s, where they can take 2.7 | A body thrown is solved at its own mass while fast | GPU `wedge`: 54.7 → 56.6 m/s |
+| 7 | **A piece crushed under a heavy body had already stopped it** (found 18 Nov, on the building, not the ball) | GPU | The frame's 2,005 t upper part: 2.26 to 0.75 m/s in one step on one piece of rubble; it then stood whole on its columns' stumps | What a crushed piece gives back (docs/GPU.md) | GPU `crushgive`: 1.65 → 3.12 m/s; lab `collapse` roof fall |
+
+Causes 4, 5 and 7 are not the ball's alone: anything fast met sleeping debris as a wall, and anything pushed along a
+floor of bricks could catch at a seam. They were found on the ball because it is the fastest thing in the game.
+
+### A hit seen coming
+
+What a ball does to a wall is decided by the wall's strength and the ball's energy, and the engine knows both;
+what the GPU does in the step they meet is stop the ball. So the ball (any body the page marks with `markHeavy`)
+looks 0.25 s of flight ahead (`engine/web/breaking.js`):
+
+- `Sim::sweep`: what is in its way. Its core (half its radius) meeting anything; its side (to 1.1 of its
+  radius: its corners reach 1.08) catching what was not beside its path before (a door's jamb: it went through a 0.75 m door 0.2 m off the middle); a floor it comes
+  down on at under 20 degrees is not in its way: it lands there, and the path looked along bends there and goes
+  on along the floor.
+- `Sim::punch_probe`: what it breaks of that and what each thing costs it, a hole 1.35 radii wide along the
+  path, each brick its material's crush energy times its volume, through one thing after another until the
+  energy or the look-ahead ends. Asked of the page's copy of the engine **in the frame** (the bricks are copied,
+  broken, put back); the hole itself is made by the engine in its turn (`Sim::punch`), 4 to 8 frames later.
+- As it reaches each thing its speed drops by what that thing cost. From three steps before its front is there
+  until its back has left (0.3 s at most) it does not touch what of the fixed world is across its way
+  (`GpuWorld.setShot` 2): the hole is where it was going when it asked, 0.27 of its radius wider than its corners
+  reach, and a chair on the way puts it 0.1 m off. The floor under it holds it throughout.
+- Furniture and debris in its way in the next three steps, lighter than it, that it has the energy to crush
+  (crushing all of the piece taking less than the two would lose meeting and going on together) are rubble
+  before it is there, and it pays that energy (`ahead`). The glass house's chairs take 5 kJ each; its wardrobe,
+  383 kg of teak, 153 kJ. What it cannot crush it hits as any body does.
+- With nothing left it is stopped in the crater: one step to the bottom, held there until the engine has made
+  the crater, then seated.
+- Gone another way (two radii off the line it asked along, or 25 degrees), what it has not reached is forgotten
+  and asked again from where it is. A little off changes nothing: the thing is paid for, and it passes it
+  wherever the hole is.
+- The momentum it loses at each thing is a hit on the dynamic structure there.
+
+Engine tests (the numbers before each rule are in the tests):
+`a_fast_ball_goes_through_a_slab_and_a_slow_one_stops_in_it` (375 kJ a 0.25 m slab for the 0.8 m ball),
+`a_ball_goes_through_the_wall_and_not_the_floor_it_flies_over` (the floor under a partition: 0.168 m³ and
+112.5 kJ taken with it before; 0.018 m³, what is torn off with the partition, and 18.75 kJ now),
+`a_ball_breaks_the_jamb_it_catches_and_is_turned_by_the_floor_it_comes_down_on` (the jamb: not seen before, 0.51 m³
+of it left in the ball's way; a floor come down on at 3.5 degrees: 0.88 m³ of it and 547 kJ crushed ahead before,
+0.017 m³ and 15.6 kJ now; and a question asked without being done changes nothing and is answered the same).
+
+What was tried and replaced on the way, each for a measured reason: waiting for the engine's answer (it came
+after the next wall: the glass house's partitions are 2.75 m apart, 3 steps at 54 m/s, and the answer takes 4 to
+8: that path is gone from the code); five rays to find the first thing (missed the jamb); stopping the look at
+a floor grazed (nothing beyond the landing was broken in time); preferring a face that only touches (it changed
+no test's number once the seams and the sleepers were found: taken out); turning a contact on a covered face
+to the faces that are there (wrong depth: the collapse's heap did not settle; such a contact is now none).
+
+### The ball: after
+
+| Scenario | Before | After (this build) |
+| --- | --- | --- |
+| `tallball`, 0.8 m, 2,104 kg, 45 m/s down onto an 8-storey frame | back up at 12 m/s, 7.3 m high (14 Nov) | 45 → through seven slabs (375 kJ each) → stopped in the eighth, the first floor, at 4.1 m; fastest back 0.0 m/s |
+| `qballoffice`, the same onto the office tower (10 storeys) | (new) | through seven slabs, stopped in the eighth at 11.5 m; back 0.0 |
+| `qballglass`, 0.5 m, 514 kg, 60 m/s through the glass house | 39 m/s after two chairs; back at 14.1 m/s from the first partition | 54.3 after the chairs; the core's three partitions at 54.0, 53.3, 53.1; the wardrobe pushed on, 53 → 25.9 (sharing its momentum gives 30); it ends behind the wardrobe against the east wall; back 3.7 m/s (from the wardrobe, as it stops) |
+| `qballtemple`, into the temple between two columns | through both cella walls, 60 → 50.8 → 39.8 m/s | the same (263 and 256 kJ); it lands on the ground beyond the temple at 40 m/s and skids on at 30 |
+| `qballhall`, through the market hall from where the player starts | stopped in it | 60 → 35.7 → stopped in it; back 0.2 m/s |
+| `ball`, two balls at 120 m/s into the 3-storey frame's facade | through | through, out at 112 m/s |
+
+The speed changes are the ball's track in each result (`physics.ball.track` and `punches.log`).
+
+### The lab's own measures changed (their own commit; rule 3)
+
+- **"Pieces moving further than their speed allows".** The distance a piece is drawn to have gone in a frame was
+  held against its speed in the newest read-back. The drawn place is blended between two read-backs: the speed
+  that allows it is the greater of the two. This was every "crumb that hops" of 14 November (2 to 7 a collapse);
+  GPU test `pland` reads the same landings from the GPU every step and finds none.
+- **Energy.** Every body's energy was its volume as concrete, and the ball was left out: a 383 kg timber wardrobe
+  pushed by the ball showed as 6.2 MJ from nothing. A body's mass is now its volume at the density it was made
+  with, and the ball's energy counts (what the page takes from it at each thing only lowers it).
+- **A ball thrown in the Quarter (`qball`) is an input for 2 s**, as `ball` always was (it was 0.5 s: my new act
+  had the default).
+- New checks on every ball: its mass against a steel sphere's (0.99 to 1.01), and with `ballOn` the fastest it
+  came back the way it was sent (limit 6 m/s; 4.5 for the 45 m/s balls: a tenth of what it was sent at).
+- New check on every piece made: its mass on the GPU over the engine's (0.98 to 1.02; steel debris weighed the
+  solid box, 6.25 times its section: docs/GPU.md, "Mass").
+- The GPU suite wrote its results beside the engine's sources since the directories were split (14 November), and
+  docs/STATUS.md read the old file: fixed.

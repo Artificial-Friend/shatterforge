@@ -1,6 +1,6 @@
 # Rules for working on Shatterforge
 
-Layout: `engine/` is the engine (the future SDK: the Rust crate `sf-engine`, the GPU world, the page runtime); `game/` is its demo game (levels, player, wasm exports, page, lab). The engine never depends on the game, except that its tests take the game's level files as fixtures. `legacy/` is the retired first engine. See README.md.
+Layout: `engine/` is the engine (the future SDK: the Rust crate `sf-engine`, the GPU world, the page runtime); `game/` is its demo game (the level, which is the Quarter, docs/QUARTER.md; the player, wasm exports, page, lab). The engine never depends on the game, except that its tests take the game's level files as fixtures. `legacy/` is the retired first engine. See README.md.
 
 These hold for every change, by anyone (people or Claude).
 
