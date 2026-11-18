@@ -104,7 +104,13 @@ function pullDebris() {
   // rest it stopped stepping, so whatever came next, a ball, a blast's pieces, never stepped, never read, never
   // showed: "clicking does nothing" on the complex building, whose furniture falls asleep while the page still steps;
   // and the benchmark stood still at 39.6 s once its rubble had settled. Reproduced headless, play/rest.cjs.)
-  if (!LAB.on && gpu.realFrame === lastReadReal && snapCur) { stepsAtRead = stepsDone; return; }
+  if (!LAB.on && gpu.realFrame === lastReadReal && snapCur) {
+    stepsAtRead = stepsDone;
+    // (chunks waiting for the read-back that shows their debris: with the world at rest and nothing sent to it
+    // since, none is coming and no debris with it: the engineer's view of a building at rest, a lot that sagged)
+    if (pendingChunks.length && gpu.statsInputs === gpu.inputs && !gpu.wakeReq) { const due = new Set(pendingChunks.map(e => e.k)); pendingChunks = []; for (const k of due) chunkMesh(k); }
+    return;
+  }
   lastReadReal = gpu.realFrame;
   reading++;
   const seq = ++readSeq, issuedAt = stepsDone;

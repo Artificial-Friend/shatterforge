@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..', '..');
 const wasm = fs.readFileSync(path.join(root, 'target/wasm32-unknown-unknown/release/sf_demo.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'crumbpop', 'crumbnest', 'pinched', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'crumbpop', 'crumbnest', 'pinched', 'tread', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
 // (heap is out of the default run since 18 November: it fails, a known problem written down in docs/GPU.md,
 // "Still to do": the slab lands corner first on the heap and rocks, its centre up at 1.04 m/s for a limit of 0.76.
 // Run it by name: node engine/gpu/test_gpu.cjs heap)
@@ -1013,6 +1013,27 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
         out.push({ pinned_m: pin, awake, y: +r.body[8].toFixed(4), vmax: +vmax.toFixed(3) });
       }
       check('pinched', out.every(o => o.awake[o.awake.length - 1] === 0), { cases: out });
+    }
+    if (scenes.includes('tread')) {
+      // A face covered in part is not covered (19 Nov; `coverFlush`). Two fixed steps, the upper 0.375 m short of
+      // the lower one's edge, as the temple's platform has them: the lower step's top is under the upper step but
+      // for that tread. A marble piece (0.2 x 0.1 x 0.2 m, 10 kg) dropped on the tread at 3 m/s must lie on it,
+      // 0.425 m up. Before: the lower step's top was marked covered from five points of it, all under the upper
+      // step; the contact with it was dropped and the piece fell through the step to the ground, 0.05 m up, inside
+      // the solid. (Lab qtemple, 19 Nov: a 64 kg piece landed on the tread at 7.7 m/s, went through it, lay in
+      // the step between its underside and the ground and never slept: "not settled", 319 crumbs awake round it.)
+      // And a face covered by two boxes that meet over it stays covered (a brick under two bricks in bond).
+      const steps = { fixed: true, shapes: [{ p: [0, 0.1875, 0], q: [0, 0, 0, 1], h: [2.625, 0.1875, 2.5], mat: MAT.masonry }, { p: [-0.1875, 0.5625, 0], q: [0, 0, 0, 1], h: [2.4375, 0.1875, 2.5], mat: MAT.masonry },
+        { p: [10, 0.25, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.25], mat: MAT.masonry }, { p: [9.5, 0.75, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.25], mat: MAT.masonry }, { p: [10.5, 0.75, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.25], mat: MAT.masonry }] };
+      const piece = { shapes: [{ p: [2.44, 0.725, 0], q: [0, 0, 0, 1], h: [0.1, 0.05, 0.1], mat: MAT.masonry }], v: [0, -3, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [steps, piece], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16 });
+      let low = 1e9;
+      for (let f = 1; f <= 120; f++) { w.step(1 / 60); if (f % 10 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); const r = await w.readPose(); low = Math.min(low, r.body[8]); } }
+      const r = await w.readPose();
+      const res = { y: +r.body[8].toFixed(4), lowest: +low.toFixed(4), x: +r.body[7].toFixed(3), awake: w.stats.awake, cover: { lowerStep: w.shapes[0].cover || 0, upperStep: w.shapes[1].cover || 0, brickUnderTwo: w.shapes[2].cover || 0 } };
+      w.destroy();
+      // (bits: +x 1, -x 2, +y 4, -y 8, +z 16, -z 32. The brick under two: its top covered.)
+      check('tread', Math.abs(res.y - 0.425) < 0.01 && res.lowest > 0.41 && (res.cover.lowerStep & 4) === 0 && (res.cover.brickUnderTwo & 4) === 4, res);
     }
     if (scenes.includes('bound')) {
       // The velocity bound (vh_clamp) on its own: the landing cases with shock propagation off and no crushing, the

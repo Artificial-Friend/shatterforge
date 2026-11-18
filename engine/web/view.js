@@ -25,7 +25,11 @@ function showView(v) {
   // (without the view a lot is written because it moved, and what moved may be about to leave as bodies: its chunks
   // wait for the read-back that shows those, as every change's do. Drawn at once, the lab's ball had 26 frames
   // with less drawn than exists, 13 Nov.)
-  const later = gpu && !+setting.view;
+  // (with the view on as well, since 19 Nov: drawn at once, the bricks that had just left as bodies were gone from
+  // the building a frame or two before their debris showed: lab collapse --twice-view, 150 frames, 6 frames with
+  // 0.07 to 0.32 m3 less drawn than exists in the run with the view on, none in the run without. A world at rest
+  // has no read-back coming: pullDebris draws what waits then.)
+  const later = !!gpu;
   for (let i = 0, n = E.view_chunk_count(); i < n; i++) { if (later) pendingChunks.push({ k: E.view_chunk(i), need: readSeq + 1 }); else chunkMesh(E.view_chunk(i)); }
 }
 let viewShown = false;

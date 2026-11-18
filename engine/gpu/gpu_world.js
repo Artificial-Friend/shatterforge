@@ -3196,8 +3196,14 @@ class GpuWorld {
     const bx = this._coverBox(slot);
     if (bx) { C.box.set(slot, bx); this._coverCells(bx, 0, (key) => { let set = C.grid.get(key); if (!set) C.grid.set(key, set = new Set()); set.add(slot); }); near(bx); C.dirty.add(slot); }
   }
-  // The masks of the boxes to be looked at again. A face is covered when its middle and four points 0.6 of the
-  // way to its edges, 1 cm out from it, are all inside other fixed boxes.
+  // The masks of the boxes to be looked at again. A face is covered when all of it is: 1 cm out from it, the
+  // other fixed boxes there leave none of it open (to within 1 cm of its edges). First five points of it (its
+  // middle and four 0.6 of the way to its edges), which rule out most faces; then the whole face, cut along the
+  // edges of the boxes over it, each part's middle inside one of them.
+  // (The five points alone were the rule until 19 Nov. A step under a shorter step has all five under the upper
+  // one and a tread 0.375 m wide in the open: marked covered, its top gave no contact, and what landed on the
+  // tread fell through the step: GPU test tread, a piece at rest 0.02 m up inside the solid for 0.425; lab
+  // qtemple, a 64 kg piece in the temple's step that never slept.)
   coverFlush() {
     if (!this._cov) { this._cov = { grid: new Map(), box: new Map(), dirty: new Set() }; for (let s = 1; s <= this.shapes.length; s++) this.coverTouch(s); }
     const C = this._cov; if (!C.dirty.size) return;
@@ -3213,6 +3219,19 @@ class GpuWorld {
         for (const [a, b] of [[0, 0], [0.6, 0.6], [-0.6, 0.6], [0.6, -0.6], [-0.6, -0.6]]) {
           p[u] = 0.5 * (bx[u] + bx[u + 3]) + 0.5 * a * (bx[u + 3] - bx[u]); p[v] = 0.5 * (bx[v] + bx[v + 3]) + 0.5 * b * (bx[v + 3] - bx[v]);
           if (!inside(p, slot)) { all = false; break; }
+        }
+        if (all) {
+          const E = 0.01, lo = [bx[u] + E, bx[v] + E], hi = [bx[u + 3] - E, bx[v + 3] - E], seen = new Set(), over = [];
+          const slab = bx.slice(); slab[k] = slab[k + 3] = p[k];
+          this._coverCells(slab, 0, (key) => { const set = C.grid.get(key); if (set) for (const o of set) { if (o === slot || seen.has(o)) continue; seen.add(o); const b = C.box.get(o);
+            if (b[k] - 1e-4 <= p[k] && b[k + 3] + 1e-4 >= p[k] && b[u] < hi[0] && b[u + 3] > lo[0] && b[v] < hi[1] && b[v + 3] > lo[1]) over.push([b[u] - 1e-4, b[u + 3] + 1e-4, b[v] - 1e-4, b[v + 3] + 1e-4]); } });
+          if (lo[0] < hi[0] && lo[1] < hi[1]) {
+            const cuts = (a, b, i) => { const c = [a, b]; for (const r of over) for (const e of [r[i], r[i + 1]]) if (e > a && e < b) c.push(e); return c.sort((x, y) => x - y); };
+            const cu = cuts(lo[0], hi[0], 0), cv = cuts(lo[1], hi[1], 2);
+            for (let i = 0; all && i + 1 < cu.length; i++) { const mu = 0.5 * (cu[i] + cu[i + 1]); if (cu[i + 1] - cu[i] < 1e-3) continue;
+              for (let j = 0; j + 1 < cv.length; j++) { const mv = 0.5 * (cv[j] + cv[j + 1]); if (cv[j + 1] - cv[j] < 1e-3) continue;
+                if (!over.some(r => mu >= r[0] && mu <= r[1] && mv >= r[2] && mv <= r[3])) { all = false; break; } } }
+          }
         }
         if (all) mask |= 1 << (2 * k + sg);
       }
