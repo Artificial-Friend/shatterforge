@@ -33,12 +33,37 @@ Collision works on shapes; the solver works on bodies.
 | --- | --- | --- | --- |
 | concrete | 2400 | 0.6 | 0.1 |
 | masonry | 1900 | 0.6 | 0.05 |
-| steel | 7850 | 0.45 | 0.25 |
+| steel | 7850 (a member: 1,256, see "Mass") | 0.45 | 0.25 |
 | glass | 2500 | 0.5 | 0.2 |
 | timber | 500 | 0.5 | 0.3 |
 | ground | — | 0.6 | 0 |
 
 A pair uses the geometric mean of the two frictions and the larger restitution. Restitution is applied after the sub-steps, Box2D v3 style: points that approached faster than 1 m/s have their approach speed reflected by the restitution. The values are first estimates, to be tuned against reference footage.
+
+### What comes in too fast does not bounce (18 November)
+
+What crushes does not spring back. A contact's restitution is multiplied by 1 − (v/vc)², v its approach speed as the step begins, and is nothing above vc. vc is the lower of two limits:
+
+- **The faces.** Two faces that meet at v are stressed to v × Za·Zb / (Za + Zb): the elastic wave each sends into the other, Z = √(E × density) the wave impedance. Over the weaker one's crushing strength s the face crushes: v1 = s × (1/Za + 1/Zb).
+- **The energy.** The two shapes that touch can each hold s²V / 2E before they crush (V the shape's volume), and the blow brings ½ m v², m the pair's reduced mass: v2² = s² (Va/Ea + Vb/Eb) / m. For one box on the rigid ground v2 equals v1. For a body of many shapes it is far lower: the 307 t upper part of the complex building on the stump of one steel column, 0.7 m/s.
+
+| Material | E (GPa) | Z (MPa per m/s) | Strength s (MPa) | v1 against itself (m/s) | v1 against concrete (m/s) |
+| --- | --- | --- | --- | --- | --- |
+| concrete | 30 | 8.49 | 30 | 7.1 | 7.1 |
+| masonry | 5 | 3.08 | 10 | 6.5 | 4.4 |
+| steel | 200 | 39.6 | 250 (yield) | 12.6 | 4.3 |
+| glass | 70 | 13.2 | 50 | 7.6 | 5.8 |
+| timber (across the grain) | 0.5 | 0.5 | 8 | 32 | 16.9 |
+
+The ground and the test materials are rigid and never crush (against the ground, v1 = s / Z of the body: concrete 3.5 m/s). The strengths are the ones the crushing passes use (`CRUSH_MPA`); the moduli are textbook values, not measured ones.
+
+What the rule is and is not. Both limits are the most there can be: two whole faces meeting flat, and the whole of both shapes strained to the limit. A corner crushes sooner and the rule does not know it. Each contact patch is judged as if it took the whole blow, so a part landing on twelve stumps at once is allowed a twelfth of the energy its stumps can hold together (it errs towards no bounce for bodies of many shapes on many supports, which is what such bodies do). The factor 1 − (v/vc)² is a choice: it is the share of the impact's energy that could still be elastic, applied to the restitution, which is a ratio of speeds (the square root of that share would be the consistent form, and bounces more just under vc).
+
+Why: lab `complex`, 18 November. With the give-back below, the 307 t steel-framed upper part came down on the stumps of its steel columns at the speed it had really reached, 6.14 m/s, and went back up at 1.52 m/s, steel's 0.25 of it, throwing every chair in it at the ceilings (10 rebounds over half the impact speed in 70 frames). With the faces' limit alone (steel on steel, 12.6 m/s) it still went up at 1.18 m/s; with the energy limit, 0.11 m/s in the step it lands and 0.00 in the next.
+
+- GPU test `hardland` (the faces): a 63 t steel block flat onto fixed concrete at 6 m/s goes up at **1.54 m/s** without the rule and **0.07** with it; at 2 m/s, 0.54 and 0.48.
+- GPU test `stumpland` (the energy): a 300 t steel part of 64 boxes onto four steel stumps at 6.8 m/s goes up at **1.12 m/s** with the faces' limit alone and **0.00** with the energy limit.
+- GPU test `bounce` now expects what the rule predicts for a box dropped 2 m onto the ground (6.26 m/s): timber 0.129 m (0.18 m by its restitution alone; measured 0.127), masonry none (vc 3.2 m/s), the test material 0.5 m as before.
 
 ## Step
 
@@ -119,7 +144,7 @@ An island sleeps when all of its bodies are at rest. Testing the pose, not the i
 
 A body also sleeps on its own once it has been at rest for 1 s, even when its island is still awake. A pile of rubble with a few creeping pieces would otherwise stay awake as a whole: in the rubble test, 99% of the "awake" bodies were already still. The still ones become static support for the rest.
 
-A sleeping body is static to the solver. It wakes when a body moving faster than 0.25 m/s at the contact touches it (`wakeSpeed`). A body just woken, or creeping, does not wake its neighbours, so a pile wakes only as far as the disturbance really goes.
+A sleeping body is static to the solver. It wakes when a body moving faster than 0.25 m/s at the contact touches it (`wakeSpeed`). (It joins the solver in the next step; in the way of a body faster than 3 m/s it is woken before the contacts are made: "A sleeping body was a wall", below.) A body just woken, or creeping, does not wake its neighbours, so a pile wakes only as far as the disturbance really goes.
 
 **When a particle rests.** On its pose alone, as for bodies: within 1 cm of where its timer restarted for 0.5 s; or within its own radius, counted a quarter as fast (2 s). A speed limit (2 m/s) and touching something were required too, and the last crumbs of a collapse never slept: lodged against the foot of the standing walls or the ground, they flip between two places 6–7 cm apart every step at 2–6 m/s, some 1 mm off the ground touching nothing (their GPU records, read by the lab at the end of a run). They kept every step of a settled scene running.
 
@@ -266,6 +291,169 @@ Over the six pairs: rebounds 18 → 3, launches 8 → 0. One rebound is left in 
 
 All 41 GPU scenes pass with it (40 before, and `bound`). Cost: three more dispatches a step (one a manifold, two a body), and the pinch test's two.
 
+## Fast pairs that only pass (15 November)
+
+A pair's margin covers all the two can travel in the step, so that nothing goes through a thin wall between two
+steps (test `bullet`). The other side of that: a body at 47 m/s has contacts with everything within 0.8 m of it,
+and a contact with a shape it only passes holds it back. Its approach along that contact's normal (edge against
+edge: a slanted normal) is more than the gap divided by the step allows, and the solver takes the excess out.
+
+It was found on the steel ball (docs/LAB.md, 15 November). The engine had already made a hole for it through a
+roof slab, 1 m square for a ball whose corners reach 0.49 m from its middle. In the step it went through
+(lab `tallball`, frame 28, body trace `SF_TRACE_BODIES`), the ball had **104 contacts with the hole's rim**, their
+normals slanted (0, -0.87, 0.50), (0, -0.62, 0.79), (0.59, -0.80, -0.11), their approach speeds 27 to 45 m/s, and
+it left the step at 8.3 m/s where it entered at 44.7, turned sideways at 6.9 m/s.
+
+The narrow phase now asks, for a pair that moves more than 0.3 m against each other in the step (`SWEEP_MIN`:
+18 m/s at 60 steps a second), whether the two meet in the step at all. Each separating axis gives the part of the
+step during which they overlap along it, the one moving by its relative travel against the other (and a
+tolerance: the margin without the straight travel, which is the contact slop and what their spin can add). If no
+moment of the step lies in all those parts, there is no contact (`sweep`, in `box_box` and `hull_hull`; a hull's
+face axes are one-sided, so they only bound when the overlap begins). Slower pairs keep every contact within the
+margin, as before: a body that is turned in the step's first sub-steps may still meet what it was not heading for.
+
+GPU test `passby` (software GPU): the game's ball (0.8 m, four crossed boxes, 2,104 kg), turned so its edges are
+skew, sent down at 47 m/s through the middle of a 1.2 m hole in a fixed slab with eight turned blocks round the
+hole; and the same 0.35 m off centre, where its path does meet the rim.
+
+| | Before (`SWEEP_OFF=1`) | After |
+| --- | --- | --- |
+| Through the middle: slowest it went down while above the slab's underside | came back up at 9.1 m/s | 47.2 m/s (free fall) |
+| Through the middle: fastest sideways | 22.5 m/s | 0.00 m/s |
+| Through the middle: most contacts in a step | 38 | 4 |
+| Off centre (it must hit) | back up at 10.0 m/s, 17.6 m/s sideways | back up at 6.0 m/s, 16.6 m/s sideways |
+
+`bullet` still holds (the brick at 80 m/s stops 0.13 m short of the wall's face, as before).
+
+## Mass: a body's own, and a steel member's (15 November)
+
+- **A body's mass can be given** (`addBodies`, `mass`): the shapes share it by their volumes. The game's ball is
+  four boxes that overlap, and the world added their masses: a 0.5 m ball weighed 1,668 kg (13.6 r³ of steel)
+  where a steel sphere weighs 514 kg (4.19 r³), 3.2 times too much; the lab's 0.8 m ball 6,833 kg for 2,104 kg.
+  The lab checks it on every ball ("its mass, of a steel sphere of its size": 0.99 to 1.01).
+- **A shape can have its own density** (`density`). A steel member is a rolled section in the box it is drawn as:
+  the engine weighs and rates it at 16% of the box (`structure::STEEL_AREA`). The page gave the GPU the material
+  alone, so the same member, once it fell, weighed the solid box, 6.25 times as much (a 6 m beam of 0.25 m:
+  2,944 kg for 471 kg), and landed with that. Steel debris now carries the member's density
+  (`engine/web/bodies.js`, `debrisDensity`); the lab checks every piece it makes against the engine
+  (`piece_mass`): "a piece's mass on the GPU over the engine's (worst)", 0.98 to 1.02.
+
+## What stopped the ball, and the falling building: four things found on 15 and 18 November
+
+The game's steel ball "often bounces off structures instead of going on". Three causes were in the GPU world
+(another, the look-ahead, is the page's and the engine's: docs/LAB.md, 15 November); the fourth here was found
+when the third was fixed. Each has a GPU test that fails without the change (the switch is named) and the lab
+scenario it was found in. Software GPU.
+
+### A sleeping body was a wall for the step it was first hit in
+
+A sleeping body is static to the solver, and is woken by the narrow phase when a moving body touches it, to join
+the solver in the **next** step. For a piece that creeps onto it nothing is lost by that. For a fast one, that
+step is the hit: the sleeper has no mass in it, and the fast body leaves it as it would leave a wall.
+
+Lab `qballglass` (the 0.5 m, 514 kg ball through the glass house at 60 m/s): it reached the wardrobe (383 kg,
+asleep on the floor since the level began) at 53 m/s and came back at 15.9 m/s; one contact had taken 26,335 N s.
+
+Now a sleeping body in the way of one faster than 3 m/s (`WAKE_FAST`) is woken **before the contacts are made**:
+the broad phase marks it when the two boxes overlap (they hold a step's travel), and `prep_woken` wakes it and
+gives it its mass in the solver, between the broad and the narrow phase. The mark is a bit in a per-body table,
+not the sleep flag itself, which the broad phase reads from many threads (the pairs it lists must not depend on
+their order).
+
+GPU test `sleeper`: the same wardrobe, left until it sleeps (40 frames), then the ball at 53 m/s into its long
+side. Sharing the ball's momentum the two go on at 53 x 514 / 897 = 30 m/s.
+
+| | Before (`WAKE_OFF=1`) | After |
+| --- | --- | --- |
+| The ball, after the hit | back at 15.9 m/s | on at 26.5 m/s |
+| The wardrobe | at rest | on at 29.4 m/s |
+
+### Covered faces: a floor's seam was an edge to catch on
+
+The standing structure is many boxes, face to face: a floor is panels, a wall is bricks. A piece that lies a few
+centimetres into a floor (pressed, tipping, landing) and slides to the next panel is, to that panel alone, a piece
+beside it and below its top; the axis that separates the two is the panel's **side** face, and the contact made
+there is across the piece's way.
+
+GPU test `wedge`: a floor of 2 m panels; a 300 kg steel block on it, and the ball into the block at 60 m/s. The
+block tips 4.7 cm into the floor, meets the next panel's edge (normal 0.92 along the way), takes 23,315 N s there
+in one step and stops, the ball behind it. And two of the glass house's chairs (12 kg each) in the ball's way.
+
+The world now knows which faces of the fixed, axis-aligned boxes are covered by other fixed boxes (`coverFlush`:
+a face is covered when its middle and four points 0.6 of the way to its edges, 1 cm out, are all inside other
+fixed boxes; kept up as shapes are set and killed, a shape and what touches it looked at again; the mask is in
+the shape's record, and counts only while the shape's body is fixed). A contact whose normal pushes out through a
+covered face by more than 0.3 of itself is no contact (`cover_fix`): what lies over the seam is held by the contact with the
+panel it lies on. (First the normal was turned to the faces that are there; it kept the depth measured along the
+way it had pointed, which is wrong for the way it then pushed. Lab `collapse` on that build did not settle: 92
+of 364 bodies awake at 10 s; over 450 frames, 109 with the early waking off, 48 with covered faces off, 4 with
+both and the swept test off. Those runs do not separate the causes: each collapse falls differently. And a contact that leans through a covered face by less than that
+stays: without it a chair's leg, a hair off the vertical, lost its contact at a seam and rocked there for good.)
+
+| | Before (`COVER_OFF=1`) | After | On a floor of one piece |
+| --- | --- | --- | --- |
+| The ball after the block | 4.2 m/s | 31.9 m/s | 28 m/s |
+| The ball after the two chairs | 54.6 m/s | 56.6 m/s | |
+
+Limits: boxes only (a free piece of the temple, a hull, has no mask), fixed bodies only (a fallen floor that
+debris slides over is one moving body of several boxes: its seams are as before), and a face partly covered
+counts as open.
+
+### A body thrown is solved at its own mass
+
+Across one contact the heavier body responds as if at most 20 times heavier than the lighter (`P_RATIO`; "Bodies
+with many contacts"): for a part of thousands of tonnes lying on light rubble, which the solver cannot settle
+otherwise. For the ball it meant that every piece lighter than a twentieth of it cost it as much as one of a
+twentieth: a 12 kg chair as 25.7 kg to the 514 kg ball; a crumb as 105 kg to the lab's 2.1 t ball.
+
+A body can now be marked as thrown (`setShot(body)`; the page marks the game's ball). While it moves faster than
+10 m/s (`SHOT_MIN`) its contacts are solved at its real mass. At rest on rubble it is limited as everything is.
+
+GPU test `wedge`, the two chairs (carried along whole they leave the ball 60 x 514 / 538 = 57.3 m/s):
+54.7 m/s without (`SHOT_OFF=1`), **56.6 m/s** with.
+
+`setShot(body, 2, pass)` also gives the body a part of its way (a point, a direction, from where to where
+along it) in which it does not touch what of the fixed world is across it: a contact there whose normal is more
+than 14 degrees out of the plane across the way is not made. The page sets it to the depth of each thing broken
+for the ball, 0.3 m each side, for 0.3 s at most (docs/LAB.md). Two forms were tried first, and measured: no
+contact with the fixed world at all for those steps (coming down at 5.6 m/s of 58, the ball was 0.4 m into the
+glass house's floor after two partitions), and no contact within 60 degrees of its velocity, anywhere (lab
+`ball`: at 115 m/s a rim met at 70 degrees took it to 42 m/s).
+
+### What a crushed piece gives back (18 November)
+
+With the seams gone, lab `collapse` showed what they had hidden. The 2,005 t upper part of the frame, falling at
+2.26 m/s onto the rubble of its own cut storey, left one step at 0.75 m/s: 18,057 N s through one contact with
+one piece of that rubble, which stopped 2,005 t as it would stop 20 times its own mass (`P_RATIO`). The piece was
+crushed in that step (pinch), as it should be; the speed was gone. The building then came down on its columns'
+stumps at under 2 m/s, too slowly to count as an impact, and stood on them whole, its roof 1.74 m lower. Until
+15 November one contact with a floor panel's covered side had given the one event that broke it up.
+
+A piece that fails does not stop what breaks it: it can take the momentum that carries its own mass along at the
+speed they met at, and no more. Each body that pressed a piece crushed in this step gets back the velocity that
+piece's contact took from it, less that share, and no more than brings it back to the speed it began the step
+with (`crush_refund`, after the crush passes; sums in fixed point per body, the same in any order).
+
+GPU test `crushgive`: a 200 t block down at 3.12 m/s on a 300 kg piece on the floor. After the step the piece is
+crushed in: **1.65 m/s** without (`REFUND_OFF=1`), **3.12 m/s** with.
+
+Only the heavier of the two gets anything back, the one that did the crushing: a light piece the crushed one was
+pressed onto was pushed by it, not slowed (GPU test `chain`: given back, that push threw the piece under it up at
+7.8 m/s; 2.96 m/s now, what it was before there was a give-back, against a limit of 5).
+
+And only what slowed it. The push of the crushed piece's contact must have been against the way the body was
+going as the step began (the velocity bound's record now keeps that velocity whole), and what is given back is
+given along that way, up to the speed it had: never sideways, never back. A piece of furniture on a falling
+part's own floor, crushed as the part stops under it, had pushed the part down; given back, that sent the upper
+part of the complex building from 6.14 m/s down to 0.99 and then 1.83 m/s up in the two steps it landed in (lab
+`complex`, 18 November: 22 rebounds, 3 energy gains over 5%). GPU test `crushride`: a 100 t slab falling at
+2.49 m/s with a 300 kg piece on it, which a 200 t block crushes from above: **2.67 m/s up** after that step
+without the rule, **2.67 m/s down** with it.
+
+Lab `collapse`, 600 frames, this build: the roof falls 3.27 m (18.64 to 15.37), 50 breaks, 293 bodies, every
+body asleep at 8.0 s (on 14 November: 3.21 m, 375 bodies, 10 of them awake at 10 s). Without the give-back and
+with the seams gone it fell 1.74 m and did not break.
+
 ## Breaking in the step of the hit
 
 The engine answers a hit about 4 frames late. So each new falling piece carries a break plan from it (`Sim::plan_piece`): where it breaks first, and how hard a hit must be to break it there.
@@ -378,7 +566,7 @@ Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall throu
 
 ## Still to do
 
-- **Crumbs that hop (open, 14 November).** In a collapse of 20,000 crumbs, two or three are drawn moving 0.3 to 0.5 m in one frame, upward, with a velocity that says otherwise (falling at 4.2 m/s and 0.41 m higher than a frame before: lab `masonry`, frame 14). Each is beside or inside a large body falling at the frame it happens. The same with and without the velocity bound (9 and 12 over six runs). What was tried: the separation limit of a particle against shapes (2 m/s past its own approach) taken per particle and sub-step and not per shape; GPU test `particles` then left a particle inside a body, which the rule "a particle never ends inside a body" forbids, and it was taken back out. Not found: what moves them. The lab's check counts them ("pieces moving further than their speed allows").
+- **Crumbs that hop (closed, 15 November: the lab's measure, not the physics).** The check compared the distance a piece is DRAWN to have gone in a frame with its speed in the newest read-back. The drawn place is blended between two read-backs, so the speed that allows it is the greater of the two: a crumb that fell at 4.2 m/s in the older and was stopped in the newer had moved as far as 4.2 m/s goes and was held to 0. GPU test `pland` reads the same landings every step, from the GPU: nothing moves further than its speed. The lab's bound is now the greater speed of the two read-backs (its own commit; docs/LAB.md, 15 November). What follows is the note as it stood. In a collapse of 20,000 crumbs, two or three are drawn moving 0.3 to 0.5 m in one frame, upward, with a velocity that says otherwise (falling at 4.2 m/s and 0.41 m higher than a frame before: lab `masonry`, frame 14). Each is beside or inside a large body falling at the frame it happens. The same with and without the velocity bound (9 and 12 over six runs). What was tried: the separation limit of a particle against shapes (2 m/s past its own approach) taken per particle and sub-step and not per shape; GPU test `particles` then left a particle inside a body, which the rule "a particle never ends inside a body" forbids, and it was taken back out. Not found: what moves them. The lab's check counts them ("pieces moving further than their speed allows").
 
 - **A fast-spinning chunk sinks into the ground (open, 9 November).** The GPU test `hullthrow` throws the hull library's cells; with six runtime hulls registered before it (`freehull` ran first), it drew another random sample, and library cell 39, thrown as body 75 spinning at 49 rad/s (corners at about 15 m/s), had a corner 7.6 cm inside the ground at frame 8 (limit 5 cm; the scene's own sample: 1.2 cm). Reproduce: `HTHROW_ALL=1 node engine/gpu/test_gpu.cjs freehull hullthrow`. The scene now throws the library's cells only, as written (the runtime hulls have `freehull`); the deeper case is not the margin (`ground_margin` covers w r dt) but the contacts: found once a frame, they cannot follow a body that turns 0.8 rad (47 degrees) in that frame, and corners that were not touching at its start come round into the ground. Candidates: a cap on the turn per frame (0.25 rad: 15 rad/s at 60 Hz) for bodies off the ground, or contacts found again in the sub-steps for the few spinning that fast.
 
@@ -391,5 +579,6 @@ Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall throu
 - **Depenetration** is at most 1 m/s (it was 3; pieces made overlapping the slab they were crushing into popped out).
 
 - **Rare bursts in mixed rubble (open).** In the lab collapse, about one full run in four throws a pile apart that was at rest: at frame 138 of one run, a 2-brick piece that had just woken went from rest to 2,800 m/s and 20,000 rad/s in one frame (575 MJ); in another, 24 MJ at frame 164. Runs are not repeatable (GPU atomics), so the lab's flight recorder (docs/LAB.md) keeps the read-backs before a burst. GPU test `stress` (boxes of 1–12 bricks, 60 chunks and a 288-brick slab piled between stumps, then pieces dropped on the sleeping pile) fails in some runs: a chunk thrown at about 15 m/s (seed 2: 22.5 m/s falling back at frame 340). Box-only and chunk-only piles pass. Over seeds 1–8 (software GPU, 900 frames each), runs over 15 m/s: 1 of 8 with the current solver (seed 4, 20.9 m/s), 0 of 8 with the three solver changes above switched off (`dbgBits` 7), 1 of 8 with only the energy-only limit off (seed 6, 20.9 m/s), 0 of 8 with only supports-first off; this morning's solver passed seeds 2 and 5. At one failure in eight these do not tell the changes apart. Also tried: restitution off, contact reduction off (no effect on the bursts), and dropping warm starts of contacts made while a body slept (GPU test `wakeup`: passes with and without it, not kept). `stress` is outside the default run until this is fixed.
+- **A piece squeezed under a slab 163 times its mass, with crushing off (open; GPU test `landing163`, not in the default run, 18 November).** A 7,680 kg slab and the 47 kg piece under it land on the ground together at 5 m/s, the solver alone (`crushing = false`). The piece is pressed 4.4 cm into the ground by frame 5 and is back out by frame 13; meanwhile it spins, its corners closing on the ground and on the slab at 3 to 5 m/s while its centre moves at under 0.4, and its velocity read each frame swings: with the restitution rule of 18 November, +0.05, +0.36, **+0.91**, −0.13 m/s in frames 3 to 6 (the test allows 0.6 up); before the rule, +0.02, +0.05, −0.54, +0.06, and its largest reading was the 0.50 of its own bounce in the first frame, which the rule has taken away (concrete on the ground at 5 m/s does not bounce). It was as deep in the ground before as after: the rule changed which way the reading swings, not the squeeze. It is not thrown: its highest place is where it came to rest. Tried: the trace of every frame and every contact, with the rule and without it (the numbers above); the energy limit of the same day changes nothing here (one shape each). No change to the solver has been tried. In the game such a piece is crushed in that step (pinch), which is the engine's answer to it; the other three cases of `landing` (960 kg at 7.7 and 2 m/s, 207 kg at 7.7) pass and stay in the default run.
 - **Contact sag.** Stiffer contacts are still needed. A 20-high stack sags 7 mm (0.35 mm per contact), within budget but not the micron level of real masonry.
 - **CPU reference.** The CPU engine does not have compound bodies, materials or restitution. It stays the reference for the box core only.

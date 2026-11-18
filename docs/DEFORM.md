@@ -146,7 +146,8 @@ removes pieces oldest first and does not know about any of this.
   above today's.
 
 **5. Leaving bent.** A part that leaves the structure becomes a body with the shape it had when it left
-(stage 3's write, at birth), with the velocities it has now (`view_motion` gives them already).
+(stage 3's write, at birth), with the velocities it has now (`view_motion` gives them already; since 15 November from
+`Sim::motion_cells`, written every structure step whether or not the engineer's view is on).
 - Gate: `dyn_tests::a_frame_that_lost_columns_hangs_bent`, the part that falls after sagging 80 mm: its body's
   boxes are within 5 mm of the cells' last places, and the lab counts no jump at the hand-over.
 

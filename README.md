@@ -11,7 +11,7 @@ scripted.
 | `engine/gpu/` | The GPU world (`gpu_world.js`, WebGPU): rigid bodies and particles; its test scenes. |
 | `engine/web/` | The page runtime: the engine in a worker, bodies and pieces between engine and GPU, breaking, impacts, the debris budget, drawing with three.js, the engineer's view. |
 | `game/` | **The demo game.** |
-| `game/src/` | Rust crate `sf-demo`: the levels (five kinds of tower, the complex building, the city), the player, and the wasm the page loads (`wasm.rs`). |
+| `game/src/` | Rust crate `sf-demo`: the level (**the Quarter**: nine lots of real buildings, `quarter.rs` and a file per building; docs/QUARTER.md), what it is built with (`kit.rs`), the player, and the wasm the page loads (`wasm.rs`). `tower.rs`, `complex.rs` and `city.rs` generate the engine's test buildings; three of them stand in the Quarter. |
 | `game/web/` | The page: template, menu, settings, tools, benchmark, loop. |
 | `game/lab/` | The lab: scripted scenarios with physical checks, run headless on a virtual clock. |
 | `docs/` | How it works and where it stands. `docs/STATUS.md` is the state, generated from the last runs. |
@@ -30,6 +30,8 @@ python3 game/build.py                                  # dist/tower.html
 tools/check.sh            # tests, build, GPU suite, STATUS.md
 tools/check.sh lab        # the same, plus page checks and the lab's quick suite
 node game/lab/lab.cjs =collapse                        # one lab scenario by name (needs SF_NODE_MODULES, Playwright)
+node game/lab/lab.cjs quarter                          # the Quarter's scenarios (a suite; =quarter is the one of that name)
+node game/lab/shots.cjs <dir> name:x,y,z,tx,ty,tz ...  # pictures of the level from given places (software GPU)
 ```
 
 The rules for changing anything are in `CLAUDE.md`.
