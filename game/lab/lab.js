@@ -201,6 +201,25 @@ function labFrameChecks() {
 }
 // every read-back: the physics
 const LAB_RHO = [2400, 1800, 2500, 2500, 500, 7800, 2400, 2400];
+// (for the rebound check) How much faster than its centre falls a piece can meet what it lands on: its own spin
+// times its reach, and the upward speed, at the piece's place, of the fastest heavier body that reaches it.
+function labReach(b) {
+  let r2 = 0;
+  for (const k of gpu.bodyShapes.get(b) || []) { const sh = gpu.shapes[k - 1]; if (!sh || sh.dead || !sh.lp) continue; r2 = Math.max(r2, (Math.abs(sh.lp[0]) + sh.h[0]) ** 2 + (Math.abs(sh.lp[1]) + sh.h[1]) ** 2 + (Math.abs(sh.lp[2]) + sh.h[2]) ** 2); }
+  return Math.sqrt(r2);
+}
+function labMeet(b, was, cur, prev, now) {
+  const R = labReach(b), own = Math.hypot(...was.w) * R;
+  let up = 0;
+  for (const set of [prev, now]) for (const [o, x] of set || []) {
+    if (o === b || !(x.m >= was.m) || !x.p) continue;
+    const d = [cur.p[0] - x.p[0], cur.p[1] - x.p[1], cur.p[2] - x.p[2]], dist = Math.hypot(...d);
+    if (dist > R + (x.reach === undefined ? (x.reach = labReach(o)) : x.reach)) continue;
+    up = Math.max(up, x.v[1] + x.w[2] * d[0] - x.w[0] * d[2]);   // (v + w x d, its y)
+  }
+  return own + up;
+}
+
 function labOnRead(r, pr) {
   // spares parked under the ground must sleep there (woken, they fell for the rest of the run: 8 November)
   if (r.sleeping && r.body) { let n = 0; const nb = Math.min(r.sleeping.length, r.body.length / 7); for (let b = 1; b <= nb; b++) if (!r.sleeping[b - 1] && r.body[(b - 1) * 7 + 1] < -500) n++; LAB.parkedAwake = Math.max(LAB.parkedAwake || 0, n); }
@@ -251,7 +270,7 @@ function labOnRead(r, pr) {
     // as concrete, and the ball left out: a 383 kg timber wardrobe pushed by the ball at 37 m/s showed as 6.2 MJ
     // gained from nothing, of the ball's 0.9 MJ)
     const m = gb.labBall ? gb.mass : (gb.labVol || 0) * (gb.labRho || 2400), ek = 0.5 * m * (vx * vx + vy * vy + vz * vz), e = ek + m * 9.81 * y;
-    now.set(b, { gb, vy, e, ek, v: [vx, vy, vz], y, vol: gb.labVol || 0, cut: gb.labCut });
+    now.set(b, { gb, vy, e, ek, v: [vx, vy, vz], y, vol: gb.labVol || 0, cut: gb.labCut, m, p: [r.body[o], y, r.body[o + 2]], w: r.ang ? [r.ang[vo], r.ang[vo + 1], r.ang[vo + 2]] : [0, 0, 0] });
     // the same body as at the last read-back (a reused slot holds another one)
     const was = L.prevBodies && L.prevBodies.get(b);
     // (nor a body cut on the GPU since, or a few frames before: the poses read back lag the step)
@@ -264,7 +283,17 @@ function labOnRead(r, pr) {
     if (e > was.e) slack += Math.min(e - was.e, m * 9.81 * 0.002);
     if (e - was.e > 1000) (L.gainers = L.gainers || []).push({ body: b, gain_J: Math.round(e - was.e), size: gb.labH, made_at: gb.labF, y: [+was.y.toFixed(2), +y.toFixed(2)], vy: [+was.vy.toFixed(2), +vy.toFixed(2)], vol: +(gb.labVol || 0).toFixed(2), vol_was: +(was.vol || 0).toFixed(2), asleep: r.sleeping ? r.sleeping[b - 1] : null });
     if (quiet && !gb.labBall) {
-      if (was.vy < -2 && vy > 0.5 * -was.vy) { L.bounces++; L.bounceMax = Math.max(L.bounceMax, vy / -was.vy); labEvent('bounce', f, { body: b, vy_before: +was.vy.toFixed(2), vy_after: +vy.toFixed(2), y: +y.toFixed(2), size: gb.labH, made_at: gb.labF, pushed_by_page: gb.labSetV || null }); }
+      // A rebound: up afterwards at over half the speed it met what it hit at. That speed is not its centre's
+      // fall alone (until 18 Nov it was): a piece that tumbles meets things with its edge, faster by its spin
+      // times its reach, and what it lands on may be coming up to meet it. Lab collapse, frame 69: a 2.7 t
+      // fragment falling at 2.27 m/s and turning at 1.7 rad/s met a piece on the ground with a corner at 4.97 m/s
+      // and left it at 1.44 m/s up, turning faster, with less energy than it came with: counted as a rebound of
+      // 63%. Lab complex, frame 49: chairs falling at 3.3 m/s onto the edge of a 110 t floor that was rocking
+      // on its stumps, that edge coming up at 1.5 m/s; they left at 2.0 m/s, 0.4 faster than the floor: 60%.
+      // (labMeet: its own spin x its reach, and the upward speed, where it is, of the fastest heavier body
+      // that reaches it, at this read-back or the last)
+      const meet = was.vy < -2 && vy > 0.5 * -was.vy ? -was.vy + labMeet(b, was, now.get(b), L.prevBodies, now) : Infinity;
+      if (was.vy < -2 && vy > 0.5 * meet) { L.bounces++; L.bounceMax = Math.max(L.bounceMax, vy / -was.vy); labEvent('bounce', f, { body: b, vy_before: +was.vy.toFixed(2), vy_after: +vy.toFixed(2), met_at: +Math.min(meet, 999).toFixed(2), y: +y.toFixed(2), size: gb.labH, made_at: gb.labF, pushed_by_page: gb.labSetV || null }); }
       if (vy > 5 && vy > was.vy + 2) { L.launches++; L.launchMax = Math.max(L.launchMax, vy); labEvent('launch', f, { body: b, vy_before: +was.vy.toFixed(2), vy: +vy.toFixed(2), y: +y.toFixed(2), size: gb.labH, made_at: gb.labF, pushed_by_page: gb.labSetV || null }); }
     }
   }
