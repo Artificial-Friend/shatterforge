@@ -13,15 +13,18 @@
 'use strict';
 
 const MATERIALS = [
-  // density kg/m^3, friction, restitution
-  { name: 'concrete', density: 2400, mu: 0.6, e: 0.1 },
-  { name: 'masonry', density: 1900, mu: 0.6, e: 0.05 },
-  { name: 'steel', density: 7850, mu: 0.45, e: 0.25 },
-  { name: 'glass', density: 2500, mu: 0.5, e: 0.2 },
-  { name: 'timber', density: 500, mu: 0.5, e: 0.3 },
-  { name: 'test-bouncy', density: 1100, mu: 0.6, e: 0.5 },
-  { name: 'ground', density: 0, mu: 0.6, e: 0.0 },
-  { name: 'reference', density: 1900, mu: 0.6, e: 0.0 },   // the CPU reference model: one friction, no bounce
+  // density kg/m^3, friction, restitution; and for the speed above which a contact cannot bounce (see `rest`
+  // in the narrow phase): z, the wave impedance sqrt(E x density) in MPa per m/s (E: 30, 5, 200, 70 GPa, and
+  // 0.5 GPa for timber across the grain), and crush, the crushing or yield strength in MPa (the shader's CRUSH_MPA).
+  // z 0: rigid, and it never crushes (the ground, the test materials).
+  { name: 'concrete', density: 2400, mu: 0.6, e: 0.1, z: 8.49, crush: 30 },
+  { name: 'masonry', density: 1900, mu: 0.6, e: 0.05, z: 3.08, crush: 10 },
+  { name: 'steel', density: 7850, mu: 0.45, e: 0.25, z: 39.6, crush: 250 },
+  { name: 'glass', density: 2500, mu: 0.5, e: 0.2, z: 13.2, crush: 50 },
+  { name: 'timber', density: 500, mu: 0.5, e: 0.3, z: 0.5, crush: 8 },
+  { name: 'test-bouncy', density: 1100, mu: 0.6, e: 0.5, z: 0, crush: 1e9 },
+  { name: 'ground', density: 0, mu: 0.6, e: 0.0, z: 0, crush: 1e9 },
+  { name: 'reference', density: 1900, mu: 0.6, e: 0.0, z: 0, crush: 1e9 },   // the CPU reference model: one friction, no bounce
 ];
 const MAT = Object.fromEntries(MATERIALS.map((m, i) => [m.name, i]));
 const GROUND_MAT = MAT.ground;
@@ -45,7 +48,7 @@ struct Params {
   o_ocount: u32, o_acc: u32, o_events: u32, max_events: u32,
   ev_speed: f32, ev_energy: f32, o_cawake: u32, o_cnear: u32,
   n_inherit: u32, o_inherit: u32, wake_speed: f32, o_cbody: u32,
-  mat: array<vec4f, 8>,   // friction, restitution, -, -
+  mat: array<vec4f, 8>,   // friction, restitution, 1 / wave impedance (m/s per MPa; 0: rigid), crushing strength (MPa)
   np1: u32, pcell: f32, pg_mask: u32, p_wake: u32,
   p_h: f32, n_blast: u32, p_cap: u32, o_wbox: u32,
   blast: array<vec4f, 6>,   // particle blasts: (centre, reach), (speed, -, -, -)
@@ -815,6 +818,26 @@ fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   man[base + M_JN] = jn;
   if (sb == SUP_KEY) { rv = vec4f(sup_cap); }
   man[base + M_RV] = rv;
+  // What bounces, and how fast it may come in: what crushes does not spring back. Two limits, the lower counts.
+  // The faces: two that meet at v are stressed to v x Za Zb / (Za + Zb), the elastic wave each sends into the
+  // other (Z = sqrt(E x density)); over the weaker one's crushing strength s they crush: v1 = s x (1/Za + 1/Zb).
+  // Concrete on concrete 7.1 m/s, steel on concrete 4.3, masonry on masonry 6.5, timber on concrete 16.9.
+  // The energy: the two shapes that touch can hold s^2 V / 2E each before they crush, and the blow brings
+  // 1/2 m v^2 with m the pair's reduced mass: v2^2 = s^2 (Va/Ea + Vb/Eb) / m. For one box on the rigid ground
+  // v2 is v1; for a 307 t part coming down on the stump of a steel column it is 0.7 m/s.
+  // Under the limit vc, the share of the energy that can still be elastic is left: 1 - (v/vc)^2.
+  // (Before, 18 Nov: the 307 t steel-framed upper part of the complex building came down on the stumps of its
+  // columns at 6.14 m/s and went back up at 1.52, steel's 0.25 of it, with every chair in it thrown at the
+  // ceilings: lab complex, 10 rebounds. With the faces' limit alone, steel on steel 12.6 m/s, it still went up
+  // at 1.18. GPU tests hardland, stumpland.)
+  if (rest > 0.0) {
+    let s = min(ma.w, mb.w); var vc2 = 1e30;
+    if (ma.z + mb.z > 0.0) { let v1 = s * (ma.z + mb.z); vc2 = v1 * v1; }
+    let ha = Hs(sa, H_H).xyz; var store = 8.0 * ha.x * ha.y * ha.z * INV_E[min(u32(Hs(sa, H_ID).y), 7u)];
+    if (sb != 0u && sb != SUP_KEY) { let hb = Hs(sb, H_H).xyz; store += 8.0 * hb.x * hb.y * hb.z * INV_E[min(u32(Hs(sb, H_ID).y), 7u)]; }
+    if (store > 0.0 && ima + imb > 0.0) { vc2 = min(vc2, 1e6 * s * s * store * (ima + imb)); }
+    if (vc2 < 1e29) { rest *= clamp(1.0 - approach * approach / vc2, 0.0, 1.0); }
+  }
   man[base + M_OUT] = vec4f(rest, 0.0, approach, fixedNow);
   cold[cb + 4u] = vec4f(laf, f32(sa)); cold[cb + 5u] = vec4f(lbf, f32(sb));
   insert_new(sa, sb, mi);
@@ -1592,6 +1615,8 @@ fn ev_energy_of(mi: u32) -> f32 {
 // the static world (the heavy body goes through it, no rubble shot out sideways at 5-9 m/s) and is listed for
 // the page, which turns it into rubble particles where it is.
 const C_NCRUSH = 15u; const MAX_CRUSH = 256u;
+// 1 / Young's modulus, per MPa, by material (30, 5, 200, 70 GPa; timber across the grain 0.5; 0: rigid): for rest in the narrow phase
+const INV_E = array<f32, 8>(1.0 / 30000.0, 1.0 / 5000.0, 1.0 / 200000.0, 1.0 / 70000.0, 1.0 / 500.0, 0.0, 0.0, 0.0);
 // A crushed piece stops where it is (the page turns it into rubble at rest there): the step that crushed it may
 // have thrown it, as the solver could not settle the squeeze (GPU test chain: a 223 kg piece under a 259 t part
 // went up at 20.6 m/s in the step it was crushed, and flew for the 3 frames until the page heard of it).
@@ -1610,8 +1635,13 @@ const C_NCRUSH = 15u; const MAX_CRUSH = 256u;
   // (the normal points from a to b: the impulse pushed b along it and a against it)
   // (only to the heavier of the two, the one that did the crushing: a light piece the crushed one was pressed
   // onto was pushed by it, not slowed. GPU test chain: given back, that push threw the piece under it up at 7.8 m/s)
-  if (crushed(a) && !crushed(b) && ib < ia) { let got = j * ib * sc.y; refund_add(b, -n * (got - min(got, out.z * ib / ia))); }
-  if (crushed(b) && !crushed(a) && ia < ib) { let got = j * ia * sc.x; refund_add(a, n * (got - min(got, out.z * ia / ib))); }
+  // And only what slowed it: the push of that contact was against the way the body was going as the step began
+  // (not as it ends: by then it may stand on the stumps under it, with no direction left to speak of). A piece
+  // on a falling part's own floor, crushed as the part stops under it, had pushed the part DOWN; given back,
+  // that sent the 4,337-box upper part of the complex building from 6.14 m/s down to 0.99 and then 1.83 m/s UP
+  // in the two steps it landed in, its furniture with it (lab complex, 18 Nov: 22 rebounds, 3 energy gains).
+  if (crushed(a) && !crushed(b) && ib < ia && dot(n, vh_v0(b)) < 0.0) { let got = j * ib * sc.y; refund_add(b, -n * (got - min(got, out.z * ib / ia))); }
+  if (crushed(b) && !crushed(a) && ia < ib && dot(n, vh_v0(a)) > 0.0) { let got = j * ia * sc.x; refund_add(a, n * (got - min(got, out.z * ia / ib))); }
 }
 // What a crushed piece gives back (18 Nov). A piece is crushed in the step it is squeezed in, at the end of it: by
 // then the solver has slowed the body that squeezed it against it as against a strut, and a heavy body at that
@@ -1636,10 +1666,11 @@ fn refund_add(i: u32, dv: vec3f) {
   let o = P.o_refund + i * 3u;
   let r = vec3f(f32(bitcast<i32>(ld(o))), f32(bitcast<i32>(ld(o + 1u))), f32(bitcast<i32>(ld(o + 2u)))) / RF_FX;
   if (dot(r, r) == 0.0) { return; }
-  let v = S(i, S_V).xyz; var v2 = v + r;
-  let most = max(f32(ld(P.o_vhull + i * 10u + 1u)) / VH_FX, length(v)); let l = length(v2);
-  if (l > most) { v2 *= most / l; }
-  setS(i, S_V, vec4f(v2, S(i, S_V).w));
+  // (given back along the way it was going, and up to the speed it had that way: never sideways, never back)
+  let v0 = vh_v0(i); let s0 = length(v0); if (s0 < 0.01) { return; }
+  let d = v0 / s0; let v = S(i, S_V).xyz;
+  let give = min(max(dot(r, d), 0.0), max(s0 - dot(v, d), 0.0));
+  setS(i, S_V, vec4f(v + d * give, S(i, S_V).w));
 }
 fn crush_stop(i: u32) { setS(i, S_V, vec4f(0.0, 0.0, 0.0, S(i, S_V).w)); setS(i, S_W, vec4f(0.0, 0.0, 0.0, S(i, S_W).w)); }
 // crushing strength (MPa) by material: concrete, masonry, steel, glass, timber (across the grain), test, ground,
@@ -1861,11 +1892,13 @@ const VH_FX = 1024.0; const VH_ZERO = 1073741824;
 fn vh_enc(x: f32) -> u32 { return u32(i32(round(clamp(x, -1000.0, 1000.0) * VH_FX)) + VH_ZERO); }
 fn vh_dec(u: u32) -> f32 { return f32(i32(u) - VH_ZERO) / VH_FX; }
 fn vh_fx(x: f32) -> u32 { return u32(round(clamp(x, 0.0, 1000.0) * VH_FX)); }
+// (the velocity it began the step with)
+fn vh_v0(i: u32) -> vec3f { let o = P.o_vhull + i * 10u; return vec3f(vh_dec(ld(o + 4u)), vh_dec(ld(o + 3u)), vh_dec(ld(o + 6u))); }
 @compute @workgroup_size(64) fn vh_init(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.n1) { return; }
   let o = P.o_vhull + i * 10u; let v = S(i, S_V).xyz;
-  st(o, 0u); st(o + 1u, vh_fx(length(v))); st(o + 2u, 0u); st(o + 3u, vh_enc(v.y)); st(o + 4u, 0u); st(o + 5u, 0u);
-  st(o + 6u, 0u); st(o + 7u, 0u); st(o + 8u, vh_fx(length(S(i, S_W).xyz))); st(o + 9u, 0u);
+  st(o, 0u); st(o + 1u, vh_fx(length(v))); st(o + 2u, 0u); st(o + 3u, vh_enc(v.y)); st(o + 4u, vh_enc(v.x)); st(o + 5u, 0u);
+  st(o + 6u, vh_enc(v.z)); st(o + 7u, 0u);   // (4 and 6: for vh_v0) st(o + 8u, vh_fx(length(S(i, S_W).xyz))); st(o + 9u, 0u);
 }
 // (closing: the relative velocity at the contact point, already times the share the other can impose; nup: the
 // upward part of the normal that pushes this body; along: the closing along that normal)
@@ -2848,7 +2881,7 @@ class GpuWorld {
     u[140] = L.plan; u[141] = L.spart; u[142] = L.snap; u[143] = L.claim; u[144] = L.mtry; u[145] = L.claim2; u[146] = L.sorted2; u[147] = L.evhist; u[148] = L.cchk || 0; u[149] = L.pinch; u[150] = this.frame; u[151] = L.level; u[152] = L.level2; u[153] = this.capP && this.support !== false ? L.psup : 0; u[154] = this.capS + 1; u[155] = L.released;   // (psup's stride: the shape capacity, so its regions stay put as shapes are added)
     u[156] = L.vhull; f[157] = this.boundSlack ?? 0.1; u[158] = L.shot; u[159] = L.refund;
     u[132] = L.crushed; u[133] = L.crush; f[134] = this.crushRatio ?? 20; f[135] = this.crushDv ?? 3;
-    MATERIALS.forEach((m, i) => f.set([m.mu, m.e, 0, 0], 64 + i * 4));
+    MATERIALS.forEach((m, i) => f.set([m.mu, m.e, m.z ? 1 / m.z : 0, m.crush], 64 + i * 4));
     if (this.capP) {
       let pgE = 256; while (pgE < 2 * this.np && pgE < this.PG) pgE *= 2; this.PGeff = pgE;
       u[96] = this.np; f[97] = this.pcell; u[98] = pgE - 1; u[99] = this.wakeReq ? 1 : 0;
@@ -2959,7 +2992,8 @@ class GpuWorld {
     ind(p, 'color_count', 96 * 4); run(p, 'adj_scan', 1);
     if (this.shock !== false) { for (let k = 0; k < 6; k++) { p.setBindGroup(1, this.bg1, [k * 256]); ind(p, 'level_pass', 96 * 4); } p.setBindGroup(1, this.bg1, [0]); }
     // (the velocity bound: each body's own velocity and those of what touches it, as the step starts)
-    if (this.velocityBound !== false) { run(p, 'vh_init', nb); ind(p, 'vh_acc', 96 * 4); }
+    // (vh_init always: what a crushed piece gives back reads the velocity each body began the step with from it)
+    run(p, 'vh_init', nb); if (this.velocityBound !== false) ind(p, 'vh_acc', 96 * 4);
     if (this.colorCheck) { p.end(); enc.clearBuffer(this.intBuf, (L.cchk + 1) * 4, 32 * this.n1 * 4); p = pass(null); ind(p, 'color_check', 96 * 4); }
     p.end();
     p = pass(null, true); run(p, 'color_scan', 1); p.end();

@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..', '..');
 const wasm = fs.readFileSync(path.join(root, 'target/wasm32-unknown-unknown/release/sf_demo.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -78,7 +78,6 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
     }
     if (scenes.includes('bounce')) {
       // drop from 2 m (bottom face 2 m above ground): rebound height should be e^2 x 2 m
-      const res = {};
       for (const [name, e] of [['test-bouncy', 0.5], ['timber', 0.3], ['masonry', 0.05]]) {
         let peak = 0, landed = false, prevVy = -1;
         const r = await run([box([0, 2.25, 0], [0.25, 0.25, 0.25], MAT[name])], 150, {}, 1, (s, f) => {
@@ -819,7 +818,8 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       // 53 x 514 / 897 = 30 m/s; a hit that gives all back would leave the ball 53 x (514 - 383) / 897 = 7.7 m/s
       // forward. Before (WAKE_OFF=1): the wardrobe is asleep in the step the ball reaches it, held as fixed, and
       // the ball comes back from it as from a wall: -15.9 m/s here, as in the lab (qballglass: 26,335 N s through one
-      // contact), the wardrobe left at rest. After: the ball goes on at 23.7 m/s, the wardrobe at 35.4.
+      // contact), the wardrobe left at rest. After: the ball goes on at 26.5 m/s, the wardrobe at 29.4 (23.7 and 35.4
+      // until 18 Nov, when a contact at this speed still had the wardrobe's restitution).
       const r = 0.25;
       const discs = (c) => { const k = 1 / Math.cos(Math.PI / 8), L = 0.4 * r, corners = [], top = [], bottom = [], sides = [];
         for (let i = 0; i < 8; i++) { const a = (2 * i + 1) * Math.PI / 8; corners.push([r * k * Math.cos(a), r * k * Math.sin(a), L], [r * k * Math.cos(a), r * k * Math.sin(a), -L]); }
@@ -866,6 +866,78 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       // (its speed down after the step the piece was crushed in, and after the step before)
       const res = { crushedAtFrame: crushedAt, block_down_ms: track, before_ms: track[crushedAt - 2], after_ms: track[crushedAt - 1] };
       check('crushgive', crushedAt > 1 && res.after_ms >= res.before_ms - 0.01, res);
+    }
+    if (scenes.includes('crushride')) {
+      // What a crushed piece does NOT give back (18 Nov; the direction rule in `crush_release`). A 100 t slab
+      // (4 x 0.5 x 4 m) falls at 2 m/s with a 300 kg piece of concrete (0.5 m) riding on it; a 200 t block comes
+      // down on the piece at 6 m/s and crushes it against the slab. The piece pushed the slab DOWN, the way it
+      // was going: there is nothing to give back to the slab. Before the rule the slab was "given back" that push
+      // as a push up (lab complex, 18 Nov: 388 t of the upper part sent up at 1.8 m/s, 22 rebounds).
+      // (This scene holds the rule that a push along the body's way is not given back. That the way is the one
+      // it BEGAN the step with, not the one it ends it with, shows only where a body is stopped in the step its
+      // rider is crushed and leaves it with a velocity of either sign: lab complex, 70 frames, 18 Nov: 3 energy
+      // gains over 5% and 1 piece thrown up over 5 m/s judged by the velocity at the end of the step, 0 and 0
+      // by the one at its start. No GPU scene made here reproduces that.)
+      // Here, the slab's speed down in the step the piece is crushed in: 2.49 m/s before the step; after it 2.67 m/s UP without the rule, 2.67 down with it.
+      const piece = { shapes: [{ p: [0, 10.25, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.concrete }], mass: 300, v: [0, -2, 0], w: [0, 0, 0] };
+      const slab = { shapes: [{ p: [0, 9.75, 0], q: [0, 0, 0, 1], h: [2, 0.25, 2], mat: MAT.concrete }], mass: 100000, v: [0, -2, 0], w: [0, 0, 0] };
+      const block = { shapes: [{ p: [0, 11.7, 0], q: [0, 0, 0, 1], h: [2, 1, 2], mat: MAT.concrete }], mass: 200000, v: [0, -6, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [slab, piece, block], { substeps: 12, sleep: false });
+      if (globalThis.REFUND_OFF) w.refund = false;
+      let crushedAt = 0, track = [];
+      for (let f = 1; f <= 8; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        const rr = await w.readPose();
+        const vy = -rr.vel[1]; track.push(+vy.toFixed(2));
+        if (w.takeCrushed().length && !crushedAt) crushedAt = f;
+      }
+      w.destroy();
+      const res = { crushedAtFrame: crushedAt, slab_down_ms: track, before_ms: track[crushedAt - 2], after_ms: track[crushedAt - 1] };
+      // (the slab never slower down than the step before, less nothing: gravity only adds)
+      check('crushride', crushedAt > 1 && res.after_ms >= res.before_ms - 0.01, res);
+    }
+    if (scenes.includes('hardland')) {
+      // What comes in too fast does not bounce (18 Nov; `rest` in the narrow phase: over the speed at which the
+      // faces crush, strength x (1/Za + 1/Zb), 4.3 m/s for steel on concrete, there is no restitution). A 63 t
+      // steel block (2 x 1 x 4 m) comes down flat on a fixed concrete slab at 6 m/s, and another at 2 m/s.
+      // Up afterwards: at 6 m/s 1.54 m/s before the rule (steel's 0.25) and 0.07 with it; at 2 m/s
+      // 0.54 before and 0.48 with it (1 - (2.16/4.3)^2 = 0.75 of the bounce is left, and 0.07 the solver leaves).
+      const res = { cases: [] };
+      for (const v of [6, 2]) {
+        const floor = { shapes: [{ p: [0, -0.25, 0], q: [0, 0, 0, 1], h: [20, 0.25, 20], mat: MAT.concrete }], fixed: true };
+        const block = { shapes: [{ p: [0, 0.5 + v / 60 * 1.5, 0], q: [0, 0, 0, 1], h: [1, 0.5, 2], mat: MAT.steel }], v: [0, -v, 0], w: [0, 0, 0] };
+        const w = await GpuWorld.create(dev, [floor, block], { substeps: 12, sleep: false });
+        let up = -1e9, track = [];
+        for (let f = 1; f <= 8; f++) {
+          w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+          const rr = await w.readPose(); const vy = rr.vel[4]; up = Math.max(up, vy); track.push(+vy.toFixed(2));
+        }
+        w.destroy();
+        res.cases.push({ down_ms: v, up_ms: +up.toFixed(2), vy: track });
+      }
+      // (6 m/s: none, with 0.1 for what the solver leaves; 2 m/s: 0.78 x 0.25 x 2 = 0.39, at least 0.25 of it)
+      check('hardland', res.cases[0].up_ms <= 0.1 && res.cases[1].up_ms >= 0.25 && res.cases[1].up_ms <= 0.5, res);
+    }
+    if (scenes.includes('stumpland')) {
+      // A heavy part on a small stump does not bounce (18 Nov; the energy limit in the narrow phase's rest: the
+      // two shapes that touch can hold s^2 V / 2E each before they crush). A 300 t steel part of 64 boxes
+      // (1 x 0.5 x 1 m each, as a frame is made of members) lands at 6.8 m/s on four fixed steel stumps
+      // 0.3 x 0.5 x 0.3 m. Steel faces meeting under 12.6 m/s do not crush, so by the faces' limit alone it
+      // bounces; a stump and the box on it hold enough for 0.7 m/s of 300 t.
+      // Up afterwards: 1.12 m/s with the faces' limit alone, 0.00 with the energy limit.
+      const stumps = { shapes: [[-1.5, -1.5], [1.5, -1.5], [-1.5, 1.5], [1.5, 1.5]].map(([x, z]) => ({ p: [x, 0.25, z], q: [0, 0, 0, 1], h: [0.15, 0.25, 0.15], mat: MAT.steel })), fixed: true };
+      const boxes = []; for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) for (let k = 0; k < 4; k++) boxes.push({ p: [-1.5 + i, 1.1 + 0.25 + 0.5 * k, -1.5 + j], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.5], mat: MAT.steel });
+      const part = { shapes: boxes, mass: 300000, v: [0, -6, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [stumps, part], { substeps: 12, sleep: false });
+      w.crushing = false;
+      let up = -1e9, track = [];
+      for (let f = 1; f <= 10; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        const rr = await w.readPose(); const vy = rr.vel[4]; up = Math.max(up, vy); track.push(+vy.toFixed(2));
+      }
+      w.destroy();
+      const res = { up_ms: +up.toFixed(2), vy: track };
+      check('stumpland', res.up_ms <= 0.15, res);
     }
     if (scenes.includes('bound')) {
       // The velocity bound (vh_clamp) on its own: the landing cases with shock propagation off and no crushing, the
