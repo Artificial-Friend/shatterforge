@@ -244,9 +244,9 @@ function labOnRead(r, pr) {
     if (gb.spare !== undefined && y < -500) continue;
     if (y < -1) { below++; labEvent('below_ground_body', f, { body: b, y: +y.toFixed(2), size: gb.labH, made_at: gb.labF }); }
     // (a ball's track: frame, where it is, how fast)
-    if (gb.labBall) { const sp0 = Math.hypot(vx, vy, vz); if (!L.ballDir && sp0 > 1) L.ballDir = [vx / sp0, vy / sp0, vz / sp0]; const bd = L.ballDir || [0, 0, 0];
+    if (gb.labBall) { const sp0 = Math.hypot(vx, vy, vz); if (!gb.labDir && sp0 > 1) gb.labDir = [vx / sp0, vy / sp0, vz / sp0]; const bd = gb.labDir || [0, 0, 0];
       // (and its speed along the way it was sent: negative is back towards where it came from)
-      (L.ballTrack = L.ballTrack || []).push([f, +r.body[o].toFixed(2), +y.toFixed(2), +r.body[o + 2].toFixed(2), +sp0.toFixed(2), +(vx * bd[0] + vy * bd[1] + vz * bd[2]).toFixed(2)]); }
+      (L.ballTrack = L.ballTrack || []).push([f, +r.body[o].toFixed(2), +y.toFixed(2), +r.body[o + 2].toFixed(2), +sp0.toFixed(2), +(vx * bd[0] + vy * bd[1] + vz * bd[2]).toFixed(2), b]); }
     // (its mass: its volume at the density it was made with on the GPU; the ball's own. Until 15 Nov every volume
     // as concrete, and the ball left out: a 383 kg timber wardrobe pushed by the ball at 37 m/s showed as 6.2 MJ
     // gained from nothing, of the ball's 0.9 MJ)
@@ -446,7 +446,9 @@ function labReport(wallS) {
       // (the log's frames are the GPU's, 4 on from the lab's; a stop is seated up to a second after it is arrived at)
       const arr = (punchStat.log || []).filter(l => l.ev === 'arrives'), near = (f) => arr.some(l => l.f >= f - 8 && l.f <= f + 12) || arr.some(l => l.stop && l.f >= f - 70 && l.f <= f + 12);
       let dead = 0, first = null;
-      for (let k = 1; k < tr.length; k++) if (tr[k - 1][4] >= 10 && tr[k][4] < 0.3 * tr[k - 1][4] && !near(tr[k][0])) { dead++; first = first || [tr[k][0], tr[k - 1][4], tr[k][4]]; }
+      // (each ball by itself: its track is the rows with its body, the 7th number)
+      for (const id of new Set(tr.map(t => t[6]))) { const one = tr.filter(t => t[6] === id);
+        for (let k = 1; k < one.length; k++) if (one[k - 1][4] >= 10 && one[k][4] < 0.3 * one[k - 1][4] && !near(one[k][0])) { dead++; first = first || [one[k][0], one[k - 1][4], one[k][4]]; } }
       L.ballSummary.stopped_dead = first;
       checks.push({ name: 'ball: stopped dead by what it had not paid for (read-backs)', value: dead, limit: 0, pass: dead === 0, what: `it loses its speed to what it breaks, as the page's log has it${first ? `; first at frame ${first[0]}: ${first[1]} to ${first[2]} m/s` : ''}` });
     }

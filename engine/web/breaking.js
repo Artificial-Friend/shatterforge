@@ -607,9 +607,15 @@ function anticipate() {
       // (for 0.3 s from the first time, and no longer: held up before the thing, by a wardrobe pushed ahead of it,
       // it stayed so for a second and fell through the floor it was on: lab qballglass, 18 Nov)
       if (s + Math.max(along, 0.3 * st.before) * dt * 3 >= st.s - h.r && now < (st.passAt = st.passAt || now) + 300) {
-        const end = st.s + st.depth + 2 * h.r;
-        if (!h.pass || h.pass.p0 !== st.p0 || end > h.pass.end) h.pass = { p0: st.p0, d: st.d, end, until: st.passAt + 300 };
-        if (gpu.setShot) gpu.setShot(i, 2);
+        const end = st.s + st.depth + 2 * h.r, same = h.pass && h.pass.p0 === st.p0;
+        if (!same || end > h.pass.end) {
+          // (s0, s1: the thing's own depth along the way, and 0.3 m each side; with the one before it on the same way)
+          // (still in the thing before, asked about along another line: its near side, as far along this one)
+          let s0 = st.s - 0.3;
+          if (h.pass) { const g = h.pass, q = [0, 1, 2].map(k => g.p0[k] + g.d[k] * g.s0 - st.p0[k]); s0 = Math.min(s0, same ? g.s0 : q[0] * st.d[0] + q[1] * st.d[1] + q[2] * st.d[2]); }
+          h.pass = { p0: st.p0, d: st.d, end, until: st.passAt + 300, s0, s1: st.s + st.depth + 0.3 };
+          if (gpu.setShot) gpu.setShot(i, 2, h.pass);
+        }
       }
       if (!(s + Math.max(along, 0) * dt >= st.s - h.r)) {
         // (never reached, long overdue: it went elsewhere or stopped short; the hole stays, the plan goes)

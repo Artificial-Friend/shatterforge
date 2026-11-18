@@ -275,8 +275,8 @@ const WAKE_FAST = 3.0;
 fn wake_fast(b: u32) -> bool { let v = S(b, S_V).xyz; return dot(v, v) > WAKE_FAST * WAKE_FAST; }
 @compute @workgroup_size(64) fn prep_woken(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x + 1u; if (i >= P.n1) { return; }
-  if ((ld(P.o_shot + i) & 4u) == 0u) { return; }
-  atomicAnd(&ints[P.o_shot + i], 3u);
+  if ((ld(P.o_shot + i * 9u) & 4u) == 0u) { return; }
+  atomicAnd(&ints[P.o_shot + i * 9u], 3u);
   let p = B(i, F_P); if (p.w == 0.0 || !asleep(i)) { return; }
   wake(i); if (asleep(i)) { return; }
   let il = B(i, F_IL).xyz;
@@ -320,8 +320,8 @@ fn wake_fast(b: u32) -> bool { let v = S(b, S_V).xyz; return dot(v, v) > WAKE_FA
         let lj = Hs(j, H_LO).xyz; let hj = Hs(j, H_HI).xyz;
         if (any(lo > hj) || any(lj > hi)) { continue; }
         // (a sleeping body in a fast one's way wakes now: see prep_woken)
-        if (ai && !aj && B(bj, F_P).w > 0.0 && wake_fast(bi)) { atomicOr(&ints[P.o_shot + bj], 4u); }
-        if (aj && !ai && B(bi, F_P).w > 0.0 && wake_fast(bj)) { atomicOr(&ints[P.o_shot + bi], 4u); }
+        if (ai && !aj && B(bj, F_P).w > 0.0 && wake_fast(bi)) { atomicOr(&ints[P.o_shot + bj * 9u], 4u); }
+        if (aj && !ai && B(bi, F_P).w > 0.0 && wake_fast(bj)) { atomicOr(&ints[P.o_shot + bi * 9u], 4u); }
         if (ai) { push_pair(i, j); } else { push_pair(j, i); }
       }
     } } }
@@ -699,16 +699,28 @@ fn moving(i: u32) -> bool { return i != 0u && B(i, F_P).w > 0.0; }
 // material the particle's)
 const SUP_KEY = 0xffffffu;
 var<private> sup_mat: u32 = 0xffffffffu; var<private> sup_cap: f32 = 0.0;   // (a support contact's material, and its points' push limit, N s a sub-step)
+fn pass_skips(i: u32, c: Contact) -> bool {
+  let o = P.o_shot + i * 9u + 1u;
+  let p0 = vec3f(bitcast<f32>(ld(o)), bitcast<f32>(ld(o + 1u)), bitcast<f32>(ld(o + 2u)));
+  let d = vec3f(bitcast<f32>(ld(o + 3u)), bitcast<f32>(ld(o + 4u)), bitcast<f32>(ld(o + 5u)));
+  let s0 = bitcast<f32>(ld(o + 6u)); let s1 = bitcast<f32>(ld(o + 7u));
+  if (abs(dot(c.n, d)) <= 0.25 || c.cnt == 0u) { return false; }
+  let s = dot(c.pts[0].xyz - p0, d);
+  return s >= s0 && s <= s1;
+}
 fn emit(sa: u32, sb: u32, a: u32, b: u32, c0: Contact) {
   // a crushed body (see crush) touches only the static world until the page turns it into rubble
   if ((crushed(a) && moving(b)) || (crushed(b) && moving(a))) { return; }
   // a body thrown, on its way through what it has broken (setShot 2), does not touch the fixed world (the ground
   // it does): the hole made for it is where it was going when it asked, and it may come 0.1 m off that
-  // (what is across its way, that is: a contact whose normal is within 60 degrees of the way it moves. The floor it
-  // flies over holds it still: coming down at 5.6 m/s of 58, it went through the glass house's floor in the
-  // 0.3 s it took to pass two partitions. Lab qballglass, 18 Nov)
-  if ((ld(P.o_shot + a) & 3u) == 2u && b != 0u && !moving(b)) { let v = S(a, S_V).xyz; let l = length(v); if (l > 1.0 && abs(dot(v, c0.n)) > 0.5 * l) { return; } }
-  if ((ld(P.o_shot + b) & 3u) == 2u && a != 0u && !moving(a)) { let v = S(b, S_V).xyz; let l = length(v); if (l > 1.0 && abs(dot(v, c0.n)) > 0.5 * l) { return; } }
+  // (through, that is: in the thing's own depth along its way, the page's p0, d and [s0, s1] in the shot table, a
+  // contact whose normal is more than 14 degrees out of the plane across its way. Before and after the thing it
+  // touches everything; in it, what only brushes its side still does, and the floor under it still holds it.
+  // Tried first: nothing of the fixed world at all, for three steps before to after: coming down at 5.6 m/s of 58
+  // it went through the glass house's floor. Then: what was within 60 degrees of its way, anywhere: at 115 m/s a
+  // rim met at 70 degrees, unpaid, took the ball from 115 to 42 m/s. Lab qballglass and ball, 18 Nov)
+  if ((ld(P.o_shot + a * 9u) & 3u) == 2u && b != 0u && !moving(b) && pass_skips(a, c0)) { return; }
+  if ((ld(P.o_shot + b * 9u) & 3u) == 2u && a != 0u && !moving(a) && pass_skips(b, c0)) { return; }
   var c = c0;
   reduce4(&c);
   let slot = atomicAdd(&ints[C_MAN], 1u);
@@ -1293,8 +1305,8 @@ fn ratio_scale(ia: f32, ib: f32) -> vec2f {
 // 2.1 t ball paid for every crumb as for 105 kg.)
 const SHOT_MIN = 10.0;
 fn shot_scale(a: u32, b: u32, va: vec3f, vb: vec3f, sc: vec2f) -> vec2f {
-  if ((ld(P.o_shot + a) & 3u) != 0u && dot(va, va) > SHOT_MIN * SHOT_MIN) { return vec2f(1.0); }
-  if ((ld(P.o_shot + b) & 3u) != 0u && dot(vb, vb) > SHOT_MIN * SHOT_MIN) { return vec2f(1.0); }
+  if ((ld(P.o_shot + a * 9u) & 3u) != 0u && dot(va, va) > SHOT_MIN * SHOT_MIN) { return vec2f(1.0); }
+  if ((ld(P.o_shot + b * 9u) & 3u) != 0u && dot(vb, vb) > SHOT_MIN * SHOT_MIN) { return vec2f(1.0); }
   return sc;
 }
 // The limit may only take energy from the heavy body, never give it: its response at the limited mass (sc
@@ -2708,7 +2720,7 @@ class GpuWorld {
     // contact's pair slot
     let TP = 1024; while (TP < 2 * this.maxMan) TP *= 2; this.TP = TP;
     take('ptab', 3 * TP); take('big', 64 * 4096); take('mslot', this.maxMan);
-    take('hl', 1 + this.maxPairs); take('crushed', cb1); take('released', cb1); take('crush', 12 * 256); take('pinch', 8 * cb1); take('refund', 3 * cb1); take('shot', cb1); take('vhull', 10 * cb1); take('level', cb1); take('level2', cb1); if (opt.maxParticles) take('psup', 13 * cs1);
+    take('hl', 1 + this.maxPairs); take('crushed', cb1); take('released', cb1); take('crush', 12 * 256); take('pinch', 8 * cb1); take('refund', 3 * cb1); take('shot', 9 * cb1); take('vhull', 10 * cb1); take('level', cb1); take('level2', cb1); if (opt.maxParticles) take('psup', 13 * cs1);
     this.maxEvents = 512; take('events', 12 * this.maxEvents);
     this.maxInherit = 4096; take('inherit', 12 * this.maxInherit);
     take('plan', 24 * cb1); take('spart', cs1); take('snap', 1 + 4 * 256);
@@ -3146,16 +3158,23 @@ class GpuWorld {
     rec.cover = mask;
     this.device.queue.writeBuffer(this.shpBuf, slot * 128 + 60, new Float32Array([this.coverOff || globalThis.__noCover ? 0 : mask]));
   }
-  // Retire a body: it stops moving and colliding (its slot is not reused).
   // A body thrown (the game's ball). mode 1: while it flies fast, its contacts are solved at its real mass
-  // (shot_scale). mode 2: that, and it does not touch the fixed world except the ground (emit): for the steps in
-  // which it goes through what was broken for it. 0: a body like any other.
-  setShot(body, mode = 1) {
+  // (shot_scale). mode 2: that, and in the part of its way given (pass) it does not touch what of the fixed world
+  // is across it (emit, pass_skips): the thing broken for it. 0: a body like any other.
+  setShot(body, mode = 1, pass = null) {
     const b = this.bodies[body - 1]; mode = mode === true ? 1 : (mode | 0);
-    if (!b || (b.shot | 0) === mode) return;
+    if (!b) return;
+    // (pass, for mode 2: { p0, d, s0, s1 }: the way it goes, a point on it, and the part of it, in m from that point,
+    // in which it does not touch what is across its way)
+    if (mode === 2 && pass) {
+      const f = new Float32Array([...pass.p0, ...pass.d, pass.s0, pass.s1]);
+      this.device.queue.writeBuffer(this.intBuf, (this.L.shot + body * 9 + 1) * 4, f); this.inputs++;
+    }
+    if ((b.shot | 0) === mode) return;
     b.shot = mode; this.inputs++;
-    this.device.queue.writeBuffer(this.intBuf, (this.L.shot + body) * 4, new Uint32Array([mode]));
+    this.device.queue.writeBuffer(this.intBuf, (this.L.shot + body * 9) * 4, new Uint32Array([mode]));
   }
+  // Retire a body: it stops moving and colliding (its slot is not reused).
   killBody(body) {
     this.setShot(body, 0);
     if (globalThis.__parkDbg) (globalThis.__slotLog = globalThis.__slotLog || []).push(['kill', this.frame, body]);
