@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..', '..');
 const wasm = fs.readFileSync(path.join(root, 'target/wasm32-unknown-unknown/release/sf_demo.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'crumbpop', 'crumbnest', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'crumbpop', 'crumbnest', 'pinched', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -992,6 +992,24 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       const res = { crumbsMaxUp_ms: +up.toFixed(2), atFrame: at, fastest_ms: +sp.toFixed(2), highest_m: +top.toFixed(2) };
       check('crumbnest', res.crumbsMaxUp_ms <= 2.5 && res.fastest_ms <= 3, res);
+    }
+    if (scenes.includes('pinched')) {
+      // A piece caught between the ground and the standing structure goes to sleep (18 Nov). A marble piece of
+      // 11 kg (0.3 x 0.085 x 0.16 m) lies on the ground with a fixed block over it, PIN m into its top: it can go
+      // nowhere. (Lab qtemple, 18 Nov: such a piece under the temple's step, still to a millimetre, awake from
+      // frame 360 to the end at 600 with 168 crumbs round it awake too.)
+      const out = [];
+      for (const pin of [0.0, 0.005, 0.02]) {
+        const piece = { shapes: [{ p: [0, 0.0425, 0], q: [0, 0, 0, 1], h: [0.15, 0.0425, 0.08], mat: MAT.masonry }], v: [0, 0, 0], w: [0, 0, 0] };
+        const fixed = { fixed: true, shapes: [{ p: [0, 0.085 - pin + 0.25, 0], q: [0, 0, 0, 1], h: [0.5, 0.25, 0.5], mat: MAT.masonry }] };
+        const w = await GpuWorld.create(dev, [fixed, piece], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16 });
+        const awake = []; let vmax = 0;
+        for (let f = 1; f <= 180; f++) { w.step(1 / 60); if (f % 30 === 0) { await dev.queue.onSubmittedWorkDone(); await settle(); awake.push(w.stats.awake); const r = await w.readPose(); vmax = Math.max(vmax, Math.hypot(r.vel[3], r.vel[4], r.vel[5])); } }
+        const r = await w.readPose();
+        w.destroy();
+        out.push({ pinned_m: pin, awake, y: +r.body[8].toFixed(4), vmax: +vmax.toFixed(3) });
+      }
+      check('pinched', out.every(o => o.awake[o.awake.length - 1] === 0), { cases: out });
     }
     if (scenes.includes('bound')) {
       // The velocity bound (vh_clamp) on its own: the landing cases with shock propagation off and no crushing, the

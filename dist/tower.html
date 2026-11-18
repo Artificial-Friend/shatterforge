@@ -2286,7 +2286,8 @@ const P_SEP = 2.0;
   var corr = vec3f(0.0); var n = 0.0; var touch = 0.0; var bearing = false;
   var grounded = false; var gPen = 0.0; var gN = vec3f(0.0);
   let cap = P_SEP * P.p_h;
-  var vlim = 0.0;   // (how far the fastest thing that pushed it went in the sub-step: see the end)
+  // (how far each thing that pushed it went in the sub-step: see the end)
+  var pushd: array<vec3f, 36>; var npush = 0u;
   let o = pcand(i);
   // other particles first (a sleeping one does not give way); several pushes are averaged, over-relaxed (Jacobi)
   let nn0 = pld(o);
@@ -2305,11 +2306,25 @@ const P_SEP = 2.0;
     let moving = R(j, 1).w == 1.0;
     let wgt = select(1.0, 0.5, moving);
     let dj = select(vec3f(0.0), rj.xyz - R(j, 3).xyz, moving);
-    vlim = max(vlim, length(dj));
     let pen = min((rr - dist) * wgt, (max(-dot((xi - xs) - dj, nn), 0.0) + cap) * wgt);
+    if (pen > 0.0) { pushd[npush] = dj; npush++; }
     corr += nn * pen + pfric((xi - xs) - dj, nn, pen, mui) * wgt; n += 1.0;
   }
   var x = xi + corr * select(1.0, 1.5 / n, n > 1.5);
+  // Crumbs do not throw one another. Each push above is bounded by how fast the two close, plus the separation
+  // limit; but that limit is added again by every neighbour and in every sub-step, and what one crumb is let go
+  // the next is let go on top of: up a column of crumbs made on top of one another each left 2 m/s faster than
+  // the one under it, and two parting let each other go faster every sub-step. So the move the others give it is
+  // bounded along the way it ends up going: as far as it was going that way by itself, or as far as any of them
+  // went that way, or the separation limit, whichever is most. (GPU test crumbnest, 24 crumbs made 0.1 m apart
+  // in a well: up at 7.1 m/s before, 1.8 after. Lab tallball and qballoffice, 18 Nov: one crumb each up at 13.2
+  // and 11.3 m/s with nothing moving near.)
+  { let d = x - xs; let dl = length(d);
+    if (dl > 1e-9) {
+      let dir = d / dl; var most = max(cap, dot(xi - xs, dir));
+      for (var k = 0u; k < npush; k++) { most = max(most, dot(pushd[k], dir)); }
+      if (dl > most) { x = xs + dir * most; } } }
+  var vlim = 0.0;
   // a particle pushed hard from opposite sides by two bodies (a box set down on it on the floor) is crushed
   var lastN = vec3f(0.0); var lastPush = 0.0; var crushed = R(i, 6).w;
   var lastS = 0xffffffffu; var lastFixed = true;   // (the shape that pushed hardest so far; the ground: fixed)
@@ -2380,13 +2395,17 @@ const P_SEP = 2.0;
     }
     if (pen > lastPush) { lastPush = pen; lastN = nn; lastS = j; lastFixed = fixed; }
   }
-  // Nothing leaves a squeeze faster than what squeezes it. Each push above is bounded on its own (as far as
-  // that body moved into the particle, plus the separation limit), but they follow one another: a crumb that a
-  // part of many bricks has come down over is pushed out of one brick into the next, and by that one on, up to
-  // twelve times in a sub-step. So the whole move of the sub-step is bounded: as far as it was going by itself,
-  // or as far as the fastest particle or body that pushed it went plus the separation limit, once (not its own
-  // way plus the limit: held in a part at rest it then gained the separation speed every sub-step, 10 m/s). (Lab collapse, 18 Nov: 32 crumbs up at 10 to 25 m/s as the upper part landed, one at the 40 m/s
-  // that p_apply allows, still falling from 80 m ten seconds on. GPU test crumbpop: 39.9 -> 6.8 m/s under a part landing at 6.)
+  // Nothing leaves a squeeze faster than what squeezes it. Each push of a shape above is bounded on its own (as
+  // far as that body moved into the particle, plus the separation limit), but they follow one another: a crumb
+  // that a part of many bricks has come down over is pushed out of one brick into the next, and by that one on,
+  // up to twelve times in a sub-step. So the whole move of the sub-step is bounded: as far as it was going by
+  // itself, or as far as the fastest body that pushed it went plus the separation limit, once (not its own way
+  // plus the limit: held in a part at rest it then gained the separation speed every sub-step, 10 m/s). (Lab
+  // collapse, 18 Nov: 32 crumbs up at 10 to 25 m/s as the upper part landed, one at the 40 m/s that p_apply
+  // allows, still falling from 80 m ten seconds on. GPU test crumbpop: 39.9 -> 6.8 m/s under a part landing at 6.)
+  // (By speed, not along its way as for the crumbs' own pushes: bounded along its way, a crumb a box came down on
+  // could not get out from between the box and a table as fast as the box came, and ended 5 cm inside the table:
+  // GPU test particles, 3 inside.)
   { let d = x - xs; let dl = length(d); let most = max(length(xi - xs), vlim + cap); if (dl > most) { x = xs + d * (most / dl); } }
   setR(i, 5, vec4f(x, select(touch, 2.0, bearing)));   // (2: holding up a moving body, see p_finish)
   pst(pcand(i) + 39u, select(0u, 1u, grounded));
@@ -6218,7 +6237,7 @@ function labReport(wallS) {
   // body asleep from 7.8 s; at 8.6, 9.0 and 9.9 s joints wear through under the heap (2, 1 and 2) and wake it.
   if (S.expect && S.expect.settle) {
     const woken = L.settledAt == null && L.structFailAt !== undefined && L.f - L.structFailAt <= 60 && L.bodiesQuietAt !== undefined && L.bodiesQuietAt >= L.structFailAt - 120;
-    checks.push({ name: 'settled (s)', value: L.settledAt != null ? +(L.settledAt / 60).toFixed(1) : woken ? `${(L.bodiesQuietAt / 60).toFixed(1)}, woken at ${(L.structFailAt / 60).toFixed(1)} by the structure` : 'no', limit: `by ${(S.frames / 60).toFixed(0)}`, pass: L.settledAt != null || woken, what: 'everything asleep before the end, or woken in its last second by the structure giving way under it' });
+    checks.push({ name: 'settled (s)', value: L.settledAt != null ? +(L.settledAt / 60).toFixed(1) : woken ? `${(L.bodiesQuietAt / 60).toFixed(1)}, woken at ${(L.structFailAt / 60).toFixed(1)} by the structure` : 'no', limit: `by ${(S.frames / 60).toFixed(0)}`, pass: L.settledAt != null || woken, what: 'everything asleep before the end with no engine job changing anything since, or woken in its last second by the structure giving way under it' });
   }
   const gpuMs = se.map(x => x.gpu), jsMs = L.jsMs;
   return {
@@ -6314,6 +6333,8 @@ async function labRun() {
         if (Math.abs(lost) > 1e-6) { const k = (j.job.op === 'blast' || j.job.op === 'pblast') ? 'tool' : j.job.op; L.lostBy[k] = (L.lostBy[k] || 0) + lost; } }   // (signed: a job can add what another takes away)
       // what the engine did, frame by frame (to explain an event)
       if (j.job.op === 'structure' && r.n > 0) L.structFailAt = L.f;   // (the last frame the standing structure lost joints)
+      // (a job that changed the world unsettles it; one that found nothing to do does not: see quietNow)
+      if (r.n > 0 || gpu.n !== nb0 || breaks !== b0 || (r.out && r.out.length && r.out[0] > 0) || r.moving) L.settledAt = null;
       if (L.timeline.length < 400) L.timeline.push({ f: L.f, op: j.job.op, n: r.n, ms: +(r.ms || 0).toFixed(1), dyn: j.job.op === 'structure' && r.dynIts !== undefined ? { its: r.dynIts, moving: !!r.moving, left: r.dynLeft, cut: r.dynCut, capped: r.dynCapped, mm_s: +(1000 * (r.dynSpeed || 0)).toFixed(1) } : undefined, sent: j.due - L.jobLag, new_bodies: gpu.n - nb0, breaks: breaks - b0, static_updates: r.out && r.out.length ? r.out[0] : 0 });
     }
     // read-backs that are due
@@ -6350,7 +6371,9 @@ async function labRun() {
       const nm = Math.min(gpu.stats.manifolds || 0, gpu.maxMan), cur = (gpu.frame - 1) & 1;
       const [man, bod, sol] = await Promise.all([gpu.read(gpu.manBuf, 2 * gpu.maxMan * 17 * 16), gpu.read(gpu.bodBuf, gpu.n1 * 80), gpu.read(gpu.solBuf, gpu.n1 * 96)]);
       const r3 = (a, o) => [a[o], a[o + 1], a[o + 2]].map(x => +x.toFixed(3));
-      const bodyRow = (b) => ({ b, p: r3(bod, b * 20), m: bod[b * 20 + 3] > 0 ? Math.round(1 / bod[b * 20 + 3]) : 0, v: r3(sol, b * 24), w: r3(sol, b * 24 + 4), asleep: bod[b * 20 + 12] > 0.5 ? 1 : 0, shapes: (gpu.bodyShapes.get(b) || []).length });
+      // ('awake': every movable body awake now, when they are few: what keeps a scene from settling)
+      if (String(window.__traceBodies).includes('awake')) { const aw = []; for (let b = 1; b < gpu.n1; b++) if (bod[b * 20 + 3] > 0 && sol[b * 24 + 3] > 0 && bod[b * 20 + 1] > -500) aw.push(b); if (aw.length <= 12) aw.forEach(b => want.add(b)); }
+      const bodyRow = (b) => ({ b, p: r3(bod, b * 20), m: bod[b * 20 + 3] > 0 ? Math.round(1 / bod[b * 20 + 3]) : 0, v: r3(sol, b * 24), w: r3(sol, b * 24 + 4), asleep: bod[b * 20 + 12] > 0.5 ? 1 : 0, rest_s: +bod[b * 20 + 11].toFixed(3), from_anchor_mm: +(1000 * Math.hypot(bod[b * 20] - bod[b * 20 + 13], bod[b * 20 + 1] - bod[b * 20 + 14], bod[b * 20 + 2] - bod[b * 20 + 15])).toFixed(2), turned_mrad: +(2000 * Math.hypot(...[0, 1, 2].map(k => { const q = [bod[b * 20 + 4], bod[b * 20 + 5], bod[b * 20 + 6], bod[b * 20 + 7]], r = [-bod[b * 20 + 16], -bod[b * 20 + 17], -bod[b * 20 + 18], bod[b * 20 + 19]]; const c = [q[1] * r[2] - q[2] * r[1], q[2] * r[0] - q[0] * r[2], q[0] * r[1] - q[1] * r[0]]; return q[3] * r[k] + r[3] * q[k] + c[k]; }))).toFixed(2), shapes: (gpu.bodyShapes.get(b) || []).length });
       const row = { f: L.f, gf: gpu.frame, bodies: [...want].filter(b => b > 0 && b < gpu.n1).map(bodyRow), contacts: [] };
       for (let k = 0; k < nm; k++) {
         const o = (cur * gpu.maxMan + k) * 68, a = man[o], b = man[o + 1];
@@ -6392,7 +6415,12 @@ async function labRun() {
     const g = gpu.gpuMs ? Object.values(gpu.gpuMs).reduce((a, b) => a + b, 0) : 0;
     if (g > L.peakGpu) { L.peakGpu = g; L.peakStages = Object.fromEntries(Object.entries(gpu.gpuMs).map(([k, v]) => [k, +v.toFixed(2)])); }
     L.work.cs += gpu.stats.manifolds * gpu.substeps; L.work.ps += (gpu.stats.pActive || 0) * (gpu.psub || 4);
-    const quietNow = (gpu.stats.awake || 0) === 0 && !(gpu.stats.pActive > 0) && !busy && !L.jobq.length && L.f > L.quietFrom;
+    // Settled: nothing awake, and no engine job since that changed anything. (Until 18 Nov: and no job in flight.
+    // While joints wear, the structure is checked every quarter second for as long as they do, each check a job
+    // that finds nothing; whether one was in flight at a frame decided the check. Lab qbarn, 18 Nov, 900 frames:
+    // nothing awake from frame 300, 3 joints wearing, a check every 20 frames with no failure and nothing sent,
+    // "not settled".)
+    const quietNow = (gpu.stats.awake || 0) === 0 && !(gpu.stats.pActive > 0) && L.f > L.quietFrom;
     if (quietNow && L.settledAt == null) L.settledAt = L.f; else if (!quietNow) L.settledAt = null;
     if ((gpu.stats.awake || 0) === 0) L.bodiesQuietAt = L.f;   // (the last frame every body was asleep)
     if (L.f % 10 === 0 || L.f === S.frames - 1) {

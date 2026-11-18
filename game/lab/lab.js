@@ -654,7 +654,9 @@ async function labRun() {
       const nm = Math.min(gpu.stats.manifolds || 0, gpu.maxMan), cur = (gpu.frame - 1) & 1;
       const [man, bod, sol] = await Promise.all([gpu.read(gpu.manBuf, 2 * gpu.maxMan * 17 * 16), gpu.read(gpu.bodBuf, gpu.n1 * 80), gpu.read(gpu.solBuf, gpu.n1 * 96)]);
       const r3 = (a, o) => [a[o], a[o + 1], a[o + 2]].map(x => +x.toFixed(3));
-      const bodyRow = (b) => ({ b, p: r3(bod, b * 20), m: bod[b * 20 + 3] > 0 ? Math.round(1 / bod[b * 20 + 3]) : 0, v: r3(sol, b * 24), w: r3(sol, b * 24 + 4), asleep: bod[b * 20 + 12] > 0.5 ? 1 : 0, shapes: (gpu.bodyShapes.get(b) || []).length });
+      // ('awake': every movable body awake now, when they are few: what keeps a scene from settling)
+      if (String(window.__traceBodies).includes('awake')) { const aw = []; for (let b = 1; b < gpu.n1; b++) if (bod[b * 20 + 3] > 0 && sol[b * 24 + 3] > 0 && bod[b * 20 + 1] > -500) aw.push(b); if (aw.length <= 12) aw.forEach(b => want.add(b)); }
+      const bodyRow = (b) => ({ b, p: r3(bod, b * 20), m: bod[b * 20 + 3] > 0 ? Math.round(1 / bod[b * 20 + 3]) : 0, v: r3(sol, b * 24), w: r3(sol, b * 24 + 4), asleep: bod[b * 20 + 12] > 0.5 ? 1 : 0, rest_s: +bod[b * 20 + 11].toFixed(3), from_anchor_mm: +(1000 * Math.hypot(bod[b * 20] - bod[b * 20 + 13], bod[b * 20 + 1] - bod[b * 20 + 14], bod[b * 20 + 2] - bod[b * 20 + 15])).toFixed(2), turned_mrad: +(2000 * Math.hypot(...[0, 1, 2].map(k => { const q = [bod[b * 20 + 4], bod[b * 20 + 5], bod[b * 20 + 6], bod[b * 20 + 7]], r = [-bod[b * 20 + 16], -bod[b * 20 + 17], -bod[b * 20 + 18], bod[b * 20 + 19]]; const c = [q[1] * r[2] - q[2] * r[1], q[2] * r[0] - q[0] * r[2], q[0] * r[1] - q[1] * r[0]]; return q[3] * r[k] + r[3] * q[k] + c[k]; }))).toFixed(2), shapes: (gpu.bodyShapes.get(b) || []).length });
       const row = { f: L.f, gf: gpu.frame, bodies: [...want].filter(b => b > 0 && b < gpu.n1).map(bodyRow), contacts: [] };
       for (let k = 0; k < nm; k++) {
         const o = (cur * gpu.maxMan + k) * 68, a = man[o], b = man[o + 1];
