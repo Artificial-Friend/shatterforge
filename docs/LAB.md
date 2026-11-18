@@ -1004,6 +1004,18 @@ building is high, and rubble has no restitution; what a tool throws is not "quie
 storey. The cause and the fix are in docs/GPU.md, "Nothing leaves a squeeze faster than what squeezes it"; GPU
 test `crumbpop`: 39.9 → 6.8 m/s.
 
+**The measure, corrected the same day (its own commit; rule 3).** With the fix the full `collapse` (600 frames,
+software GPU) still counted 2: crumbs 14850 and 6935, up at 10.53 and 10.76 m/s in frames 74 and 108 (32, at up
+to 25 m/s, before the fix). That is not the solver throwing: the upper part lands after a fall of about 4 m, at
+8.9 m/s, and the engine's rule lets a squeezed crumb leave at the speed of what squeezes it plus the 2 m/s at
+which touching things part, 10.9 m/s. The limit of 10 m/s alone was below what the rule allows in this very
+scenario; it had been reasoned from the building's height and then set lower than that reasoning gives (a fall of
+18.6 m is 19 m/s). The check now counts a crumb going up at over 10 m/s **and** over 2.5 m/s faster than any point
+of any body that reaches it (centre speed plus spin times reach, at this read-back or the one before, within the
+body's reach plus 0.5 m); a crumb with no body near is counted at 10 m/s as before. The event carries
+`pushed_at`. What this gives up: a crumb thrown at under the pusher's speed plus 2.5 m/s in the wrong direction is
+not counted.
+
 ### The rebound measure (its own commit; rule 3)
 
 "Rebounds over half the impact speed" took the impact speed to be the fall speed of the piece's centre at the

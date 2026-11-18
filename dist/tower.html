@@ -5949,13 +5949,6 @@ function labOnRead(r, pr) {
   }
   const L = LAB, f = L.f, nb = r.body.length / 7;
   const quiet = f > L.quietFrom;   // nothing pushed from outside lately (blast, ball, cut)
-  // Crumbs thrown (18 Nov). Nothing in a collapse falls further than the building is high, and rubble has no
-  // restitution: a crumb going UP at over 10 m/s has been thrown by the solver. (Found by its absence: lab
-  // collapse did not settle in 10 s because one crumb was still falling, from 80 m, at frame 600.)
-  { const pq = snapCur && snapCur.parts;
-    if (quiet && pq && pq.data && pq.list) for (const i of pq.list) { const o = i * 12; if (pq.data[o + 10] !== 1 || !(pq.data[o + 4] > 10)) continue;
-      if ((L.pThrown = L.pThrown || new Set()).has(i)) continue; L.pThrown.add(i);
-      const inf = pInfo[i]; labEvent('crumb_thrown', f, { i, p: [pq.data[o], pq.data[o + 1], pq.data[o + 2]].map(x => +x.toFixed(2)), v: [pq.data[o + 3], pq.data[o + 4], pq.data[o + 5]].map(x => +x.toFixed(2)), r: +pq.data[o + 11].toFixed(3), from: inf && inf.src, made: inf && inf.f }); } }
   let bad = 0, below = 0, gain = 0, ekPrev = 0, slack = 0;
   const now = new Map();
   const at = r.bodiesAt || gpu.bodies;
@@ -6011,6 +6004,22 @@ function labOnRead(r, pr) {
   const given = L.given || 0; L.given = Math.max(0, given - Math.max(0, gain)) * 0.97;
   if (quiet && L.prevBodies && gain > 0.05 * ekPrev + 2000 + given + slack) { L.energyGains++; L.energyGainMax = Math.max(L.energyGainMax, ekPrev > 0 ? gain / ekPrev : 0); labEvent('energy_gain', f, { gain_J: Math.round(gain), kinetic_before_J: Math.round(ekPrev), most: (L.gainers || []).sort((a, b) => b.gain_J - a.gain_J).slice(0, 3) }); }
   L.gainers = [];
+  // Crumbs thrown (18 Nov). Rubble has no restitution, and the engine lets nothing leave a squeeze faster than
+  // what squeezes it plus the 2 m/s at which touching things part (docs/GPU.md). A crumb going UP at over 10 m/s
+  // (a fall of 5 m) AND over 2.5 m/s faster than any point of any body that reaches it, at this read-back or the
+  // one before, has been thrown by the solver. (The first limit was 10 m/s alone, which is less than the engine's
+  // own rule allows under a part landing at 8.9 m/s, as collapse's upper part does: docs/LAB.md, 18 November.)
+  { const pq = snapCur && snapCur.parts;
+    if (quiet && pq && pq.data && pq.list) for (const i of pq.list) { const o = i * 12; if (pq.data[o + 10] !== 1 || !(pq.data[o + 4] > 10)) continue;
+      if ((L.pThrown = L.pThrown || new Set()).has(i)) continue;
+      const cp = [pq.data[o], pq.data[o + 1], pq.data[o + 2]]; let near = 0;
+      for (const set of [L.prevBodies, now]) for (const [ob, x] of set || []) { if (!x.p) continue;
+        const R = x.reach === undefined ? (x.reach = labReach(ob)) : x.reach;
+        if (Math.hypot(cp[0] - x.p[0], cp[1] - x.p[1], cp[2] - x.p[2]) > R + pq.data[o + 11] + 0.5) continue;
+        near = Math.max(near, Math.hypot(...x.v) + Math.hypot(...x.w) * R); }
+      if (!(pq.data[o + 4] > near + 2.5)) continue;
+      L.pThrown.add(i);
+      const inf = pInfo[i]; labEvent('crumb_thrown', f, { i, p: cp.map(x => +x.toFixed(2)), v: [pq.data[o + 3], pq.data[o + 4], pq.data[o + 5]].map(x => +x.toFixed(2)), r: +pq.data[o + 11].toFixed(3), pushed_at: +near.toFixed(2), from: inf && inf.src, made: inf && inf.f }); } }
   L.prevBodies = now;
   // flight recorder: every body at the last 4 read-backs; the first 2 bursts (a launch or a gain over 1 MJ while
   // quiet) keep it, with the impact events of those frames, so a rare burst can be read from any full run
@@ -6108,7 +6117,7 @@ function labReport(wallS) {
     ['crumbled share of a big part when it breaks (worst)', +Math.max(0, ...(L.bigBreaks || []).map(b => b[2])).toFixed(2), 0.25, 'parts bursting into crumbs'],
     ['rebounds over half the impact speed (while quiet)', L.bounces, 0, 'unnatural bouncing'],
     ['pieces thrown up faster than 5 m/s (while quiet)', L.launches, 0, 'launches'],
-    ['crumbs thrown up faster than 10 m/s (while quiet)', (L.pThrown || { size: 0 }).size, 0, 'launches of rubble'],
+    ['crumbs thrown up faster than 10 m/s (while quiet)', (L.pThrown || { size: 0 }).size, 0, 'launches of rubble: up at over 10 m/s and over 2.5 m/s faster than any body that reaches them'],
     ['energy gains over 5% (while quiet)', L.energyGains, 0, 'energy made from nothing'],
     // what the tools did not take out must stay in the world: standing, falling, as rubble or particles. Dust (fines
     // removed) is real but small; a whole floor gone as dust is a floor that vanished (7 November: 57% in collapse)
