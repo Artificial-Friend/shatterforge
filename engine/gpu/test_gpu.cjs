@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..', '..');
 const wasm = fs.readFileSync(path.join(root, 'target/wasm32-unknown-unknown/release/sf_demo.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'crumbpop', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heap', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
 const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
 (async () => {
   const b = await chromium.launch({ args: ['--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader', '--enable-features=Vulkan'] });
@@ -946,6 +946,29 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       const res = { up_ms: +up.toFixed(2), vy: track };
       check('stumpland', res.up_ms <= 0.15, res);
+    }
+    if (scenes.includes('crumbpop')) {
+      // Rubble under a landing part is not shot out of it (18 Nov; the limit at the end of p_contact). A 300 t
+      // part of 4 x 8 x 4 bricks (0.5 x 0.25 x 0.5 m) comes down at 6 m/s on 64 crumbs (r 0.155) lying on the
+      // ground. A crumb the part has come down over is pushed out by each brick it is in, one after another in
+      // the same sub-step, each by as much as the part moved plus the separation speed (2 m/s).
+      // The fastest any crumb goes up: 39.9 m/s before (all that p_apply allows), 6.8 with the limit (lab collapse, 18 Nov: 32 crumbs
+      // up at 10 to 25 m/s in frames 54 to 73, one of them still falling from 80 m at frame 600).
+      const boxes = []; for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) for (let k = 0; k < 8; k++) boxes.push({ p: [-0.75 + 0.5 * i, 0.6 + 0.125 + 0.25 * k, -0.75 + 0.5 * j], q: [0, 0, 0, 1], h: [0.25, 0.125, 0.25], mat: MAT.concrete });
+      const part = { shapes: boxes, mass: 300000, v: [0, -6, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [part], { substeps: 12, sleep: false, maxBodies: 8, maxShapes: 256, maxParticles: 4096 });
+      const list = []; for (let i = 0; i < 8; i++) for (let j = 0; j < 8; j++) list.push({ p: [-1.2 + 0.34 * i + 0.03 * (j % 2), 0.155, -1.2 + 0.34 * j], v: [0, 0, 0], r: 0.155, mat: 0 });
+      w.addParticles(list);
+      let up = -1e9, sp = 0, at = 0;
+      for (let f = 1; f <= 40; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        const pr = await w.readParticles(); const d = new Float32Array(pr.data.buffer || pr.data);
+        for (let i = 0; i < pr.n; i++) { const vy = d[i * 12 + 4]; if (vy > up) { up = vy; at = f; } sp = Math.max(sp, Math.hypot(d[i * 12 + 3], d[i * 12 + 4], d[i * 12 + 5])); }
+      }
+      w.destroy();
+      const res = { crumbsMaxUp_ms: +up.toFixed(2), atFrame: at, fastest_ms: +sp.toFixed(2) };
+      // (the part's 6 m/s and the separation speed, with a step of gravity: nothing it pushes leaves faster)
+      check('crumbpop', res.crumbsMaxUp_ms <= 8.2 && res.fastest_ms <= 8.4, res);
     }
     if (scenes.includes('bound')) {
       // The velocity bound (vh_clamp) on its own: the landing cases with shock propagation off and no crushing, the

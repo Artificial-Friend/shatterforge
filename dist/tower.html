@@ -2286,6 +2286,7 @@ const P_SEP = 2.0;
   var corr = vec3f(0.0); var n = 0.0; var touch = 0.0; var bearing = false;
   var grounded = false; var gPen = 0.0; var gN = vec3f(0.0);
   let cap = P_SEP * P.p_h;
+  var vlim = 0.0;   // (how far the fastest thing that pushed it went in the sub-step: see the end)
   let o = pcand(i);
   // other particles first (a sleeping one does not give way); several pushes are averaged, over-relaxed (Jacobi)
   let nn0 = pld(o);
@@ -2304,6 +2305,7 @@ const P_SEP = 2.0;
     let moving = R(j, 1).w == 1.0;
     let wgt = select(1.0, 0.5, moving);
     let dj = select(vec3f(0.0), rj.xyz - R(j, 3).xyz, moving);
+    vlim = max(vlim, length(dj));
     let pen = min((rr - dist) * wgt, (max(-dot((xi - xs) - dj, nn), 0.0) + cap) * wgt);
     corr += nn * pen + pfric((xi - xs) - dj, nn, pen, mui) * wgt; n += 1.0;
   }
@@ -2351,6 +2353,7 @@ const P_SEP = 2.0;
     let push = min(pen, max(dot(vb * P.p_h - (x - xs), nn), 0.0) + cap);
     let mu = 0.5 * (mui + P.mat[u32(Hs(j, H_ID).y)].x);
     x += nn * push + pfric((x - xs) - vb * P.p_h, nn, push, mu); touch = 1.0;
+    if (push > 0.0) { vlim = max(vlim, length(vb) * P.p_h); }
     let fixed = !moving(b) || asleep(b);
     if (fixed && nn.y > 0.5) { grounded = true; }
     // (a particle in contact with a moving body does not fall asleep, see p_finish: under a building resting on
@@ -2377,6 +2380,14 @@ const P_SEP = 2.0;
     }
     if (pen > lastPush) { lastPush = pen; lastN = nn; lastS = j; lastFixed = fixed; }
   }
+  // Nothing leaves a squeeze faster than what squeezes it. Each push above is bounded on its own (as far as
+  // that body moved into the particle, plus the separation limit), but they follow one another: a crumb that a
+  // part of many bricks has come down over is pushed out of one brick into the next, and by that one on, up to
+  // twelve times in a sub-step. So the whole move of the sub-step is bounded: as far as it was going by itself,
+  // or as far as the fastest particle or body that pushed it went plus the separation limit, once (not its own
+  // way plus the limit: held in a part at rest it then gained the separation speed every sub-step, 10 m/s). (Lab collapse, 18 Nov: 32 crumbs up at 10 to 25 m/s as the upper part landed, one at the 40 m/s
+  // that p_apply allows, still falling from 80 m ten seconds on. GPU test crumbpop: 39.9 -> 6.8 m/s under a part landing at 6.)
+  { let d = x - xs; let dl = length(d); let most = max(length(xi - xs), vlim + cap); if (dl > most) { x = xs + d * (most / dl); } }
   setR(i, 5, vec4f(x, select(touch, 2.0, bearing)));   // (2: holding up a moving body, see p_finish)
   pst(pcand(i) + 39u, select(0u, 1u, grounded));
   if (crushed > 0.0) { let r6 = R(i, 6); setR(i, 6, vec4f(r6.xyz, 1.0)); }

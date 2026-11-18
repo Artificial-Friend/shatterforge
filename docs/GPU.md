@@ -173,6 +173,20 @@ Crumbs are particles: spheres of the brick's volume, drawn as the bricks they ar
 
 Particles cut from a moving body wait (state 4) and are placed at the next step from the parent's pose then, like its pieces (`breakBody(parent, kids, pr, qr, dvs, parts, pdvs)`).
 
+### Nothing leaves a squeeze faster than what squeezes it (18 November)
+
+A particle is pushed out of each shape it is in, one after another in the same sub-step, and each push is
+bounded on its own: as far as that body moved into the particle, plus the separation limit (2 m/s). A crumb that
+a part of many bricks has come down over is pushed out of one brick into the next, and on by that one, up to
+twelve times. The whole move of the sub-step is now bounded too: as far as the particle was going by itself, or
+as far as the fastest particle or body that pushed it went plus the separation limit, once.
+
+Found by a crumb that was not there to be asleep: lab `collapse`, 600 frames, did not settle in 10 s because one
+crumb was still falling, from about 80 m, at 28 m/s in the last frame. The lab had no check for it; with one
+(docs/LAB.md, "crumbs thrown up"), the first 240 frames show 32 crumbs going up at 10 to 25 m/s between frames 54
+and 73, as the upper part lands. GPU test `crumbpop`, a 300 t part of 128 bricks landing at 6 m/s on 64 crumbs:
+the fastest crumb goes up at **39.9 m/s** before (all that `p_apply` allows) and **6.8 m/s** with the limit.
+
 ## Validation (`node engine/gpu/test_gpu.cjs`, headless Chrome with SwiftShader WebGPU)
 
 | Check | Expected | GPU result |

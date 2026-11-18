@@ -993,6 +993,17 @@ software GPU (SwiftShader), on this build.
 | 9 | **A hard landing bounced.** Restitution was the material's number at any speed: steel's 0.25 for a steel frame on its columns' stumps | The same part, landing at 6.14 m/s: back up at 1.52 m/s, and every chair in it thrown at the ceilings (10 rebounds) | What comes in faster than its faces or the touching shapes can bear does not bounce (docs/GPU.md, "What comes in too fast does not bounce") | GPU `hardland`: 1.54 → 0.07 m/s; `stumpland`: 1.12 → 0.00 m/s; in the lab the part leaves its landing at 0.11 m/s |
 | 10 | **The rebound check measured the wrong speed** (the lab's, not the engine's) | A tumbling fragment, and chairs landing on a rocking floor, counted as rebounds of 60% (below) | The speed a piece met what it hit at | Its own section, below |
 
+### Crumbs thrown up (a new check, and the cause it found)
+
+The full `collapse` of this pass failed one check, "settled": every body asleep, two crumbs awake, one of them
+42 m up and falling at 28 m/s in the last frame. Something had thrown it up at about 40 m/s seven seconds
+before, and no check counted that: launches were counted for bodies only. New check on every scenario:
+**"crumbs thrown up faster than 10 m/s (while quiet)", limit 0** (nothing in a collapse falls further than the
+building is high, and rubble has no restitution; what a tool throws is not "quiet"). On the first 240 frames of
+`collapse` it counted 32, at 10 to 25 m/s, in frames 54 to 73, as the upper part lands on the rubble of the cut
+storey. The cause and the fix are in docs/GPU.md, "Nothing leaves a squeeze faster than what squeezes it"; GPU
+test `crumbpop`: 39.9 → 6.8 m/s.
+
 ### The rebound measure (its own commit; rule 3)
 
 "Rebounds over half the impact speed" took the impact speed to be the fall speed of the piece's centre at the
