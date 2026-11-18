@@ -194,11 +194,24 @@ push of one crumb on another is bounded by how fast the two close plus the separ
 added again by every neighbour and in every sub-step: up a column of crumbs made on top of one another each left
 2 m/s faster than the one under it, and two crumbs parting let each other go faster by it each sub-step.
 
-The move the other crumbs give a crumb in a sub-step is now bounded along the way it ends up going: as far as it
-was going that way by itself, or as far as any crumb that pushed it went that way, or the separation limit,
-whichever is most. The shapes' pushes that follow keep the limit by speed: bounded along its way too, a crumb a
-box came down on could not get out from between the box and a table as fast as the box came, and ended 5 cm
-inside the table (GPU test `particles`, 3 inside; tried, not kept).
+The move the other crumbs give a crumb in a sub-step is now bounded by speed with nothing added: as far as it
+was going by itself, or as far as the fastest crumb that pushed it went, or the separation limit, whichever is
+most. No crumb leaves the others faster than the fastest of them, so their speeds cannot grow among themselves.
+The shapes' pushes that follow keep their own limit (the fastest body plus the separation limit, once).
+
+Tried first and not kept (commit f259dd1): the same bound taken along the way the crumb ends up going. A crumb
+could then not get out sideways from under what came down on it faster than the separation limit, 2 m/s. Lab
+`qglass` (600 frames, software GPU): the glass house, its four north columns cut, stopped on the crumbs of the cut
+0.29 m down; 1.14 m with the bound by speed (limit at least 1). Applied to the shapes' pushes as well, a crumb a
+box came down on ended 5 cm inside the table (GPU test `particles`, 3 inside).
+
+What the change does to a heap: crumbs no longer stir one another, so a heap spreads less. GPU test `particles`
+(2,000 crumbs poured on a table 2 m square): 471 stay on the table, where 385 did, the heap 8 cm higher, and the
+last two crumbs come to rest between 6 and 7 s, where the last did between 5 and 6. That test counted the steps
+the world skips once all is asleep in 30 steps taken in a row, in which no read-back can arrive: 30 or none on
+whether the last crumb slept before the last read-back that had arrived by 7 s; none now, on a machine doing
+nothing else. It steps frame by frame now, as a page does: 29 of 30 (limit over 20, unchanged; asleep at 7 s,
+unchanged). GPU test `heap` now fails: see "Still to do".
 
 Found by the lab's check for crumbs thrown up: `tallball` and `qballoffice` (build 228b18a, 480 frames, software
 GPU) each had one crumb going up at 13.2 and 11.3 m/s, 85 and 45 frames after the ball had stopped, with no body
@@ -597,6 +610,8 @@ What is not covered:
 Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall through the ground. The default is now 24 per shape (it was 8, and a heap of chunks overflowed it: chunks fell to -7.8 m). `stats.pairsLost` and `lost` (steps that lost contacts or pairs) report it, and the lab checks it.
 
 ## Still to do
+
+- **A slab landing on a heap rocks (open, 18 November; GPU test `heap`, out of the default run with this note).** A slab of 2 x 0.3 x 2 m, 2.9 t, dropped flat at 6.6 m/s on 1,500 crumbs poured on the ground. Until the crumbs stopped throwing one another the heap had spread to a layer 0.18 m thick under the slab, the slab came down nearly flat (turning at 1.6 rad/s after the hit) and its centre went back up at **0.59 m/s** (limit 0.1 x the impact speed + 0.1 = 0.76). Now the heap is 0.27 m thick and uneven; the slab meets it at one corner a step before the rest (turning at 3.1 and 3.2 rad/s about both axes, its centre still going down at 5.3 m/s), and as the other corners land its centre goes up at **1.04 m/s** and it hops 5 cm for 0.2 s. None crushed, at rest by frame 53. It is the turning that lifts the centre, not a push of the heap: two changes to the contact through particles were tried and changed nothing to two decimals (no push out of an overlap; no friction anchor), and with the particles holding nothing (`NOSUP=1`) the slab goes to the ground with no speed upward. What would be needed: the particles under a corner give way as rubble does (each quarter of the shape bearing on its own particles' cross-section, not on all of them), or the contact made in the step the slab arrives rather than the next. Not done. The limit is not changed. (The scene's reading of the heap before the drop returns no particles while the world has no body, so the slab always starts 2.2 m up; `particles: 0, heapTop_m: 0` in its output is that.)
 
 - **Crumbs that hop (closed, 15 November: the lab's measure, not the physics).** The check compared the distance a piece is DRAWN to have gone in a frame with its speed in the newest read-back. The drawn place is blended between two read-backs, so the speed that allows it is the greater of the two: a crumb that fell at 4.2 m/s in the older and was stopped in the newer had moved as far as 4.2 m/s goes and was held to 0. GPU test `pland` reads the same landings every step, from the GPU: nothing moves further than its speed. The lab's bound is now the greater speed of the two read-backs (its own commit; docs/LAB.md, 15 November). What follows is the note as it stood. In a collapse of 20,000 crumbs, two or three are drawn moving 0.3 to 0.5 m in one frame, upward, with a velocity that says otherwise (falling at 4.2 m/s and 0.41 m higher than a frame before: lab `masonry`, frame 14). Each is beside or inside a large body falling at the frame it happens. The same with and without the velocity bound (9 and 12 over six runs). What was tried: the separation limit of a particle against shapes (2 m/s past its own approach) taken per particle and sub-step and not per shape; GPU test `particles` then left a particle inside a body, which the rule "a particle never ends inside a body" forbids, and it was taken back out. Not found: what moves them. The lab's check counts them ("pieces moving further than their speed allows").
 
