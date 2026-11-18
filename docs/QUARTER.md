@@ -70,7 +70,7 @@ building's own frame (`qblast`, `qball`, `qcut`), so a building moved or turned 
 | `qglass` | The four north columns cut under the floor | The roof at least 1 m lower |
 | `qbarn` | Eight arcade posts shot out, four of each row | **It holds** |
 | `qtower` | Three of the water tower's four legs shot out | **It holds** |
-| `qchimney` | The chimney's foot blown out on one side | Its top at least 10 m lower (15 s) |
+| `qchimney` | The chimney's foot blown out on one side (the west) | Its top at least 10 m lower (15 s). **It fails**: the stack tips west onto the mill's eaves, 3.4 m off and 16 m up, and stays propped there, 20 degrees over (docs/LAB.md, 19 November) |
 | `qmill`, `qoffice` | Their ground storeys cut | The roof at least 3 m and 2 m lower |
 | `qballhall`, `qballglass`, `qballtemple`, `qballoffice` | The steel ball through the market hall, the glass house end to end, the temple's cella, and down through the office tower's floors | It goes through what it has the energy for and does not come back |
 
@@ -87,6 +87,9 @@ software GPU, 900 frames):
 | The white villa | 15 of its pilotis, three rows from the entrance's end, at 1.5 m (one row: no joint fails) | 30 joints, 11 more wearing after 15 s | The box hangs from the rows left: its walls and slabs are one frame |
 | The barn | 8 arcade posts, the four inner ones of each row, at 3.5 m (one row: no joint fails) | 10 joints | The arcade plates and the ties take the roof to the gable frames and the aisle walls |
 | The water tower | 3 of its 4 legs at 2 m (two legs: no joint fails) | 8 joints | The fourth leg, the bracing, and the riser pipe under the tank's middle; the tank is empty |
+
+The chimney is a fourth: cut from the east, where it could fall into the open, it stands on the loose blocks
+of its own foot (r = 1.5 and 2 m; docs/LAB.md, 19 November).
 
 Whether the real buildings would stand is not claimed. A villa on a third of its columns, a barn without its
 arcade and a tank on one leg and a pipe would at least be condemned; here they are carried by joints whose

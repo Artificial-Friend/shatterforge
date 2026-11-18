@@ -425,8 +425,8 @@ block tips 4.7 cm into the floor, meets the next panel's edge (normal 0.92 along
 in one step and stops, the ball behind it. And two of the glass house's chairs (12 kg each) in the ball's way.
 
 The world now knows which faces of the fixed, axis-aligned boxes are covered by other fixed boxes (`coverFlush`:
-a face is covered when its middle and four points 0.6 of the way to its edges, 1 cm out, are all inside other
-fixed boxes; kept up as shapes are set and killed, a shape and what touches it looked at again; the mask is in
+a face is covered when all of it is, 1 cm out from it, inside other fixed boxes (see "A face covered in part"
+below; until 19 November: when its middle and four points 0.6 of the way to its edges were); kept up as shapes are set and killed, a shape and what touches it looked at again; the mask is in
 the shape's record, and counts only while the shape's body is fixed). A contact whose normal pushes out through a
 covered face by more than 0.3 of itself is no contact (`cover_fix`): what lies over the seam is held by the contact with the
 panel it lies on. (First the normal was turned to the faces that are there; it kept the depth measured along the
@@ -443,6 +443,24 @@ stays: without it a chair's leg, a hair off the vertical, lost its contact at a 
 Limits: boxes only (a free piece of the temple, a hull, has no mask), fixed bodies only (a fallen floor that
 debris slides over is one moving body of several boxes: its seams are as before), and a face partly covered
 counts as open.
+
+**A face covered in part (19 November).** "Counts as open" was what the rule meant and not what the code did. It
+looked at five points of a face: its middle and four 0.6 of the way to its edges. A step under a shorter step
+has all five under the upper one and a tread in the open: the temple's lower step is 5.25 m wide and the upper
+one stops 0.375 m short of its edge. Its top was marked covered, the contact with it was dropped, and what
+landed on the tread fell through the step and lay inside it, between its underside and the ground. Found on lab
+`qtemple` (a 64 kg piece that landed on the tread at 7.7 m/s, then lay in the step, pressed by 13 to 15 kN s a
+step from both sides, turned 7 to 14 mrad every few frames by the two pushes and so never slept; LAB.md,
+19 November). The same holds wherever fixed boxes are stacked with a set-back: plinths, cornices, a wall on a
+wider footing.
+
+Now the five points only rule faces out; a face that passes them is cut along the edges of the fixed boxes over
+it, and it is covered when the middle of every part is inside one of them (to within 1 cm of the face's own
+edges). A brick under two bricks in bond is still covered; the step is not.
+
+GPU test `tread` (new, default run; software GPU): two fixed steps as the temple's, a 10 kg piece dropped on the
+tread at 3 m/s. Before: at rest 0.021 m up, inside the step (lower step's mask 4: top covered). After: 0.425 m
+up, on the tread (mask 0; the brick under two keeps 4).
 
 ### A body thrown is solved at its own mass
 

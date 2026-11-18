@@ -1043,7 +1043,8 @@ upright, still quivering at the end (one energy gain at frame 877, 12 kJ on 121 
 holding nothing up (`SF_NOSUP=1`, a new switch of the lab) it does the same, 3.66 m, so it does not stand on its
 crumbs but on the pieces of its foot. On build 228b18a its top came down 10 m and 21 bodies were still awake at
 15 s. Why it no longer falls over was not found. The limit is not changed; the scenario fails and is listed in
-docs/STATUS.md.
+docs/STATUS.md. (Found on 19 November, below: it does fall over, slowly, and the mill stops it. "Comes straight
+down" was read from the roof's height alone and was wrong.)
 
 **Seen once, not reproduced: a pinched piece that never slept.** In `qtemple` on 228b18a body 275, 11 kg and three
 boxes, lay 4 cm above the ground under the standing structure, held between the two (six contacts, 600 to 3,400
@@ -1054,6 +1055,52 @@ known. GPU test `pinched` (a piece under a fixed block, 0, 5 and 20 mm into it) 
 not reproduce it; it stays as a check. The lab's trace can now follow whatever is awake
 (`SF_TRACE_BODIES=awake --trace a:b`), with each body's rest timer and its distance from where the timer
 restarted, for the next time it shows.
+
+### 19 November: the pinched piece found, the chimney followed, the view's holes
+
+**The pinched piece: it had fallen through a step.** It showed again in `qtemple` on the build with the crumbs'
+speed bound (99ccd18): body 299, a 64 kg fragment of a column, awake from frame 200 to the end with 319 crumbs
+round it; "not settled". The trace (`SF_TRACE_BODIES=299 --trace 66:399`) has all of it. The piece lands at
+frame 170 on the tread of the platform's lower step, at 7.7 m/s, and meets the upper step's riser and, two
+frames on, the ground: never the tread. It comes to lie with its middle 0.17 m inside the step, 0.1 m above the
+ground, and from frame 194 the step pushes it down and the ground up, 13,000 to 15,000 N s a step each. Every
+five or six frames the two turn it by 7 to 14 mrad and back, which restarts its rest timer (that was the
+"unknown" of 18 November). The cause is in the standing structure, not in the piece: the lower step's top was
+marked as a covered face (docs/GPU.md, "A face covered in part"). Fixed there; GPU test `tread` is the check.
+`qtemple`, 600 frames, software GPU: not settled -> settled at 8.82 s. The piece of 18 November lay "4 cm above
+the ground under the standing structure": the same place.
+
+**The chimney: it falls on the mill.** `qchimney` (the foot blown out on the west side, 900 frames) fails on
+this build as on the last: roof fall 3.85 m (limit at least 10), one energy gain, not settled. The trace of its
+stack (`SF_TRACE_BODIES=big --trace 60:899`; body 291, 111.7 t) shows what the 3.85 m is. The stack does not
+sit down, as written here on 18 November: it tips west, slowly, on a 10 t block of its own foot (body 298) that
+turns with it as the stump under the block gives way. Its underside is 1 degree off level at frame 150, 10 at
+400, 17 at 840; its middle moves 2.9 m west and 2.2 m north. At frame 845 it meets the mill, which stands 3.4 m
+west of it: three contacts on the mill's east eaves, 16.0 m up, 1 to 7 kN s a step. There it stops, 20 degrees
+over, propped between its foot and the mill, at rest to under 1 cm/s by frame 896. The lab's "roof" is the
+highest thing within 2 m of the chimney's axis, which the leaning stack has left.
+
+So the limit of 10 m asks for something this engine cannot do there: a stack that meets a building 16 m up
+comes down further only if it breaks, and a falling body does not break under its own weight (it breaks on
+impact, by the crush tests; the plan for bodies that bend and break as they fall is in the project's
+`deformable-falling-pieces-plan`). On build 228b18a it came down 10 m; that build threw pieces about (the
+crumbs' faults of 18 November), and which of them broke the stack was not looked for. The limit is not changed
+and the scenario fails; this is the reason, written down (rule 5).
+
+Tried and not kept: the same cut from the east, where the ground is open (`qblast ['chimney', 8, 2.75, 0, -1, 0,
+0, r]`, 900 frames). With r = 1.5 m the stack stands (roof 26 -> 26 m, settled); with r = 2 m, 4.3 m3 removed
+and 834 joints failed, it still stands (26 -> 25.99 m): the fragments of the foot stay where they were cut,
+in a ring of loose blocks, and carry 111 t at about 0.3 MPa. The west cut brings it down only because the block
+under it turns. A blast here breaks masonry and takes some of it away; it does not throw the rest out from under
+a load. That is the same thing as the villa, the barn and the water tower holding their cuts (docs/QUARTER.md).
+
+**Holes with the engineer's view on.** `collapse --frames 150 --twice-view` on 99ccd18: the run with the view on
+had 6 frames with 0.07 to 0.32 m3 less drawn than exists (15 bodies made at frame 32 not yet drawn, their bricks
+already gone from the building); the run without had none. The physics agreed in all 150 frames; the page
+differed. With the view on, a lot's chunks were remeshed at once (`showView`), because a building at rest has no
+read-back coming to wait for; with it off they wait for the read-back that shows the debris. Now they wait in
+both, and what waits is drawn when the world is at rest and nothing has been sent to it (`pullDebris`). After: 0
+frames in both runs; page checks `view` and `rest` pass.
 
 ### The rebound measure (its own commit; rule 3)
 
