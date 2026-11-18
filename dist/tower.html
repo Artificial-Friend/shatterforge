@@ -5938,6 +5938,13 @@ function labOnRead(r, pr) {
   }
   const L = LAB, f = L.f, nb = r.body.length / 7;
   const quiet = f > L.quietFrom;   // nothing pushed from outside lately (blast, ball, cut)
+  // Crumbs thrown (18 Nov). Nothing in a collapse falls further than the building is high, and rubble has no
+  // restitution: a crumb going UP at over 10 m/s has been thrown by the solver. (Found by its absence: lab
+  // collapse did not settle in 10 s because one crumb was still falling, from 80 m, at frame 600.)
+  { const pq = snapCur && snapCur.parts;
+    if (quiet && pq && pq.data && pq.list) for (const i of pq.list) { const o = i * 12; if (pq.data[o + 10] !== 1 || !(pq.data[o + 4] > 10)) continue;
+      if ((L.pThrown = L.pThrown || new Set()).has(i)) continue; L.pThrown.add(i);
+      const inf = pInfo[i]; labEvent('crumb_thrown', f, { i, p: [pq.data[o], pq.data[o + 1], pq.data[o + 2]].map(x => +x.toFixed(2)), v: [pq.data[o + 3], pq.data[o + 4], pq.data[o + 5]].map(x => +x.toFixed(2)), r: +pq.data[o + 11].toFixed(3), from: inf && inf.src, made: inf && inf.f }); } }
   let bad = 0, below = 0, gain = 0, ekPrev = 0, slack = 0;
   const now = new Map();
   const at = r.bodiesAt || gpu.bodies;
@@ -6090,6 +6097,7 @@ function labReport(wallS) {
     ['crumbled share of a big part when it breaks (worst)', +Math.max(0, ...(L.bigBreaks || []).map(b => b[2])).toFixed(2), 0.25, 'parts bursting into crumbs'],
     ['rebounds over half the impact speed (while quiet)', L.bounces, 0, 'unnatural bouncing'],
     ['pieces thrown up faster than 5 m/s (while quiet)', L.launches, 0, 'launches'],
+    ['crumbs thrown up faster than 10 m/s (while quiet)', (L.pThrown || { size: 0 }).size, 0, 'launches of rubble'],
     ['energy gains over 5% (while quiet)', L.energyGains, 0, 'energy made from nothing'],
     // what the tools did not take out must stay in the world: standing, falling, as rubble or particles. Dust (fines
     // removed) is real but small; a whole floor gone as dust is a floor that vanished (7 November: 57% in collapse)
