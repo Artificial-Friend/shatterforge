@@ -49,6 +49,7 @@ const names = args.length ? args.flatMap(a => a.startsWith('=') ? [a.slice(1)] :
     await p.addInitScript((d) => { if (d[0]) window.__noPunch = true; if (d[1]) window.__oldBall = true; }, [!!process.env.SF_NOPUNCH, !!process.env.SF_OLDBALL]);
     await p.addInitScript((d) => { if (d) window.__viewOn = true; }, twiceView && !!digests[name]);
     await p.addInitScript((d) => { if (d) window.__noPinch = true; }, !!process.env.SF_NOPINCH);
+    await p.addInitScript((d) => { if (d) window.__noSup = true; }, !!process.env.SF_NOSUP);
     // (SF_NOBOUND: the solver without the velocity bound and the pinch test, as before 14 Nov: docs/GPU.md)
     await p.addInitScript((d) => { if (d) window.__noBound = true; }, !!process.env.SF_NOBOUND);
     // (SF_NOCOVER, SF_NOWAKEFAST, SF_NOSWEEP, SF_NOREFUND: the GPU world without covered faces, without waking what

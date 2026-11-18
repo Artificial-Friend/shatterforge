@@ -2321,8 +2321,8 @@ const P_SEP = 2.0;
   // and 11.3 m/s with nothing moving near.)
   { let d = x - xs; let dl = length(d);
     if (dl > 1e-9) {
-      let dir = d / dl; var most = max(cap, dot(xi - xs, dir));
-      for (var k = 0u; k < npush; k++) { most = max(most, dot(pushd[k], dir)); }
+      let dir = d / dl; var most = max(cap, length(xi - xs));
+      for (var k = 0u; k < npush; k++) { most = max(most, length(pushd[k])); }
       if (dl > most) { x = xs + dir * most; } } }
   var vlim = 0.0;
   // a particle pushed hard from opposite sides by two bodies (a box set down on it on the floor) is crushed
@@ -6310,6 +6310,7 @@ async function labRun() {
   if (window.__viewOn) { setting.view = 1; viewShown = true; E.set_param(8, viewParam()); }
   if (window.__pinch && gpu) gpu.pinching = true;
   if (window.__noPinch && gpu) gpu.pinching = false;
+  if (window.__noSup && gpu) gpu.support = false;   // (SF_NOSUP: particles hold no body up, to see what stands on rubble)
   if (window.__noPunch) setting.punch = 0;   // (SF_NOPUNCH: the ball as before 15 Nov, hitting rigidly; SF_OLDBALL: and at its old mass)
   if (window.__noBound && gpu) { gpu.velocityBound = false; gpu.pinching = false; }   // (as before 14 Nov: neither the bound nor the pinch test)
   if (window.__oldMasonry) E.set_param(6, 1);   // (SF_OLD_MASONRY: masonry in falling parts parts at once, for comparison)   // (SF_PINCH: crushing of pinched pieces, off by default)

@@ -2178,14 +2178,18 @@ const P_SEP = 2.0;
   // limit; but that limit is added again by every neighbour and in every sub-step, and what one crumb is let go
   // the next is let go on top of: up a column of crumbs made on top of one another each left 2 m/s faster than
   // the one under it, and two parting let each other go faster every sub-step. So the move the others give it is
-  // bounded along the way it ends up going: as far as it was going that way by itself, or as far as any of them
-  // went that way, or the separation limit, whichever is most. (GPU test crumbnest, 24 crumbs made 0.1 m apart
-  // in a well: up at 7.1 m/s before, 1.8 after. Lab tallball and qballoffice, 18 Nov: one crumb each up at 13.2
-  // and 11.3 m/s with nothing moving near.)
+  // bounded: as far as it was going by itself, or as far as the fastest of them went, or the separation limit,
+  // whichever is most, with nothing added: no crumb leaves the others faster than the fastest of them, so
+  // their speeds cannot grow among themselves. (GPU test crumbnest, 24 crumbs made 0.1 m apart in a well: up at
+  // 7.1 m/s before, 1.8 after. Lab tallball and qballoffice, 18 Nov: one crumb each up at 13.2 and 11.3 m/s with
+  // nothing moving near; none after.)
+  // (By speed, in any direction. Bounded along the way it ends up going, as this first was, a crumb could not
+  // get out sideways from under what came down on it faster than the separation limit: the glass house, its
+  // four north columns cut, stopped on the crumbs of the cut 0.29 m down, where it comes down 1.14 m: lab qglass.)
   { let d = x - xs; let dl = length(d);
     if (dl > 1e-9) {
-      let dir = d / dl; var most = max(cap, dot(xi - xs, dir));
-      for (var k = 0u; k < npush; k++) { most = max(most, dot(pushd[k], dir)); }
+      let dir = d / dl; var most = max(cap, length(xi - xs));
+      for (var k = 0u; k < npush; k++) { most = max(most, length(pushd[k])); }
       if (dl > most) { x = xs + dir * most; } } }
   var vlim = 0.0;
   // a particle pushed hard from opposite sides by two bodies (a box set down on it on the floor) is crushed
@@ -2266,9 +2270,9 @@ const P_SEP = 2.0;
   // plus the limit: held in a part at rest it then gained the separation speed every sub-step, 10 m/s). (Lab
   // collapse, 18 Nov: 32 crumbs up at 10 to 25 m/s as the upper part landed, one at the 40 m/s that p_apply
   // allows, still falling from 80 m ten seconds on. GPU test crumbpop: 39.9 -> 6.8 m/s under a part landing at 6.)
-  // (By speed, not along its way as for the crumbs' own pushes: bounded along its way, a crumb a box came down on
-  // could not get out from between the box and a table as fast as the box came, and ended 5 cm inside the table:
-  // GPU test particles, 3 inside.)
+  // (By speed, not along its way: bounded along its way, a crumb a box came down on could not get out from
+  // between the box and a table as fast as the box came, and ended 5 cm inside the table: GPU test particles,
+  // 3 inside.)
   { let d = x - xs; let dl = length(d); let most = max(length(xi - xs), vlim + cap); if (dl > most) { x = xs + d * (most / dl); } }
   setR(i, 5, vec4f(x, select(touch, 2.0, bearing)));   // (2: holding up a moving body, see p_finish)
   pst(pcand(i) + 39u, select(0u, 1u, grounded));

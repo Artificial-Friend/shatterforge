@@ -1159,9 +1159,13 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       };
       for (let f = 1; f <= 420; f++) { w.step(1 / 60); if (f % 60 === 0) await look(f); }
       const asleep = rows[rows.length - 1].active === 0;
-      const skippedBefore = w.skipped || 0;
-      for (let f = 0; f < 30; f++) w.step(1 / 60);
-      await dev.queue.onSubmittedWorkDone(); await settle();
+      const skippedBefore = w.skipped || 0, statsAt7s = w.stats.pActive;
+      // (frame by frame, as a page steps: the world skips a step once its statistics, read back a few steps
+      // late, say nothing is awake, and a read-back arrives only when the loop lets go. Stepped 30 times in a
+      // row, as this was, the count was all or nothing on whether the last crumb had gone to sleep before the
+      // last read-back that had arrived by 7 s: 30 with the last asleep by 6 s, 0 with the last two asleep
+      // between 6 and 7 s, 18 Nov, on a machine doing nothing else)
+      for (let f = 0; f < 30; f++) { w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle(); }
       const skips = (w.skipped || 0) - skippedBefore;
       // a 0.6 m box dropped on the pile
       const [bi] = w.addBodies([{ shapes: [{ p: [0.3, 3, 0.2], q: [0, 0, 0, 1], h: [0.3, 0.3, 0.3], mat: MAT.concrete }], v: [0, -3, 0], w: [0, 0, 0] }]);
@@ -1173,7 +1177,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       const last = rows[rows.length - 1];
       const perSecond = rows.filter(r => r.t !== undefined && r.onTable !== undefined);   // (probe rows are mixed in)
       check('particles', bad.below === 0 && bad.inside === 0 && perSecond[6].onTable > 300 && asleep && skips > 20 && woke > 0 && last.inBox < 5,
-        { bad, asleepAt7s: asleep, skippedSteps: skips, wokeByBox: woke, box: bp.map(v => +v.toFixed(2)), rows });
+        { bad, asleepAt7s: asleep, statsAwakeAt7s: statsAt7s, skippedSteps: skips, wokeByBox: woke, box: bp.map(v => +v.toFixed(2)), rows });
     }
     if (scenes.includes('heap')) {
       // A slab (2 x 0.3 x 2 m, 2.9 t) dropped flat on 1,500 rubble particles poured on the ground (they spread to
@@ -1189,9 +1193,9 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       if (globalThis.HEAPGRID) { for (let ix = 0; ix < 12; ix++) for (let iz = 0; iz < 12; iz++) list.push({ p: [-1.1 + ix * 0.2, 0.1, -1.1 + iz * 0.2], v: [0, 0, 0], r: 0.1, mat: MAT.concrete }); }
       else for (let i = 0; i < 1500; i++) list.push({ p: [(rand() - 0.5) * 1.8, 0.2 + rand() * 3, (rand() - 0.5) * 1.8], v: [0, 0, 0], r: 0.1 * (0.8 + 0.4 * rand()), mat: MAT.concrete });
       w.addParticles(list);
-      for (let f = 0; f < 300; f++) w.step(1 / 60);
+      for (let f = 0; f < 300; f++) { w.step(1 / 60); if (globalThis.HEAPDBG2 && f % 10 === 9) { await dev.queue.onSubmittedWorkDone(); await settle(); } }
       await dev.queue.onSubmittedWorkDone(); await settle();
-      const pr0 = await w.readParticles(); let top = 0, n0 = 0;
+      const pr0 = await w.readParticles(); let top = 0, n0 = 0; if (globalThis.HEAPDBG2) { const st = {}; let hi = 0; for (let i = 0; i < pr0.n; i++) { st[pr0.data[i * 12 + 10]] = (st[pr0.data[i * 12 + 10]] || 0) + 1; hi = Math.max(hi, pr0.data[i * 12 + 1]); } (globalThis.__hd = globalThis.__hd || []).push({ read_n: pr0.n, states: st, highest: +hi.toFixed(2), pActive: w.stats.pActive }); }
       for (let i = 0; i < pr0.n; i++) { const st = pr0.data[i * 12 + 10]; if (!st || st === 3) continue; n0++; const x = pr0.data[i * 12], z = pr0.data[i * 12 + 2]; if (Math.abs(x) < 0.6 && Math.abs(z) < 0.6) top = Math.max(top, pr0.data[i * 12 + 1] + pr0.data[i * 12 + 11]); }
       const [bi] = w.addBodies([{ shapes: [{ p: [0, Math.max(top, 1.2) + 1.0, 0], q: [0, 0, 0, 1], h: [1, 0.15, 1], mat: MAT.concrete }], v: [0, -3, 0], w: [0, 0, 0] }]);
       let maxUp = -1e9, yEnd = 0, vEnd = 0, hit = false;
@@ -1200,6 +1204,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
         const r = await w.readPose(); const vy = r.vel[(bi - 1) * 3 + 1]; yEnd = r.body[(bi - 1) * 7 + 1]; vEnd = vy;
         if (vy > -2.5) hit = true; if (hit) maxUp = Math.max(maxUp, vy);
         (globalThis.__hv = globalThis.__hv || []).push([f, vy]);
+        if (globalThis.HEAPDBG2 && f >= 21 && f <= 27) (globalThis.__hd = globalThis.__hd || []).push({ f, y: +yEnd.toFixed(3), v: [0, 1, 2].map(k => +r.vel[(bi - 1) * 3 + k].toFixed(2)), w: r.ang ? [0, 1, 2].map(k => +r.ang[(bi - 1) * 3 + k].toFixed(2)) : null, q: [3, 4, 5, 6].map(k => +r.body[(bi - 1) * 7 + k].toFixed(3)) });
       }
       const pr = await w.readParticles(); let crushed = 0, alive = 0, under = 0, topEnd = 0;
       for (let i = 0; i < pr.n; i++) { const st = pr.data[i * 12 + 10]; if (!st) continue; if (st === 3) crushed++; else alive++; const x = pr.data[i * 12], z = pr.data[i * 12 + 2], y = pr.data[i * 12 + 1]; if (Math.abs(x) < 0.9 && Math.abs(z) < 0.9 && y < yEnd) under++; if (Math.abs(x) > 1.2 || Math.abs(z) > 1.2) topEnd = Math.max(topEnd, y); }
@@ -1223,7 +1228,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w2.destroy();
       const vIn = Math.min(...(globalThis.__hv || []).map(r => r[1]));
       check('heap', bottom > 0.1 && crushed <= 15 && maxUp <= 0.1 * -vIn + 0.1 && Math.abs(vEnd) < 0.2 && yB < 0.05,
-        { block120t_bottom_m: +yB.toFixed(3), block120t_crushed: crushed2, impact_ms: +(-vIn).toFixed(2), particles: n0, heapTop_m: +top.toFixed(2), underSlab: under, heapOutsideTop_m: +topEnd.toFixed(2), slabBottom_m: +bottom.toFixed(2), crushed, alive, slabMaxUp_ms: +maxUp.toFixed(2), slabVyEnd_ms: +vEnd.toFixed(2) });
+        { block120t_bottom_m: +yB.toFixed(3), block120t_crushed: crushed2, impact_ms: +(-vIn).toFixed(2), particles: n0, heapTop_m: +top.toFixed(2), underSlab: under, heapOutsideTop_m: +topEnd.toFixed(2), slabBottom_m: +bottom.toFixed(2), crushed, alive, slabMaxUp_ms: +maxUp.toFixed(2), slabVyEnd_ms: +vEnd.toFixed(2), dbg: globalThis.__hd, slabVy: (globalThis.__hv || []).filter(r => r[1] > -2.9 || r[0] % 10 === 0).slice(0, 40).map(r => [r[0], +r[1].toFixed(2)]) });
     }
     if (scenes.includes('heapcreep')) {
      const res = {};
@@ -1478,7 +1483,7 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       done(r);
     }
     return out;
-  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR', 'NOPINCH', 'BOUND_OFF', 'SWEEP_OFF', 'COVER_OFF', 'SHOT_OFF', 'WAKE_OFF', 'REFUND_OFF', 'HP_WATCH', 'HP_F', 'PIN_H', 'PIN_V', 'PIN_L', 'PIN_PUSH', 'PIN_RELAX', 'PIN_DBG', 'PIN_NOREST', 'PIN_X', 'PIN_FINE', 'NOSHOCK', 'DT2', 'NOSUP', 'HEAPDBG', 'HEAPGRID', 'CREEP_N', 'CHAINDBG', 'CHNOSHOCK', 'CHNOCRUSH', 'HTHROW_ALL'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
+  }, { wasm, scenes, SUB: +(process.env.SF_SUB || 0), SAND_PUSH: process.env.SAND_PUSH || null, SAND_MAT: process.env.SAND_MAT || null, SAND_SUB: process.env.SAND_SUB || null, SAND_COL: process.env.SAND_COL || null, SAND_FALL: process.env.SAND_FALL || null, COMP_N: process.env.COMP_N || null, COMP_FLOOR: process.env.COMP_FLOOR || null, RELAX: process.env.RELAX || null, HNOSLEEP: process.env.HNOSLEEP || null, HBOX: process.env.HBOX || null, HNOCRUSH: process.env.HNOCRUSH || null, HNORED: process.env.HNORED || null, HONLY: process.env.HONLY || null, HPDYN: process.env.HPDYN || null, HRANDOM: process.env.HRANDOM || null, HBIG: process.env.HBIG || null, KN: Object.fromEntries(['STUMP_PIECES', 'STUMP_TILT', 'STUMP_OP', 'DBG', 'STRESS_SEED', 'STRESS_N', 'STRESS_F', 'STRESS_WATCH', 'STRESS_NORED', 'STRESS_NOCHUNK', 'WAKE_WALL', 'WAKE_SPIN', 'DBG_NOSORT', 'COLR', 'NOPINCH', 'BOUND_OFF', 'SWEEP_OFF', 'COVER_OFF', 'SHOT_OFF', 'WAKE_OFF', 'REFUND_OFF', 'HP_WATCH', 'HP_F', 'PIN_H', 'PIN_V', 'PIN_L', 'PIN_PUSH', 'PIN_RELAX', 'PIN_DBG', 'PIN_NOREST', 'PIN_X', 'PIN_FINE', 'NOSHOCK', 'DT2', 'NOSUP', 'HEAPDBG2', 'HEAPDBG', 'HEAPGRID', 'CREEP_N', 'CHAINDBG', 'CHNOSHOCK', 'CHNOCRUSH', 'HTHROW_ALL'].filter(k => process.env[k]).map(k => [k, process.env[k]])) });
   let fail = 0;
   for (const [k, v] of Object.entries(res)) { console.log((v.ok ? 'PASS ' : 'FAIL ') + k + ' ' + JSON.stringify(v)); if (!v.ok) fail++; }
   // the results for docs/STATUS.md (tools/status.py): full runs only (a run of a few scenes is not the state)
