@@ -1075,7 +1075,7 @@ this build as on the last: roof fall 3.85 m (limit at least 10), one energy gain
 stack (`SF_TRACE_BODIES=big --trace 60:899`; body 291, 111.7 t) shows what the 3.85 m is. The stack does not
 sit down, as written here on 18 November: it tips west, slowly, on a 10 t block of its own foot (body 298) that
 turns with it as the stump under the block gives way. Its underside is 1 degree off level at frame 150, 10 at
-400, 17 at 840; its middle moves 2.9 m west and 2.2 m north. At frame 845 it meets the mill, which stands 3.4 m
+400, about 19 at 840; its middle moves 2.9 m west and 2.2 m north. At frame 845 it meets the mill, which stands 3.4 m
 west of it: three contacts on the mill's east eaves, 16.0 m up, 1 to 7 kN s a step. There it stops, 20 degrees
 over, propped between its foot and the mill, at rest to under 1 cm/s by frame 896. The lab's "roof" is the
 highest thing within 2 m of the chimney's axis, which the leaning stack has left.
@@ -1101,6 +1101,58 @@ differed. With the view on, a lot's chunks were remeshed at once (`showView`), b
 read-back coming to wait for; with it off they wait for the read-back that shows the debris. Now they wait in
 both, and what waits is drawn when the world is at rest and nothing has been sent to it (`pullDebris`). After: 0
 frames in both runs; page checks `view` and `rest` pass.
+
+### 19 November, later: what the pass on that build showed, and the one round of fixes after it
+
+The full pass on the build of `677e34d` (software GPU, full length, results kept in `lab-results/pass_ea47d38/`; it was
+stopped before `timber` and `city`): GPU suite 52 of 52, page checks and determinism pass, 22 lab scenarios pass.
+Failing: `complex`, `keystone`, `rubble`, `masonry`, `mixed`, `qoffice`, `debriscap`, `qchimney`. Each was looked at
+before any code changed; two faults were fixed, one change was tried and not kept, the rest is written down here.
+
+**Fixed: a crumb that has stopped waited 2 s to sleep.** `keystone` (not settled by 8 s: two crumbs awake, speed 0, 2
+and 16 cm from where their rest timers last restarted), `masonry` (292 crumbs awake at 10 s, the twelve recorded all at
+speed 0) and `rubble` (116 at 12 s) are one fault: the timer runs at full rate only within 1 cm of the place it
+restarted at, and a crumb that came to rest further than that, with nothing awake near it, was left to the slow rule
+meant for crumbs that flip between two places. A crumb under 1 cm/s now takes the place it is at. GPU test `crumbrest`:
+111 frames from stopping to asleep before, 28 after. `keystone` across the builds of 14 to 18 November
+(`git worktree`, each commit's own page): settled at 7.4 s on `900eb69`, 7.8 s on `537d99c`, not settled from
+`228b18a` on; with the fix, 4.3 s. The limit was never far away, and is not changed.
+
+**Fixed: a piece broken on the GPU was weighed as solid boxes.** `setSnap` built the two parts without their shapes'
+own density, so a steel member (16% of its box) or a piece of furniture (a fifth) came out 6.25 or 5 times heavier.
+GPU test `snapmass`: 157 + 157 kg from a 314 kg member; before, 981 + 981. Found reading the code for the next item,
+not from a failing check: the lab's mass check compares what the page makes, and these are made on the GPU.
+
+**`complex`: the building stands on three cabinets. Tried, not kept, open.** Roof fall 2.54 m (limit at least 3),
+three energy gains at frames 211 to 213. Trace (`SF_TRACE_BODIES=129,202,74,31,16,75,286,287,143 --trace 190:214`):
+the upper part lands whole (crumbled share 0.02; on 14 November 0.69, and the roof fell 6.27 m) and rests 0.6 m up:
+a 99 t part (body 129) with a 190 t part on it, on three pieces of furniture of 31, 25 and 25 kg, which pass 108, 67
+and 44 t each to the ground. At frame 208 the 31 kg one falls asleep; in the next step the 99 t part is 9 mm higher
+with no speed to show for it (the overlap between them, shared out while both were awake, is pushed out of the heavy
+one alone once the light one counts as fixed), and that rise is the energy "gain", 8 to 11 kJ. So the limit is not
+wrong and is not changed: 2.54 m is a building held up by cabinets.
+Tried: furniture crushing as the shell it is (a fifth of its material's strength on the same patch, in both crushing
+rules; GPU scene: a 30 kg cabinet under a 300 t block crushed at frame 27, a solid one of 150 kg held). On `complex`
+the cabinets then crush one after another (49 bodies crushed for 41), the roof falls 2.8 m, and the part goes on
+creeping and hopping on the next small pieces: 7 energy gains, not settled at 10 s. Worse by the checks, so not kept.
+What is wrong underneath is a body of hundreds of tonnes at rest on pieces ten thousand times lighter, which the
+solver (mass ratio limited to 20 across a contact) does not settle; that is not fixed.
+
+**`qoffice`: four bricks 0.3 to 0.5 m from where they were, for one frame (frame 57). Not found.** They are the
+eight shapes of a part broken off on the GPU at frame 53 (spare body 387), crushed at frame 55 and made rubble at 56.
+Their drawn places follow the falling parent to frame 56 and are elsewhere at 57. The speed the lab holds against
+them is the spare's (0), so part of it is the measure, but the places themselves do change by more than any body
+moved. Seen once in 36,000 crumbs and 600 frames; no check was changed.
+**`qoffice`: four crumbs up at 10.4 to 20.0 m/s** where the fastest body reaching them went at 4.9 to 17.5 (frames 284
+and 497). The bound on a crumb's move is the pusher's speed plus the separation speed, and a crumb pushed by a crumb
+is a pusher in turn; whether that chain is what happened here was not traced.
+
+**`debriscap`: two frames drawn above what exists (58 and 457), one piece up at 5.7 m/s (frame 444).** At a budget of
+1,000 the bodies broken into crumbs on the GPU are still in the read-back that already has their crumbs: 2.0 and
+0.4 m3 drawn twice for a frame. It failed the same check on 14 November (one frame). Not fixed.
+
+**`mixed`:** crumbled share 0.27 against 0.25, six pieces thrown up over 5 m/s, not settled. Not looked at in this
+round. **`qchimney`:** as above, on the mill's eaves.
 
 ### The rebound measure (its own commit; rule 3)
 
