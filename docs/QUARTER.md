@@ -67,7 +67,7 @@ building's own frame (`qblast`, `qball`, `qcut`), so a building moved or turned 
 | `qtemple` | The three columns at the south-east corner and the next along the front shot out | It settles |
 | `qaqueduct` | The keystone of the middle arch shot out from both sides | It settles (15 s: the stones of a dry arch go one after another) |
 | `qvilla` | Three rows of its pilotis shot out, fifteen columns | **It holds**: the roof no more than 0.1 m lower |
-| `qglass` | The four north columns cut under the floor | The roof at least 1 m lower. **It fails** on the build of `3643b16`: 0.91 m (1.14 m on the build before; docs/LAB.md, 19 November, the last pass) |
+| `qglass` | The four north columns cut under the floor | The roof at least 1 m lower. **It fails** on the build of `3643b16`: 0.91 m (1.14 m on the build before, 1.32 and 1.39 m with either of that build's two fixes taken out; docs/LAB.md, 19 November, the last pass) |
 | `qbarn` | Eight arcade posts shot out, four of each row | **It holds** |
 | `qtower` | Three of the water tower's four legs shot out | **It holds** |
 | `qchimney` | The chimney's foot blown out on one side (the west) | Its top at least 10 m lower (15 s). **It fails**: the stack tips west onto the mill's eaves, 3.4 m off and 16 m up, and stays propped there, 20 degrees over (docs/LAB.md, 19 November) |

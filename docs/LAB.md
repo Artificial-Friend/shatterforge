@@ -1159,8 +1159,9 @@ round. **`qchimney`:** as above, on the mill's eaves.
 One full pass on the build with the two fixes above (software GPU, every scenario at full length, each once;
 texts in `lab-results/final/`, JSONs in `lab-results/`). No code changed after it. Engine tests 112 pass (16
 ignored). GPU suite 54 of 54. Hull tests, the four page checks, and determinism (`collapse --frames 150 --twice` and
-`--twice-view`: the two runs agree in all 150 frames, the second with the engineer's view on) pass. Lab: 20
-scenarios pass, 11 fail.
+`--twice-view`: the two runs agree in all 150 frames, the second with the engineer's view on) pass. Lab: 21
+scenarios pass, 10 fail. (The two determinism runs print FAIL for one check, "settled by 3 s": at 150 frames the
+collapse is still under way. Nothing else fails in them.)
 
 Pass: `collapse`, `ball`, `tallball`, `qballglass`, `qballhall`, `qballtemple`, `qballoffice`, `quarter`, `qtemple`,
 `qaqueduct`, `qvilla`, `qbarn`, `qtower`, `qmill`, `complexstand`, `complexcol`, `complexroom`, `keystone`, `nibble`,
@@ -1182,11 +1183,13 @@ Pass: `collapse`, `ball`, `tallball`, `qballglass`, `qballhall`, `qballtemple`, 
 
 What is known about each failure, and what is not:
 
-- **`qglass` is a new failure and its cause was not isolated.** The roof comes to rest at 4.09 m where it rested at
-  3.86 m (both settled, nothing awake at the end). The two builds differ by the two fixes only. The glass house is
-  steel, and its broken members now weigh a sixth of what they did; and the roof rests on the crumbs of the cut
-  (docs/GPU.md, "Tried first and not kept", where a change to how crumbs get out from under it left it 0.29 m down),
-  which now fall asleep sooner. Either fix could be the cause; they were not run apart. The limit is not changed.
+- **`qglass` is a new failure, and it is neither fix alone.** The roof comes to rest at 4.09 m where it rested at
+  3.86 m (both settled, nothing awake at the end). The same build with one fix taken out at a time (scratch
+  worktree at `3643b16`, `qglass`, 600 frames, software GPU): without the mass fix the roof rests at 3.68 m (fall
+  1.32 m, passes); without the crumb fix at 3.61 m (1.39 m, passes); with neither, the build before, 3.86 m; with
+  both, 4.09 m. So where the roof stops on the heap of the cut moves by 0.48 m with changes that do not touch it
+  directly, and the limit of 1 m sits inside that spread. The limit is not changed; what the roof rests on at
+  4.09 m (the fault of `complex`, a heavy part on light pieces, is the candidate) was not traced.
 - **`qoffice`: the tower comes down in two rounds where it came down in four** (roof at 34.22 m from frame 280 on;
   on the build before, 30.17 m and still going at frame 520). Within the limit; which of the two fixes changed it was
   not tested. The four jumps and the thrown crumb are as written above, not found.
@@ -1199,6 +1202,13 @@ What is known about each failure, and what is not:
   short for these heaps was not established, so the limits stand and the checks fail. The thrown pieces and crumbs
   in `mixed` and `city` were not traced.
 - **`complex`, `qchimney`, `debriscap`:** as written above; unchanged by this round.
+
+**New on this build, beside `qglass`:** `masonry` has one energy gain it did not have, and `mixed` three crumbs
+thrown up over 10 m/s (it had six pieces thrown and has one). None was traced. **And a correction to the section
+above:** it calls `keystone`, `masonry` and `rubble` one fault. The crumb fix made `keystone` pass; `masonry` (12
+crumbs awake at 10 s, where it had 292) and `rubble` (3 bodies and 3,254 crumbs) still fail, so the slow sleep was
+part of their tails and not all of it. The comment at the fix in `gpu_world.js` cites `masonry` 292; the count
+after is 12, and the check still fails.
 
 ### The rebound measure (its own commit; rule 3)
 
