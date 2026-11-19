@@ -1154,6 +1154,52 @@ is a pusher in turn; whether that chain is what happened here was not traced.
 **`mixed`:** crumbled share 0.27 against 0.25, six pieces thrown up over 5 m/s, not settled. Not looked at in this
 round. **`qchimney`:** as above, on the mill's eaves.
 
+### 19 November, the last pass: build `3643b16`, and what is left failing
+
+One full pass on the build with the two fixes above (software GPU, every scenario at full length, each once;
+texts in `lab-results/final/`, JSONs in `lab-results/`). No code changed after it. Engine tests 112 pass (16
+ignored). GPU suite 54 of 54. Hull tests, the four page checks, and determinism (`collapse --frames 150 --twice` and
+`--twice-view`: the two runs agree in all 150 frames, the second with the engineer's view on) pass. Lab: 20
+scenarios pass, 11 fail.
+
+Pass: `collapse`, `ball`, `tallball`, `qballglass`, `qballhall`, `qballtemple`, `qballoffice`, `quarter`, `qtemple`,
+`qaqueduct`, `qvilla`, `qbarn`, `qtower`, `qmill`, `complexstand`, `complexcol`, `complexroom`, `keystone`, `nibble`,
+`far`, `citystand`.
+
+| Scenario | Build of `677e34d` | Build of `3643b16` |
+| --- | --- | --- |
+| `keystone` | not settled by 8 s | **passes**, settled at 4.3 s |
+| `complex` | roof fall 2.54 m (limit 3), 3 energy gains | roof fall 2.56 m, 3 energy gains |
+| `qglass` | passed, roof fall 1.14 m | **fails**: roof fall 0.91 m (limit 1) |
+| `qchimney` | roof fall 3.85 m (limit 10), 1 energy gain, not settled | roof fall 2.96 m, 1 energy gain, not settled |
+| `qoffice` | 4 jumps, 4 crumbs thrown; roof fall 10.97 m | 4 jumps, 1 crumb thrown; roof fall 6.92 m (limit 2) |
+| `rubble` | not settled by 12 s | not settled by 12 s |
+| `masonry` | not settled by 10 s | not settled by 10 s, 1 energy gain |
+| `mixed` | crumbled share 0.27, 6 pieces thrown, not settled | 1 piece and 3 crumbs thrown, not settled |
+| `debriscap` | 2 frames drawn above, 1 piece thrown | 1 frame drawn above |
+| `timber` | not run on that build | not settled by 10 s |
+| `city` | not run on that build | crumbled share 0.26 (limit 0.25), 3 pieces and 1 crumb thrown, not settled |
+
+What is known about each failure, and what is not:
+
+- **`qglass` is a new failure and its cause was not isolated.** The roof comes to rest at 4.09 m where it rested at
+  3.86 m (both settled, nothing awake at the end). The two builds differ by the two fixes only. The glass house is
+  steel, and its broken members now weigh a sixth of what they did; and the roof rests on the crumbs of the cut
+  (docs/GPU.md, "Tried first and not kept", where a change to how crumbs get out from under it left it 0.29 m down),
+  which now fall asleep sooner. Either fix could be the cause; they were not run apart. The limit is not changed.
+- **`qoffice`: the tower comes down in two rounds where it came down in four** (roof at 34.22 m from frame 280 on;
+  on the build before, 30.17 m and still going at frame 520). Within the limit; which of the two fixes changed it was
+  not tested. The four jumps and the thrown crumb are as written above, not found.
+- **`rubble`:** at 12 s three small bodies are awake at no more than 5 mm/s and 0.005 rad/s, and 3,254 crumbs near
+  them stay awake with them. Bodies that rock without ever stopping are the open item `heap` in docs/GPU.md.
+- **`masonry`:** no body awake at 10 s; 12 crumbs of 23,893 are, the fastest at 2 cm/s. Close to the limit, over it.
+  The one energy gain was not traced.
+- **`mixed`, `timber`, `city`: still moving at 10 s**, not a slow tail: 97, 61 and 1,007 bodies awake, the fastest
+  recorded at 2.4, 1.0 and 1.1 (m/s or rad/s), and 22,124, 17,905 and 48,622 crumbs. Whether 10 s is simply too
+  short for these heaps was not established, so the limits stand and the checks fail. The thrown pieces and crumbs
+  in `mixed` and `city` were not traced.
+- **`complex`, `qchimney`, `debriscap`:** as written above; unchanged by this round.
+
 ### The rebound measure (its own commit; rule 3)
 
 "Rebounds over half the impact speed" took the impact speed to be the fall speed of the piece's centre at the
