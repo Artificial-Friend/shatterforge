@@ -6,7 +6,7 @@ const { chromium } = require(process.env.PW || 'playwright');
 const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..', '..');
 const wasm = fs.readFileSync(path.join(root, 'target/wasm32-unknown-unknown/release/sf_demo.wasm')).toString('base64');
-const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'crumbpop', 'crumbnest', 'pinched', 'tread', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
+const ALL = ['box', 'determinism', 'stack', 'column', 'bounce', 'incline', 'wall', 'bullet', 'passby', 'wedge', 'sleeper', 'crushgive', 'crushride', 'hardland', 'stumpland', 'crumbpop', 'crumbnest', 'pinched', 'tread', 'snapmass', 'crumbrest', 'beam', 'plate', 'sleep', 'pile', 'events', 'paircount', 'reuse', 'inherit', 'particles', 'pland', 'heapcreep', 'pilesleep', 'farwake', 'wakenear', 'spin', 'stuck', 'chain', 'rubble', 'sandwich', 'compound', 'crush', 'pinch', 'landing', 'bound', 'stumps', 'wakeup', 'snap', 'hulls', 'hullpairs', 'hullthrow', 'redpairs', 'freehull', 'freehullp'];  // 'bouncedbg' traces a bounce
 // (heap is out of the default run since 18 November: it fails, a known problem written down in docs/GPU.md,
 // "Still to do": the slab lands corner first on the heap and rocks, its centre up at 1.04 m/s for a limit of 0.76.
 // Run it by name: node engine/gpu/test_gpu.cjs heap)
@@ -1316,6 +1316,41 @@ const scenes = process.argv.slice(2).length ? process.argv.slice(2) : ALL;
       w.destroy();
       const ok = snaps.length === 1 && snaps[0].body === 1 && snaps[0].spare === spare && spare2 > 0 && Math.abs(snapAt - hitAt) <= 2 && jump < 0.05 && Math.abs(top[1] - 0.75) < 0.05;
       check('snap', ok, { snaps, hitAt, snapAt, jump_m: +jump.toFixed(3), vBefore: +vBefore.toFixed(2), spareSpeedAfter: vAfter == null ? null : +vAfter.toFixed(2), topRestsAt_m: +top[1].toFixed(3) });
+    }
+    if (scenes.includes('snapmass')) {
+      // A piece that breaks on the GPU keeps its mass (19 Nov; `setSnap`). A steel member weighs the rolled
+      // section in its box, 16% of it (1,256 kg/m3: the page's density for the shape): two 0.5 m lengths in one
+      // body, 314 kg, armed to break between them, dropped 1 m. Before: the two parts were weighed as solid boxes,
+      // 981 kg each, 1,962 kg from 314.
+      const col = { shapes: [{ p: [0, 1.25, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.steel, density: 1256 }, { p: [0, 1.75, 0], q: [0, 0, 0, 1], h: [0.25, 0.25, 0.25], mat: MAT.steel, density: 1256 }], v: [0, 0, 0], w: [0, 0, 0] };
+      const w = await GpuWorld.create(dev, [col], { substeps: 12, sleep: true, maxShapes: 16, maxBodies: 8 });
+      const before = 1 / w.bodies[0].im;
+      const spare = w.setSnap(1, 100, [2]); let snapAt = 0;
+      for (let f = 1; f <= 60 && !snapAt; f++) { w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle(); if (w.takeSnaps().length) snapAt = f; }
+      const bod = await w.read(w.bodBuf, (spare + 1) * 80);
+      const kept = 1 / bod[20 + 3], other = 1 / bod[spare * 20 + 3];
+      w.destroy();
+      check('snapmass', snapAt > 0 && Math.abs(kept + other - before) < 0.01 * before, { before_kg: +before.toFixed(1), snapAtFrame: snapAt, kept_kg: +kept.toFixed(1), other_kg: +other.toFixed(1) });
+    }
+    if (scenes.includes('crumbrest')) {
+      // A crumb that has stopped sleeps in half a second, wherever it stopped (19 Nov; `p_finish`). One crumb
+      // (0.1 m) on the ground, pushed at 0.6 m/s: it slides a few centimetres and stops. Its rest timer runs at
+      // full rate only within 1 cm of where the timer last restarted, and it stopped further than that from
+      // there (but within its own diameter, so the place was kept): it then waited out the slow rule for crumbs
+      // that flip between two places, 2 s. Now a crumb that is still takes the place it is at. (Lab keystone,
+      // 19 Nov: two crumbs at rest 2 and 16 cm from their places, awake to the end, "not settled by 8 s"; lab
+      // rubble: 116 such at 12 s.)
+      const w = await GpuWorld.create(dev, [{ shapes: [{ p: [30, 0.5, 0], q: [0, 0, 0, 1], h: [0.5, 0.5, 0.5], mat: MAT.concrete }], v: [0, 0, 0], w: [0, 0, 0] }], { substeps: 12, sleep: true, maxBodies: 8, maxShapes: 16, maxParticles: 64 });
+      w.addParticles([{ p: [0, 0.1, 0], v: [0.6, 0, 0], r: 0.1, mat: MAT.concrete }]);
+      let stoppedAt = 0, asleepAt = 0, x = 0;
+      for (let f = 1; f <= 240 && !asleepAt; f++) {
+        w.step(1 / 60); await dev.queue.onSubmittedWorkDone(); await settle();
+        const pr = await w.readParticles(); x = pr.data[0];
+        if (!stoppedAt && Math.hypot(pr.data[3], pr.data[4], pr.data[5]) < 0.01) stoppedAt = f;
+        if (pr.data[10] === 2) asleepAt = f;
+      }
+      w.destroy();
+      check('crumbrest', stoppedAt > 0 && asleepAt > 0 && asleepAt - stoppedAt <= 36 && x > 0.01, { slid_m: +x.toFixed(3), stoppedAtFrame: stoppedAt, asleepAtFrame: asleepAt, framesToSleep: asleepAt - stoppedAt });
     }
     if (scenes.includes('wakeup')) {
       // a moving body hits sleeping bricks: in that step they count as fixed and the contact takes the whole

@@ -2532,7 +2532,13 @@ const RUBBLE_BEAR = 1.0e6;
     // it sank 3.4 m through the rubble of the cut storey in 8 s with no joint failing; lab mixed, 780 frames: roof
     // 17.5 -> 14.1 m with the rule everywhere, held at 18.5 m without it)
     // (twice its radius: one flipped 10 cm a step with a radius of 10 cm, and stayed awake: lab collapse at 15 s)
-    else if (touch < 1.5 && dr < 2.0 * r0.w && !near_bits(r0.xyz - vec3f(r0.w), r0.xyz + vec3f(r0.w), 1u)) { t = r3.w + 0.25 * P.dt; }
+    // (and one that is still takes the place it is at: a crumb that had stopped more than 1 cm from where its
+    // timer last restarted waited these 2 s out, and nothing counted as settled till then. GPU test crumbrest:
+    // 111 frames from stopping to asleep, now 28; lab keystone, 19 Nov: two such awake at 8 s, masonry 292 at 10 s)
+    else if (touch < 1.5 && dr < 2.0 * r0.w && !near_bits(r0.xyz - vec3f(r0.w), r0.xyz + vec3f(r0.w), 1u)) {
+      t = r3.w + 0.25 * P.dt;
+      if (length(v) < 0.01) { setR(i, 6, vec4f(r0.xyz, r6.w)); }
+    }
     else { setR(i, 6, vec4f(r0.xyz, r6.w)); }
     if (t > 0.5 || r0.y < -50.0) { s = 2.0; v = vec3f(0.0); w = vec3f(0.0); }
     if (r6.w > 0.0) { s = 3.0; v = vec3f(0.0); }
@@ -3424,7 +3430,9 @@ class GpuWorld {
     if (!b || b.dead || !other.length || other.length >= own.length) return 0;
     const set = new Set(other);
     // the two parts' mass, centre and principal frame, in the body's frame (shapes at their local poses)
-    const part = (want) => own.filter(k => set.has(k) === want).map(k => { const s = this.shapes[k - 1]; return { p: s.lp, q: s.lq, h: s.h, mat: s.mat, hull: s.hull }; });
+    const part = (want) => own.filter(k => set.has(k) === want).map(k => { const s = this.shapes[k - 1]; return { p: s.lp, q: s.lq, h: s.h, mat: s.mat, hull: s.hull, density: s.density }; });
+    // (with each shape's own density: a steel member or a piece of furniture weighs a share of its box, and without it
+    // the two parts of one broken here were weighed as solid boxes: GPU test snapmass, 1,962 kg from 314)
     const { bodies: pb } = buildBodies([{ shapes: part(false) }, { shapes: part(true) }]);
     const [A, Bp] = pb;
     if (!(A.im > 0) || !(Bp.im > 0)) return 0;
