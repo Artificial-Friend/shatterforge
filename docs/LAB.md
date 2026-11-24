@@ -1256,16 +1256,25 @@ Each case writes `lab-results/play_<case>.json`. Software GPU, 24 November, buil
 | `blast` | High preset | 3.52 m³ left the structure, 3.52 m³ of pieces and crumbs exist and are drawn; volume changed by at most 0.01 m³ of 7,944.31 at any sample; ball flew 11 m and broke 0.77 m³ |
 | `low` | Low preset (debris 1,500) | the same: 3.53 m³, 0.01 m³, ball 11.1 m, 0.78 m³; nothing removed by the limit |
 | `noworker` | No worker (engine in the page) | 3.52 m³, 0 m³ |
-| `hz144` | A 144 Hz screen | see docs/STATUS.md |
+| `hz144` | A 144 Hz screen, answers and read-backs 4 frames late | 3.76 m³, 0.01 m³; a hole before its debris for up to 5 frames (35 ms), 52.85 m³ at the worst (below) |
 | `nogpu` | No WebGPU | the page says "GPU physics is off: this browser has no WebGPU. Holes still open, but nothing that breaks off is simulated and the steel ball cannot be thrown." |
 | `nocreate` | The shader compiler refuses the world | the page says so, with the compiler's message |
 | `lost` | The GPU device lost in play | the page says "The GPU device was lost … physics has stopped." |
 
 Limits, written as they were set: volume change under 0.05 m³; more than 1 m³ leaves the structure; drawn equals
 what exists at the end; the ball moves more than 5 m and breaks more than 0.05 m³; a hole shown before its debris
-for no longer than 2 x (read-back lag + 1) frames (measured: 2 frames, 0.73 m³ at the worst, when a later answer
-from the engine re-meshes a chunk whose debris is one read-back away; kept, and measured by the check);
+for no longer than 2 x (read-back lag + 1) frames (measured: 2 frames and 0.73 m³ at the worst in `blast`; 5 frames
+of 144 Hz and 52.85 m³ in `hz144`, frame 811; see "Open" below);
 at most 55 loose pieces counted as debris before anything is done (measured: 39, see below).
+
+**Open: a part can be missing from the picture for a few frames as it breaks off.** The building's mesh is held
+back until the read-back that first shows the debris (`pendingChunks`, engine/web/draw.js), by chunk. A chunk
+re-meshed for one break shows every later change to it too, among them a part cut free one answer later whose
+body is still a read-back away: that part is in neither picture for 2 frames at 60 Hz, up to 5 at 144 Hz with
+4-frame lags (52.85 m³ once, `hz144`). Nothing is lost (the volume that exists is constant) and the part is drawn
+from then on. Not fixed: holding the chunk for the later change instead draws the earlier debris twice (the lab's
+"drawn above what exists" limit of 0). The fix that removes the wait is to draw a new body at the pose it is made
+with until its first read-back; not done in this round.
 
 ### Faults found
 
@@ -1345,7 +1354,7 @@ Run (software GPU, 24 November, `lab-results/final/`): the shader check; `play_c
 suite (54 of 54 scenes pass); the hull library; page checks `rest`, `debris`, `view`, `settings` (pass);
 `collapse --frames 150 --twice` (the two runs agree in all 150 frames; "settled" fails in it as in every
 150-frame run); lab `collapse`, `ball`, `quarter`, `qballoffice`, `qballhall` (pass); `qroofball` (above);
-`qoffice` (docs/STATUS.md). `cargo test --release`: pass.
+`qoffice` (fails with the same two counts as on 19 November: 4 pieces moving further than their speed allows, 1 crumb thrown up; not worked on). `cargo test --release`: pass.
 
 Not run again: the other scenarios, among them those left failing on 19 November (`complex`, `qchimney`,
 `qglass`, `rubble`, `masonry`, `mixed`, `timber`, `city`, `debriscap`). Their rows in docs/STATUS.md are of

@@ -629,6 +629,8 @@ Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall throu
 
 ## Still to do
 
+- **A part cut free can be undrawn for 2 to 5 frames** (24 November; `play_check hz144`: 52.85 m³ for up to 5 frames of 144 Hz). The page side: docs/LAB.md, 24 November, "Open". Not tried: drawing a new body at its birth pose.
+
 - **Standing structure pushes what rests on it and is not pushed back within a step** (24 November; lab `qroofball`,
   frame 444: a 514 t ball at rest rose 3.8 mm and took 0.17 m/s as the floor under it moved; 17 kJ, the energy
   check's one failure there). Not proven to be the cause: docs/LAB.md, 24 November. Not tried: anything.
