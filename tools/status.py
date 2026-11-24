@@ -35,6 +35,29 @@ if g.exists():
         L.append(f"| {k} | {'pass' if v.get('ok') else '**FAIL**'} | {', '.join(f'{a} {b:.3g}' if isinstance(b, float) else f'{a} {b}' for a, b in list(kv.items())[:4])} |")
 else: L.append("not run")
 L.append("")
+# the shaders through a second compiler
+w = res / "wgsl.json"
+L += ["## Shaders through naga (`node engine/gpu/test_wgsl.cjs`; the compiler Firefox uses, no browser)", ""]
+if w.exists():
+    d = json.loads(w.read_text()); r = d["results"]; n = sum(len(v) for v in r.values()); ok = sum(1 for v in r.values() for x in v.values() if x)
+    L.append(f"**{'PASS' if ok == n else 'FAIL'}**: {ok} of {n} (3 modules: valid, and translated to SPIR-V, HLSL, MSL) · {d.get('naga', '')} · run {age(w)}")
+else: L.append("not run")
+L.append("")
+# the player's page
+pl = sorted(res.glob("play_*.json"))
+L += ["## The player's page (`node game/lab/play_check.cjs`, the page's own loop and worker on a virtual clock, software GPU)", ""]
+if pl:
+    L += ["| Case | Result | What failed | Key values | Run |", "| --- | --- | --- | --- | --- |"]
+    for p in pl:
+        try: d = json.loads(p.read_text())
+        except Exception: continue
+        if "case" not in d: continue
+        if d.get("total_m3") is not None:
+            kv = f"left the structure {d.get('left_structure_m3')} m3, pieces and crumbs {d.get('pieces_and_crumbs_m3')} m3, worst change of the total {d.get('worst_change_m3')} m3, hole before its debris {((d.get('hole_before_debris') or {}).get('longest'))} frames, ball moved {(d.get('ball') or {}).get('moved_m')} m and broke {(d.get('ball') or {}).get('broke_m3')} m3"
+        else: kv = "on screen: " + (d.get("said") or "nothing")[:110]
+        L.append(f"| {d['case']} | {'pass' if d.get('pass') else '**FAIL**'} | {'; '.join(d.get('why') or []) or '-'} | {kv} | {age(p)} |")
+else: L.append("not run")
+L.append("")
 # lab
 L += ["## Lab scenarios (`node game/lab/lab.cjs`, virtual clock; see docs/LAB.md)", ""]
 labs = sorted(p for p in res.glob("*.json") if p.stem not in ("gpu", "all"))
