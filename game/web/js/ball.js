@@ -60,7 +60,9 @@ function ballBearing(body, p, r) {
     pts.push({ x, z, gap: (p[1] - under(d)) - Math.max(st, dt), st, dt, slot: hit ? hit.slot : 0 });
   }
   if (!pts.length) return { onS, onP };
-  const g0 = Math.min(...pts.map(q => q.gap)); if (g0 > 0.3) return { onS, onP };
+  // (within 0.6 m: the discs' corners reach 0.16 r further than the profile taken here, 0.4 m for the 5 m ball.
+  // At 0.3 m the ball wedged by its corners in the hole it had made bore on nothing: 0.36 m, lab qroofball)
+  const g0 = Math.min(...pts.map(q => q.gap)); if (g0 > 0.6) return { onS, onP, why: `nothing within 0.6 m: nearest ${g0.toFixed(2)} m` };
   pts.sort((x, y) => x.gap - y.gap);   // (nearest first: the contact is there)
   for (const q of pts) {
     if (q.gap > g0 + 0.15) continue;
@@ -68,13 +70,29 @@ function ballBearing(body, p, r) {
     const sh = gpu.shapes[q.slot - 1], idx = sh ? sh.body : 0;
     if (bodyInfo.has(idx)) onP.push({ idx, p: [q.x, q.dt, q.z], slot: q.slot });
   }
-  return { onS, onP };
+  return { onS, onP, why: onS.length + onP.length ? '' : `on ${pts.filter(q => q.gap <= g0 + 0.15).length} points of debris that is no piece (crumbs), the structure ${(pts[0].dt - pts[0].st).toFixed(1)} m under it` };
 }
 // A steel ball set down at rest with its lowest point 2 cm over whatever is under (x, z): on a roof, as the
 // benchmark `ball` and the lab's `qroofball` do. Returns the body and where its centre is.
 function placeBall(x, z, r) {
   const ts = E.raycast(x, 400, z, 0, -1, 0, 500), top = ts >= 0 ? 400 - ts : 0, c = [x, top + r + 0.02, z];
   return { body: throwBall(c, r, [0, 0, 0], { rest: true }), c, top };
+}
+// Heavy balls at rest punch what cannot carry them four times a second (breaking.js bearOnPieces): a floor's
+// fragments go as they would, at once, not a second later with the next rest loads. Balls over 10 t only: the
+// game's ball, 514 kg, bears 5 kN, which everything carries.
+let ballWeightNext = 0;
+function ballWeights() {
+  if (!gpu || !lastBodies || !lastVel || clock() < ballWeightNext) return;
+  ballWeightNext = clock() + 250;
+  for (let i = 2; i <= gpu.n; i++) {
+    const b = gpu.bodies[i - 1], o = (i - 1) * 7, vo = (i - 1) * 3;
+    if (!b || b.dead || !b.ball || !b.ballR || !(b.mass > 10000) || o + 2 >= lastBodies.length) continue;
+    if (Math.hypot(lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]) > 0.5) continue;
+    const pos = [lastBodies[o], lastBodies[o + 1], lastBodies[o + 2]]; if (!(pos[1] - b.ballR > 1)) continue;
+    const bear = ballBearing(i, pos, b.ballR), n = bear.onS.length + bear.onP.length;
+    if (bear.onP.length) { bearOnPieces(bear.onP.map(q => ({ ...q, f: b.mass * 9.81 / n, rBall: b.ballR }))); pump(); }
+  }
 }
 function fireBall() {
   if (!gpu) return;

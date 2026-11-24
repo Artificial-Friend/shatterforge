@@ -229,6 +229,7 @@ function crushBodies(more) {
 }
 function impacts() {
   takeGpuSnaps();
+  if (typeof ballWeights === 'function') ballWeights();
   crushBodies();
   anticipate();
   const evs0 = gpu.takeEvents();
@@ -320,7 +321,8 @@ function impacts() {
 // - Punched, the hole grows until the shear round it carries the weight: radius rho with pi (2 rho + t) t tau = f
 //   (the 0.25 m slab under 5 MN: 1.64 m), no wider than the ball. The piece loses that (the engine's blast on a
 //   loose piece, with nothing thrown) and is split by the hole as any piece is. A piece that carries the weight
-//   passes it on to the structure under the contact. Once a second, with the rest loads (worker.js restLoads).
+//   passes it on to the structure under the contact (worker.js restLoads). Asked four times a second of every
+//   ball over 10 t at rest (ball.js ballWeights).
 // Before (24 Nov): a loose piece carried whatever lay on it; lab qroofball, the 514 t ball at rest on the fragments
 // of the floor it had broken, lying across their own hole: 7.13 m down in 15 s.
 const PUNCH_TAU = [1.8e6, 0.3e6, 145e6 * 0.16, 0.5e6, 2.0e6];   // Pa: concrete, masonry, steel (a rolled section, 16% of its box), glass, timber

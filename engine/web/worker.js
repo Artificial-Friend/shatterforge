@@ -81,12 +81,12 @@ function restLoads() {
     const W = b.mass * 9.81, pos = [lastBodies[o], lastBodies[o + 1], lastBodies[o + 2]];
     const bear = b.ball && b.ballR && pos[1] - b.ballR > 1 && typeof ballBearing === 'function' ? ballBearing(i, pos, b.ballR) : null;
     const nb = bear ? bear.onS.length + bear.onP.length : 0;
-    if (window.__dbg && b.ball) console.warn(`rest f${LAB.f} ball y ${pos[1].toFixed(2)}: bears on the structure at ${bear ? bear.onS.length : '-'} points, on loose pieces at ${bear ? bear.onP.length : '-'} (bodies ${bear ? [...new Set(bear.onP.map(q => q.idx))] : ''}) · failed ${failedJoints} cracked ${crackedJoints}`);
+    if (window.__dbg && b.ball) console.warn(`rest f${LAB.f} ball y ${pos[1].toFixed(2)}: bears on the structure at ${bear ? bear.onS.length : '-'} points, on loose pieces at ${bear ? bear.onP.length : '-'} (bodies ${bear ? [...new Set(bear.onP.map(q => q.idx))] : ''}) ${bear && bear.why || ''} · last applied ${(restOnFloors / 9810).toFixed(0)} t of ${(restSent / 9810).toFixed(0)} sent, worst joint ${(structRatio * 100).toFixed(0)}% · failed ${failedJoints} cracked ${crackedJoints}`);
     if (nb) {
       for (const q of bear.onS) add(q[0], q[1] + 0.05, q[2], W / nb);
-      // (a piece that carries its share passes it down: to the standing brick under the contact)
-      const gone = bear.onP.length ? bearOnPieces(bear.onP.map(q => ({ ...q, f: W / nb, rBall: b.ballR }))) : new Set();
-      for (const q of bear.onP) if (!gone.has(q.idx)) add(q.p[0], q.p[1], q.p[2], W / nb);
+      // (on a loose piece the share goes down through it, to the standing brick under the contact; whether the
+      // piece carries it is ball.js ballWeights' question, four times a second)
+      for (const q of bear.onP) add(q.p[0], q.p[1], q.p[2], W / nb);
     }
     else add(pos[0], pos[1], pos[2], W);
   }
