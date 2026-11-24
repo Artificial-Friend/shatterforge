@@ -60,9 +60,11 @@ function ballBearing(body, p, r) {
     pts.push({ x, z, gap: (p[1] - under(d)) - Math.max(st, dt), st, dt, slot: hit ? hit.slot : 0 });
   }
   if (!pts.length) return { onS, onP };
-  // (within 0.6 m: the discs' corners reach 0.16 r further than the profile taken here, 0.4 m for the 5 m ball.
-  // At 0.3 m the ball wedged by its corners in the hole it had made bore on nothing: 0.36 m, lab qroofball)
-  const g0 = Math.min(...pts.map(q => q.gap)); if (g0 > 0.6) return { onS, onP, why: `nothing within 0.6 m: nearest ${g0.toFixed(2)} m` };
+  // (the nearest thing under it, up to 1.5 m off this profile: a ball at rest lies on something, and the discs'
+  // corners reach 0.16 r further than the profile, 0.4 m for the 5 m ball. With a limit of 0.3 m the ball wedged
+  // by its corners in the hole it had made bore on nothing (0.36 m off); with 0.6 m it went down seven storeys and
+  // stopped the same way on the eighth, 0.85 m off: lab qroofball, 26.4 m down)
+  const g0 = Math.min(...pts.map(q => q.gap)); if (g0 > 1.5) return { onS, onP, why: `nothing within 1.5 m: nearest ${g0.toFixed(2)} m` };
   pts.sort((x, y) => x.gap - y.gap);   // (nearest first: the contact is there)
   for (const q of pts) {
     if (q.gap > g0 + 0.15) continue;
