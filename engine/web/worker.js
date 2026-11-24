@@ -75,7 +75,10 @@ function restLoads() {
     const b = gpu.bodies[i - 1], o = (i - 1) * 7, vo = (i - 1) * 3;
     if (!b || b.dead || !b.mass || o + 2 >= lastBodies.length) continue;
     if (Math.hypot(lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]) > 0.5) continue;
-    add(lastBodies[o], lastBodies[o + 1], lastBodies[o + 2], b.mass * 9.81);
+    // (a ball bears where it touches the structure, not under its centre: ball.js ballBearing)
+    const bear = b.ball && b.ballR && typeof ballBearing === 'function' ? ballBearing([lastBodies[o], lastBodies[o + 1], lastBodies[o + 2]], b.ballR) : [];
+    if (bear.length) for (const q of bear) add(q[0], q[1] + 0.05, q[2], b.mass * 9.81 / bear.length);
+    else add(lastBodies[o], lastBodies[o + 1], lastBodies[o + 2], b.mass * 9.81);
   }
   const pr = snapCur && snapCur.parts;
   let partW = 0;

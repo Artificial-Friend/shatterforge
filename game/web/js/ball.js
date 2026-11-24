@@ -29,9 +29,26 @@ function throwBall(c, r, v, opt) {
   const made = gpu.addBodies([{ shapes: ballShapes(c, r), mass: opt && opt.oldMass ? 0 : ballMass(r), v: v.slice(), w: [0, 0, 0] }]);
   const b = (made || [])[0] || 0, gb = b ? gpu.bodies[b - 1] : null;
   // (set down at rest, opt.rest: the benchmark's weight on a roof. Not thrown: no look-ahead, no shot)
-  if (gb) { gb.ball = true; if (!(opt && opt.rest)) { if (gpu.setShot) gpu.setShot(b); markHeavy(b, r, c, v); } }   // (a ball is not debris: capDebris; and a body thrown: GpuWorld.setShot)
+  if (gb) { gb.ball = true; gb.ballR = r; if (!(opt && opt.rest)) { if (gpu.setShot) gpu.setShot(b); markHeavy(b, r, c, v); } }   // (a ball is not debris: capDebris; and a body thrown: GpuWorld.setShot)
   worldTouched = true; lastActive = clock();
   return b;
+}
+// Where a ball at rest bears on the standing structure: the points under it where the structure comes up to its
+// surface (within 5 cm of the nearest such point), as [x, y, z] on the structure; none if it lies on debris.
+// A ball's weight went to the brick under its centre, as any piece's does. For a ball wider than the hole it has
+// made that is the floor below: lab qroofball, 24 Nov, first run: the 514 t ball came down one storey onto the
+// roof slab, sank 0.6 m into a dent 1,100 failed joints wide, and lay on the dent's rim for 20 s, its weight
+// booked to the storey under it ("rubble on its floors 517 t"), which cracked and held.
+function ballBearing(p, r) {
+  const pts = [];
+  for (const d of [0, 0.3, 0.55, 0.75, 0.9]) for (let k = 0; k < (d ? 12 : 1); k++) {
+    const a = k * Math.PI / 6, x = p[0] + d * r * Math.cos(a), z = p[2] + d * r * Math.sin(a);
+    const ts = E.raycast(x, p[1], z, 0, -1, 0, r + 1); if (!(ts >= 0)) continue;
+    pts.push([x, p[1] - ts, z, (p[1] - Math.sqrt(r * r - d * d * r * r)) - (p[1] - ts)]);   // (the gap under its surface there)
+  }
+  if (!pts.length) return [];
+  const g0 = Math.min(...pts.map(q => q[3])); if (g0 > 0.3) return [];
+  return pts.filter(q => q[3] <= g0 + 0.05).map(q => [q[0], q[1], q[2]]);
 }
 // A steel ball set down at rest with its lowest point 2 cm over whatever is under (x, z): on a roof, as the
 // benchmark `ball` and the lab's `qroofball` do. Returns the body and where its centre is.
