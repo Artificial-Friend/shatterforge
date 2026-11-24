@@ -4698,7 +4698,7 @@ function restLoads() {
     if (nb) {
       for (const q of bear.onS) add(q[0], q[1] + 0.05, q[2], W / nb);
       // (a piece that carries its share passes it down: to the standing brick under the contact)
-      const gone = bear.onP.length ? bearOnPieces(bear.onP.map(q => ({ ...q, f: W / nb, rMax: 0.95 * b.ballR }))) : new Set();
+      const gone = bear.onP.length ? bearOnPieces(bear.onP.map(q => ({ ...q, f: W / nb, rBall: b.ballR }))) : new Set();
       for (const q of bear.onP) if (!gone.has(q.idx)) add(q.p[0], q.p[1], q.p[2], W / nb);
     }
     else add(pos[0], pos[1], pos[2], W);
@@ -5133,6 +5133,8 @@ function impacts() {
 //   critical perimeter at t / 2 from the patch), or 2 w t for a member narrower than that; at the material's shear
 //   strength (PUNCH_TAU; concrete 0.33 sqrt(f_c) = 1.8 MPa for 30 MPa, the two-way shear of ACI 318).
 //   A 0.25 m slab: 1.8 MPa x pi (0.46 + 0.25) m x 0.25 m = 1.0 MN. Under a 5 MN ball it goes; a 1 m block holds.
+// - The bending: see PUNCH_M. The same slab folds at 1.1 MN whatever the patch, so the ball's 5 MN goes through
+//   a hole it has already widened to where the shear holds.
 // - Punched, the hole grows until the shear round it carries the weight: radius rho with pi (2 rho + t) t tau = f
 //   (the 0.25 m slab under 5 MN: 1.64 m), no wider than the ball. The piece loses that (the engine's blast on a
 //   loose piece, with nothing thrown) and is split by the hole as any piece is. A piece that carries the weight
@@ -5140,6 +5142,10 @@ function impacts() {
 // Before (24 Nov): a loose piece carried whatever lay on it; lab qroofball, the 514 t ball at rest on the fragments
 // of the floor it had broken, lying across their own hole: 7.13 m down in 15 s.
 const PUNCH_TAU = [1.8e6, 0.3e6, 145e6 * 0.16, 0.5e6, 2.0e6];   // Pa: concrete, masonry, steel (a rolled section, 16% of its box), glass, timber
+// (N m per m of width, for a thickness of 1 m; times t^2. Reinforced concrete: 0.5% of steel at 500 MPa, its
+// lever arm 0.9 of a depth 0.8 t: 1.44 MN; a 0.25 m slab 90 kN m / m, and its fan 1.1 MN. The others: their
+// bending strength x t^2 / 6 (masonry 0.3 MPa, glass 30, timber 30); steel plate at yield, x t^2 / 4, 16% of its box)
+const PUNCH_M = [1.44e6, 0.3e6 / 6, 250e6 * 0.16 / 4, 30e6 / 6, 30e6 / 6];
 let weightPunches = 0;
 function bearOnPieces(list) {
   // (one patch a piece: the sample points under a ball are one contact, and their shares one force, at the first)
@@ -5157,13 +5163,18 @@ function bearOnPieces(list) {
     const tau = (PUNCH_TAU[m] ?? PUNCH_TAU[0]) * ((sh.col & 8) ? 0.2 : 1), slab = Math.PI * (2 * a + t) <= 2 * w;
     const cap = tau * t * (slab ? Math.PI * (2 * a + t) : 2 * w);
     if (window.__dbg) console.warn(`weight on body ${idx}: ${(c.f / 1e6).toFixed(2)} MN on a ${t.toFixed(2)} m thick, ${w.toFixed(2)} m wide shape of material ${m}: carries ${(cap / 1e6).toFixed(2)} MN`);
-    if (!(c.f > cap)) continue;
+    // and in bending: a weight on a slab folds it along lines out from the contact (the yield-line fan) at
+    // 4 pi m, m the moment a metre's width of it carries (PUNCH_M x t^2)
+    const bend = 4 * Math.PI * (PUNCH_M[m] ?? PUNCH_M[0]) * t * t * ((sh.col & 8) ? 0.2 : 1);
+    if (window.__dbg) console.warn(`  in bending ${(bend / 1e6).toFixed(2)} MN`);
+    if (!(c.f > cap) && !(slab && c.f > bend)) continue;
     // (how wide it goes: the hole grows until the shear round it carries the weight, pi (2 rho + t) t tau = f; a
     // member is cut across)
-    const rho = slab ? Math.max(a + t / 2, (c.f / (tau * t * Math.PI) - t) / 2) : w / 2 + 0.1;
+    // (folded, it lets the whole weight through: a hole a twentieth wider than the ball)
+    const rho = !slab ? w / 2 + 0.1 : c.f > bend ? (c.rBall ? 1.05 * c.rBall : 1e9) : Math.max(a + t / 2, (c.f / (tau * t * Math.PI) - t) / 2);
     const xf = frameOf(idx), Rt = mt(xf.R), sp = mv(Rt, [c.p[0] - xf.T[0], c.p[1] - 0.05 - xf.T[1], c.p[2] - xf.T[2]]).map((v, k) => v + xf.C[k]);
     const v = velOf(idx), wv = angOf(idx);
-    jobs.blast.push({ op: 'pblast', piece: inf.piece, x: sp[0], y: sp[1], z: sp[2], r: Math.min(rho, c.rMax || rho), ctx: new Map([[idx, { J: [0, 0, 0], vPre: v, vPost: v, w0: wv }]]) });
+    jobs.blast.push({ op: 'pblast', piece: inf.piece, x: sp[0], y: sp[1], z: sp[2], r: Math.min(rho, c.rBall ? 1.05 * c.rBall : rho), ctx: new Map([[idx, { J: [0, 0, 0], vPre: v, vPost: v, w0: wv }]]) });
     punched.add(idx); weightPunches++;
   }
   return punched;
@@ -5730,12 +5741,16 @@ function throwBall(c, r, v, opt) {
 // of the next floor lying across their own hole (7.13 m down).
 function ballBearing(body, p, r) {
   const pts = [], onS = [], onP = [];
-  for (const d of [0, 0.3, 0.55, 0.75, 0.9]) for (let k = 0; k < (d ? 12 : 1); k++) {
+  // (out to its edge: the ball is three eight-sided discs, and a disc's lower edge is at r under the centre to
+  // 0.41 r out, then rises at 45 degrees to the centre's height at 1.41 r - d. Sampled to 0.9 r as a sphere, the
+  // ball lying in a hole 0.95 r wide touched nothing: lab qroofball, at rest on a rim for 8 s with no bearing found)
+  const under = (d) => r * Math.min(1, 1.414 - d);
+  for (const d of [0, 0.3, 0.55, 0.75, 0.9, 1.0]) for (let k = 0; k < (d ? 12 : 1); k++) {
     const a = k * Math.PI / 6, x = p[0] + d * r * Math.cos(a), z = p[2] + d * r * Math.sin(a);
     const ts = E.raycast(x, p[1], z, 0, -1, 0, r + 1), st = ts >= 0 ? p[1] - ts : -1e9;
     const hit = rayDebris([x, p[1], z], [0, -1, 0], r + 1, body), dt = hit ? p[1] - hit.t : -1e9;
     if (Math.max(st, dt) < -1e8) continue;
-    pts.push({ x, z, gap: (p[1] - r * Math.sqrt(1 - d * d)) - Math.max(st, dt), st, dt, slot: hit ? hit.slot : 0 });
+    pts.push({ x, z, gap: (p[1] - under(d)) - Math.max(st, dt), st, dt, slot: hit ? hit.slot : 0 });
   }
   if (!pts.length) return { onS, onP };
   const g0 = Math.min(...pts.map(q => q.gap)); if (g0 > 0.3) return { onS, onP };
