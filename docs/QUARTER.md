@@ -73,8 +73,11 @@ building's own frame (`qblast`, `qball`, `qcut`), so a building moved or turned 
 | `qchimney` | The chimney's foot blown out on one side (the west) | Its top at least 10 m lower (15 s). **It fails**: the stack tips west onto the mill's eaves, 3.4 m off and 16 m up, and stays propped there, 20 degrees over (docs/LAB.md, 19 November) |
 | `qmill`, `qoffice` | Their ground storeys cut | The roof at least 3 m and 2 m lower |
 | `qballhall`, `qballglass`, `qballtemple`, `qballoffice` | The steel ball through the market hall, the glass house end to end, the temple's cella, and down through the office tower's floors | It goes through what it has the energy for and does not come back |
+| `qroofball` | A 514 t steel ball (radius 2.5 m) set down at rest on the office tower's roof | It goes down at least 30 m, floor after floor, under its weight alone (50 s). 30.4 m on 24 November; the energy check fails once in it (docs/LAB.md) |
 
 The results of each on the current build are in docs/STATUS.md.
+
+On the page: **K** runs the first benchmark, **J** the ball on the office roof (the same as `qroofball`; its report gives the ball's height each second), **I** shows the page's state as text (GPU world, self-check, faults, debris counts) to copy into a report.
 
 ### Cuts they carry
 

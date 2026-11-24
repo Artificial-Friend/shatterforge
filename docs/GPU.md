@@ -629,6 +629,12 @@ Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall throu
 
 ## Still to do
 
+- **Standing structure pushes what rests on it and is not pushed back within a step** (24 November; lab `qroofball`,
+  frame 444: a 514 t ball at rest rose 3.8 mm and took 0.17 m/s as the floor under it moved; 17 kJ, the energy
+  check's one failure there). Not proven to be the cause: docs/LAB.md, 24 November. Not tried: anything.
+- **Firefox (naga) is checked for compiling only** (`engine/gpu/test_wgsl.cjs`; `find` had no final `return`, and
+  Firefox made no GPU world at all). No run of the world on Firefox has been made.
+
 - **A heavy part at rest on pieces thousands of times lighter is not settled** (19 November; lab `complex`: 290 t on
   three cabinets of 25 to 31 kg). The overlap is shared out while the light piece is awake and pushed out of the heavy
   part alone when it falls asleep: a 9 mm rise in one step. Tried: furniture crushing at a fifth of its material's

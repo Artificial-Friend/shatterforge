@@ -1234,3 +1234,119 @@ a floor's motion within a frame: `complex` keeps one such count (a cabinet, 3.18
 What this does not excuse: a piece at rest thrown up (the launch check), energy from nothing (the energy check)
 and a body going faster than its contacts allow (the velocity bound, in the engine) are measured as before.
 
+## 24 November: the player's page, and a weight set on a roof
+
+A report from play: "when I break something it just disappears, and the steel ball doesn't work". The lab had
+passed its collapse and ball scenarios on 19 November. That was no evidence about play: the lab runs the engine in
+the page (no worker), with fresh settings, no debris limit and its own clock.
+
+**What was not found.** On the software GPU (Chrome, SwiftShader) the fault did not reproduce in any player-path
+case below: what breaks off is made, simulated and drawn, and the ball flies. The cause on the reporter's machine
+is not known. The faults below were found on the way; the first is the only one that produces exactly the report
+(holes open, nothing falls, no ball), and it does so in Firefox, not in Chrome.
+
+### The player's path, checked (`node game/lab/play_check.cjs <case>`, new)
+
+The game page itself (`dist/tower.html`), its worker, its saved settings and presets, on a virtual clock, with the
+worker's answers 2 frames late and read-backs 2 frames late. A 1.2 m blast into the office tower, then the ball.
+Each case writes `lab-results/play_<case>.json`. Software GPU, 24 November, builds of `ca99523` and `0d497cb` (they differ by the lost-device handler of fault 3):
+
+| Case | What it is | Result |
+| --- | --- | --- |
+| `blast` | High preset | 3.52 m³ left the structure, 3.52 m³ of pieces and crumbs exist and are drawn; volume changed by at most 0.01 m³ of 7,944.31 at any sample; ball flew 11 m and broke 0.77 m³ |
+| `low` | Low preset (debris 1,500) | the same: 3.53 m³, 0.01 m³, ball 11.1 m, 0.78 m³; nothing removed by the limit |
+| `noworker` | No worker (engine in the page) | 3.52 m³, 0 m³ |
+| `hz144` | A 144 Hz screen | see docs/STATUS.md |
+| `nogpu` | No WebGPU | the page says "GPU physics is off: this browser has no WebGPU. Holes still open, but nothing that breaks off is simulated and the steel ball cannot be thrown." |
+| `nocreate` | The shader compiler refuses the world | the page says so, with the compiler's message |
+| `lost` | The GPU device lost in play | the page says "The GPU device was lost … physics has stopped." |
+
+Limits, written as they were set: volume change under 0.05 m³; more than 1 m³ leaves the structure; drawn equals
+what exists at the end; the ball moves more than 5 m and breaks more than 0.05 m³; a hole shown before its debris
+for no longer than 2 x (read-back lag + 1) frames (measured: 2 frames, 0.73 m³ at the worst, when a later answer
+from the engine re-meshes a chunk whose debris is one read-back away; kept, and measured by the check);
+at most 55 loose pieces counted as debris before anything is done (measured: 39, see below).
+
+### Faults found
+
+1. **Firefox refused the GPU world's shaders; the page started without physics and said nothing.** WGSL function
+   `find` ended in a loop with no `return` after it. Chrome's compiler (Tint) accepts that; Firefox's (naga) does
+   not ("Returning None where Some is expected"), and one refused function refuses the module. With no GPU world
+   the page still opens holes (the engine does that) but makes no debris and no ball: the report, word for word.
+   Check: `node engine/gpu/test_wgsl.cjs` runs naga 30.0.2 over the three modules cut from `gpu_world.js`
+   (validate, and translate to SPIR-V, HLSL and Metal). Before: 2 of 3 modules refused. After: 12 of 12 steps pass.
+   What this does not show: that Firefox then runs the world correctly. No Firefox with WebGPU was run here.
+2. **Every failure was silent.** No GPU, a refused shader, a lost device, a GPU error, a world that stops stepping,
+   and a ball refused for want of room all left the page looking the same. Now: a banner names the fault; before
+   the game starts the world drops a 0.4 m box and a ball 0.5 m onto a slab and checks where they rest (box at
+   0.2 m, ball at 0.25 m, both still; `play_check` reads it back); key **I** shows the whole state as text to copy.
+   Checks: `play_check` `nogpu`, `nocreate`, `lost`.
+3. **A lost device left the page throwing.** Read-backs asked of a lost device are refused, each an unhandled
+   rejection. `play_check lost` before: 2 page errors. After: 0, the refusals counted in the state (key I).
+   (The check's own harness also waited 60 s a frame on a destroyed device; it now stops waiting.)
+4. **A worker that answered late was given up on but not stopped**, so its answers could arrive after the page
+   had started the engine itself. It is now terminated. Not seen to cause the report.
+5. **All 223 loose contents of the Quarter counted as debris from the start** (`capDebris` took "nothing done
+   yet" from the text of the last blast). With the Low preset's limit of 1,500 that left 1,277 for real debris.
+   Before: 223 counted at rest. After: 39 (`play_check`, limit 55). The 39 are furniture that moves more than
+   0.5 m while it settles (for example a piece at y 3.9 m found at 3.3 m, 0.3 m aside): they fall off or over
+   what they were set on. Why was not followed; they count as debris because they did move.
+
+### A weight set on a roof: lab `qroofball`, and the page's second benchmark (key J)
+
+A steel ball of 2.5 m radius, 514 t, set down at rest on the office tower's roof (10 storeys of 3.75 m, 0.25 m
+flat slabs). In the engine alone (`cargo test`, `rest_load` on the roof): 33 t does not fail the roof, 263 t
+(radius 2 m) fails it at mid-bay, 514 t fails it at mid-bay and at (3, 3) m.
+
+On the page the weight of what lies at rest reaches the structure once a second, booked at the brick under the
+body's centre. For a ball that is wrong three ways, found in this order (each a full run, software GPU, 1,500
+frames, how far the ball went down):
+
+| Run | What the page did | Down |
+| --- | --- | --- |
+| 1 | weight booked under the centre; the ball sat on the rim of its own dent | 4.05 m |
+| 2 | weight booked where the ball touches the structure (`ballBearing`: rings of rays under the sphere) | 7.13 m |
+| 3 | broken slab pieces under the ball carried it for ever: weight on a loose piece now tried against that piece | 7.24 to 9.62 m |
+| 4 | "touching" taken as within 0.6 m of the sphere's surface, tried four times a second | 26.4 m |
+| 5 | a ball hung on corners bears on the nearest thing under it (up to 1.5 m) | **30.4 m** |
+
+(One step between 2 and 3 went to 0.02 m: the weight was split over 13 sample points, each under the piece's
+capacity. It is one patch per piece.)
+
+The rule for a loose piece under the weight (`bearOnPieces`, engine/web/breaking.js): the contact patch has the
+radius at which the piece's crushing strength carries the force, a = sqrt(F / (pi x crush)); the piece is punched
+through if F exceeds tau x t x pi x (2a + t), with t the thickness of the shape touched and tau the punching
+shear strength (concrete 1.8 MPa, masonry 0.3, steel 23, glass 0.5, timber 2.0); or it breaks in bending if F
+exceeds 4 pi m, m = the moment capacity per metre for that thickness. A punched piece gets a hole of the patch's
+size, a bent one a hole of 1.05 ball radii. What is punched out is made as pieces and crumbs like any other break
+(volume lost in the run: 0.1% of the building, limit 2).
+
+Result (`lab-results/qroofball.json`, build of `ca99523`, software GPU, 1,500 frames = 50 s): the ball's centre
+from 43.75 m to 13.37 m, **30.4 m, eight floors**, still going down at the end (17.3 m at 46 s, 14.1 m at 48 s).
+It takes 1 to 6 s a floor: it waits on each floor's broken pieces until the once-a-second and four-a-second
+tries punch them. A real 514 t ball would not wait. The limit (30 m) was set before the runs and is unchanged.
+
+**One check fails in this run and is not fixed:** "energy gains over 5%": 1 (limit 0). Frame 444, traced with
+the ball's height to 0.1 mm (`SF_DBG=1`, 452 frames): the ball lay still at y 36.3460 m on the structure at two
+points, nothing loose under it; the engine's answers at frames 441 and 445 moved 51 and 125 parts of the standing
+structure (the floor under it was coming down, 17 members cut); at frame 444 the ball had 0.17 m/s sideways and
+was 1.9 mm higher, 3.8 mm two frames on, then went down. 17.3 kJ against the 2 mm (10 kJ) the check allows a
+resting 514 t. Most likely cause, not proven (which shape pushed was not logged): standing structure is not moved
+by what lies on it within a step, so a floor part that moves under the ball pushes it as a wall would. The gain is
+0.01% of the 153 MJ the ball's descent releases. The scenario stays in the default run, failing.
+
+**Also open:** the weight of big loose bodies does not all reach the structure ("66 t applied of 5,453 sent" at
+one point in run 3: a loose slab whose centre has no standing brick within 4 m under it is not carried by
+anything in the structural solve). And the ball's weight on pieces acts four times a second, not every step.
+
+### What was run on this build, and what was not
+
+Run (software GPU, 24 November, `lab-results/final/`): the shader check; `play_check` all seven cases; the GPU
+suite (54 of 54 scenes pass); the hull library; page checks `rest`, `debris`, `view`, `settings` (pass);
+`collapse --frames 150 --twice` (the two runs agree in all 150 frames; "settled" fails in it as in every
+150-frame run); lab `collapse`, `ball`, `quarter`, `qballoffice`, `qballhall` (pass); `qroofball` (above);
+`qoffice` (docs/STATUS.md). `cargo test --release`: pass.
+
+Not run again: the other scenarios, among them those left failing on 19 November (`complex`, `qchimney`,
+`qglass`, `rubble`, `masonry`, `mixed`, `timber`, `city`, `debriscap`). Their rows in docs/STATUS.md are of
+19 November, nine hours of software GPU; nothing in this round was aimed at them.

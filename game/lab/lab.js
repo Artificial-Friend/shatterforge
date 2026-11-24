@@ -265,6 +265,7 @@ function labOnRead(r, pr) {
     // (a ball's track: frame, where it is, how fast)
     if (gb.labBall) { const sp0 = Math.hypot(vx, vy, vz); if (!gb.labDir && sp0 > 1) gb.labDir = [vx / sp0, vy / sp0, vz / sp0]; const bd = gb.labDir || [0, 0, 0];
       // (and its speed along the way it was sent: negative is back towards where it came from)
+      if (window.__dbg && f > 425) console.warn(`ball f${f} y ${y.toFixed(4)} v ${vx.toFixed(3)} ${vy.toFixed(3)} ${vz.toFixed(3)} x ${r.body[o].toFixed(3)} z ${r.body[o + 2].toFixed(3)}`);
       (L.ballTrack = L.ballTrack || []).push([f, +r.body[o].toFixed(2), +y.toFixed(2), +r.body[o + 2].toFixed(2), +sp0.toFixed(2), +(vx * bd[0] + vy * bd[1] + vz * bd[2]).toFixed(2), b]); }
     // (its mass: its volume at the density it was made with on the GPU; the ball's own. Until 15 Nov every volume
     // as concrete, and the ball left out: a 383 kg timber wardrobe pushed by the ball at 37 m/s showed as 6.2 MJ
