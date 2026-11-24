@@ -8,6 +8,7 @@ import base64, pathlib
 root = pathlib.Path(__file__).resolve().parent.parent
 SCRIPTS = [
     "game/web/js/base.js",       # $, TICK
+    "game/web/js/health.js",     # what is wrong, on screen; the GPU self-check; the state as text (key I)
     "game/lab/scenarios.js",     # the lab's scenarios (they choose the level when the lab runs)
     "game/web/js/level.js",      # which level: kind, size, lots
     "game/web/js/scene.js",      # renderer, camera, sun, ground

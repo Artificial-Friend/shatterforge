@@ -94,8 +94,16 @@ const LAB_SCENARIOS = {
   qballglass: { kind: 6, frames: 300, title: 'the Quarter: the ball through the glass house, end to end', script: [[10, 'qball', ['glass', -25, 3.0, 0.5, 1, 0, 0, 60, 0.25]]], expect: { ballOn: true } },
   qballtemple: { kind: 6, frames: 300, title: 'the Quarter: the ball into the temple', script: [[10, 'qball', ['temple', 16, 4.0, 1.25, -1, 0, 0, 60, 0.25]]], expect: { ballOn: true } },
   qballoffice: { kind: 6, frames: 480, roofAt: ['office', 0, 0, 9], title: 'the Quarter: a 0.8 m ball onto the office tower\'s roof at 45 m/s', script: [[10, 'qball', ['office', 7.5, 52, 7.5, 0, -1, 0, 45, 0.4]]], expect: { ballOn: true } },
+  // the ball on the roof (24 Nov; the page's second benchmark, key J): a steel ball 5 m across, 514 t, set down at
+  // rest on the office tower's roof. Nothing cut, nothing thrown: the weight of what lies at rest goes to the
+  // structure once a second, and the roof fails under it (natively: 263 t already fails it, 33 t does not,
+  // docs/LAB.md, "The ball on the roof"). Then every floor has the weight and a storey's fall to carry: 18 MJ on a
+  // 0.25 m slab. Limit, written when it was added: the ball ends at least 30 m lower, of the 37.5 m to the ground
+  // floor's slab less its own radius and the rubble it lies on.
+  qroofball: { kind: 6, frames: 1500, roofAt: ['office', 7, 0, 7], title: 'the Quarter: a 514 t steel ball set down on the office tower\'s roof',
+    script: [[20, 'qweight', ['office', 0, 0, 2.5]]], expect: { ballDown: 30 } },
 };
-const QUARTER_SUITE = ['quarter', 'qtemple', 'qaqueduct', 'qvilla', 'qglass', 'qbarn', 'qtower', 'qchimney', 'qmill', 'qoffice', 'qballhall', 'qballglass', 'qballtemple', 'qballoffice'];
+const QUARTER_SUITE = ['quarter', 'qtemple', 'qaqueduct', 'qvilla', 'qglass', 'qbarn', 'qtower', 'qchimney', 'qmill', 'qoffice', 'qballhall', 'qballglass', 'qballtemple', 'qballoffice', 'qroofball'];
 const LAB_SUITES = { quarter: QUARTER_SUITE, quick: ['collapse', 'ball', 'quarter'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble', 'far'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'], city: ['citystand', 'city'] };
 let LABSTATE = null; try { LABSTATE = JSON.parse(localStorage.getItem('sf-lab') || 'null'); } catch (e) {}
 if (LABSTATE && !(LABSTATE.queue && LABSTATE.queue.length && LAB_SCENARIOS[LABSTATE.queue[0]])) LABSTATE = null;

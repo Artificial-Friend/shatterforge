@@ -369,6 +369,11 @@ async function labAct(act, a) {
     // (a ball in a building of the Quarter's own frame: building, from x y z, along dx dy dz, speed, radius)
     const [name, x, y, z, dx, dy, dz, sp, rad] = a, dl = Math.hypot(dx, dy, dz), d = quarterDir(name, dx / dl, dy / dl, dz / dl);
     labBall(quarterAt(name, x, y, z), rad || 0.25, d.map(q => q * (sp || 60)));
+  } else if (act === 'qweight') {
+    // (a steel ball set down at rest on a building: building, x and z of its own frame, radius)
+    const [name, x, z, rad] = a, o = quarterAt(name, x, 0, z);
+    L.ballNext = true; const pl = placeBall(o[0], o[2], rad), gb = pl.body ? gpu.bodies[pl.body - 1] : null;
+    L.ballMass = gb && gb.mass; L.ballR = rad; L.weightAt = pl.c; L.weightTop = pl.top;
   } else if (act === 'qblast') {
     // (a shot in a building's own frame: building, from x y z, along dx dy dz, radius)
     const [name, x, y, z, dx, dy, dz, r] = a, o = quarterAt(name, x, y, z), d = quarterDir(name, dx, dy, dz);
@@ -457,6 +462,11 @@ function labReport(wallS) {
     if (S.expect.debrisHeaviest != null) checks.push({ name: 'heaviest piece the budget removed (kg)', value: heavy, limit: S.expect.debrisHeaviest, pass: heavy <= S.expect.debrisHeaviest, what: 'big pieces stay while crumbs and small pieces can go' });
     if (S.expect.debrisShare != null) checks.push({ name: 'removed by the budget (% of the building)', value: share, limit: S.expect.debrisShare, pass: share <= S.expect.debrisShare, what: 'the budget takes crumbs, not the building' });
     labEvent('budget', L.f, { removed: debrisCapped, particles: L.budgetParts || 0, bodies: L.budgetBodies || 0, heaviest_kg: heavy, largest_m3: +(L.budgetBodyVol || 0).toFixed(3), share_pct: share });
+  }
+  if (S.expect && S.expect.ballDown) {
+    // a weight set on a roof goes down through the floors: how far its centre ends below where it was set
+    const tr = L.ballTrack || [], y0 = L.weightAt ? L.weightAt[1] : (tr.length ? tr[0][2] : 0), end = tr.length ? tr[tr.length - 1][2] : y0;
+    checks.push({ name: 'weight: how far it went down (m)', value: +(y0 - end).toFixed(2), limit: `>= ${S.expect.ballDown}`, pass: y0 - end >= S.expect.ballDown, what: 'the floors give way under it, one after another' });
   }
   if (S.expect && S.expect.ballStops) {
     // a ball sent into a building is stopped by it: it ends at rest inside, above the ground storey, and what it

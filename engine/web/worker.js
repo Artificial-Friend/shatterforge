@@ -33,12 +33,16 @@ let worker = null, busy = null;
 const jobs = { blast: [], impacts: null, structure: false };
 function startWorker(bytes) {
   return new Promise((res) => {
+    // (given up on, the worker is ended: one that answered after the 15 s became the engine then, without the
+    // settings, which had gone to the page's copy alone; read in the code, 24 Nov, not seen to happen)
+    let over = false;
     try {
       const w = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' })));
-      w.onmessage = (m) => { if (m.data.op === 'ready') { worker = w; w.onmessage = (m) => finish(m.data); res(true); } };
-      w.onerror = () => res(false);
+      const giveUp = () => { if (over) return; over = true; try { w.terminate(); } catch (e) {} res(false); };
+      w.onmessage = (m) => { if (m.data.op === 'ready' && !over) { over = true; worker = w; w.onmessage = (m) => finish(m.data); res(true); } };
+      w.onerror = giveUp;
       w.postMessage({ op: 'init', wasm: bytes, storeys: STOREYS, kind: KIND });
-      setTimeout(() => res(false), 15000);
+      setTimeout(giveUp, 15000);
     } catch (e) { res(false); }
   });
 }
@@ -104,6 +108,7 @@ function pump() {
   else if ((jobs.structure || (wearNext && clock() >= wearNext)) && gpu && (!physicsPaused || window.__forceJobs)) { jobs.structure = false; wearNext = 0; job = structJob({}); }
   else if (jobs.structure && !gpu) { jobs.structure = false; job = structJob({}); }
   if (!job) return;
+  if (job.op === 'blast' || job.op === 'pblast' || job.op === 'punch') worldTouched = true;
   busy = job;
   if (LAB.on) { LAB.jobq.push({ job, due: LAB.f + LAB.jobLag }); return; }
   if (worker) { const { ctx, ...msg } = job; worker.postMessage(msg); }

@@ -1966,6 +1966,10 @@ fn find(x0: u32) -> u32 {
     if (gp != p) { atomicCompareExchangeWeak(&ints[P.o_par + x], p, gp); }
     x = p;
   }
+  // (never reached. Firefox's shader compiler, naga, takes a function that ends in a loop as one that returns
+  // nothing and refuses the whole module: "Returning None where Some is expected". The world was then not made
+  // at all, and the page went on without GPU physics: holes, and nothing falling. naga 30, 24 Nov.)
+  return x;
 }
 @compute @workgroup_size(64) fn uf_union(@builtin(global_invocation_id) g: vec3u) {
   let mi = g.x; if (mi >= min(ld(C_MAN), P.max_man)) { return; }

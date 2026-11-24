@@ -22,12 +22,22 @@ const ballMass = (r) => 7850 * 4 / 3 * Math.PI * r * r * r;
 // A ball of radius r thrown from c at velocity v: the body, its true mass, and its look ahead (markHeavy). Returns
 // the body (1-based), or 0 with no room.
 function throwBall(c, r, v, opt) {
-  if (!gpu || gpu.roomBodies() < 1 || gpu.roomShapes() < 4) return 0;
+  if (!gpu) return 0;   // (said on screen since the page started: health.js)
+  // (no room: said, not swallowed. Until 24 Nov the click did nothing and nothing said why.)
+  if (gpu.roomBodies() < 1 || gpu.roomShapes() < 4) { health.noRoom++; healthSay('room', `No room in the GPU world for the ball: ${gpu.roomBodies()} bodies and ${gpu.roomShapes()} shapes free. Reset the level (R R).`); return 0; }
+  healthClear('room');
   const made = gpu.addBodies([{ shapes: ballShapes(c, r), mass: opt && opt.oldMass ? 0 : ballMass(r), v: v.slice(), w: [0, 0, 0] }]);
   const b = (made || [])[0] || 0, gb = b ? gpu.bodies[b - 1] : null;
-  if (gb) { gb.ball = true; if (gpu.setShot) gpu.setShot(b); markHeavy(b, r, c, v); }   // (a ball is not debris: capDebris; and a body thrown: GpuWorld.setShot)
-  lastActive = clock();
+  // (set down at rest, opt.rest: the benchmark's weight on a roof. Not thrown: no look-ahead, no shot)
+  if (gb) { gb.ball = true; if (!(opt && opt.rest)) { if (gpu.setShot) gpu.setShot(b); markHeavy(b, r, c, v); } }   // (a ball is not debris: capDebris; and a body thrown: GpuWorld.setShot)
+  worldTouched = true; lastActive = clock();
   return b;
+}
+// A steel ball set down at rest with its lowest point 2 cm over whatever is under (x, z): on a roof, as the
+// benchmark `ball` and the lab's `qroofball` do. Returns the body and where its centre is.
+function placeBall(x, z, r) {
+  const ts = E.raycast(x, 400, z, 0, -1, 0, 500), top = ts >= 0 ? 400 - ts : 0, c = [x, top + r + 0.02, z];
+  return { body: throwBall(c, r, [0, 0, 0], { rest: true }), c, top };
 }
 function fireBall() {
   if (!gpu) return;

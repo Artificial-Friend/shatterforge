@@ -70,6 +70,7 @@ function adaptSubsteps(busy) {
 }
 function hud() {
   if (!E) return;
+  healthTick();
   const tn = performance.now(), dt = (tn - rate.t) / 1000;
   if (dt > 0.4) {
     rate.steps = (stepsDone - rate.s0) / dt; rate.reads = (readsDone - rate.r0) / dt; rate.sim = (simTime - (rate.sim0 || 0)) / dt; rate.sim0 = simTime; rate.t = tn; rate.s0 = stepsDone; rate.r0 = readsDone;

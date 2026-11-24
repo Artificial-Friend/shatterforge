@@ -30,6 +30,8 @@ h1 { font: 600 24px/1.2 var(--sans); margin: 0; text-wrap: balance; }
 button { font: 600 15px var(--sans); padding: 11px 18px; border-radius: 5px; border: 0; background: var(--accent); color: #1a120c; cursor: pointer; align-self: flex-start; }
 button:disabled { opacity: .5; cursor: default; }
 .warn { color: #f1786c; font: 12px var(--mono); }
+.alert { position: fixed; top: max(10px, env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%); z-index: 30; max-width: min(720px, calc(100vw - 24px)); padding: 10px 14px; border-radius: 8px; background: rgba(60, 14, 10, 0.94); border: 1px solid #f1786c; color: #ffd9d4; font: 12px/1.5 var(--mono); pointer-events: none; }
+.alert div + div { margin-top: 6px; } .alert .k { color: #f1a59c; }
 .settings { position: fixed; right: max(12px, env(safe-area-inset-right, 0px)); top: calc(10px + env(safe-area-inset-top, 0px)); width: min(320px, calc(100vw - 24px)); max-height: calc(100vh - 20px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); overflow-y: auto; overscroll-behavior: contain; background: #15171a; border: 1px solid var(--rule); border-radius: 8px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; font: 12px/1.4 var(--mono); }
 .settings h2 { font: 600 14px var(--sans); margin: 0; }
 .settings label { display: flex; flex-direction: column; gap: 3px; color: var(--mute); }
@@ -48,6 +50,7 @@ button:disabled { opacity: .5; cursor: default; }
 <canvas id="cv"></canvas>
 <div class="cross"></div>
 <div class="hud" id="hud">loading…</div>
+<div class="alert" id="alert" hidden></div>
 <div class="tool" id="tool"><span data-r="0.4">1 · 0.4 m</span><span data-r="0.7">2 · 0.7 m</span><span data-r="1.2">3 · 1.2 m</span><span data-r="ball">4 · steel ball</span><span class="o" id="t-reset">R R · reset</span><span class="o">Esc · menu</span></div>
 <div class="settings" id="bench" hidden style="left:max(12px, env(safe-area-inset-left, 0px));right:auto;width:min(560px, calc(100vw - 24px));max-height:calc(100vh - 40px);overflow:auto">
   <h2 id="bench-title">Benchmark</h2>
@@ -65,7 +68,8 @@ button:disabled { opacity: .5; cursor: default; }
   <label>Ball diameter <b id="v-bsize"></b><input type="range" id="s-bsize" min="0.2" max="1.5" step="0.05"></label>
   <h2>Benchmark</h2>
   <span class="hint">the same scripted destruction every run: the ground storeys of the office tower and the mill cut by 36 fixed blasts each, both dropping and crushing down, three steel balls into the market hall; 12 s of simulated time, then a report</span>
-  <button id="bench-go" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run benchmark (reloads the page) · key K</button>
+  <button id="bench-go" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run benchmark: the collapse (reloads the page) · key K</button>
+  <button id="bench-go2" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run benchmark: the ball on the roof (reloads the page) · key J</button>
   <button id="lab-quick" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run lab checks, quick (2 scenarios, reloads)</button>
   <button id="lab-full" type="button" style="align-self:stretch;font-size:13px;padding:8px">Run lab checks, full (5 scenarios, reloads)</button>
   <h2>Diagnostics</h2>
@@ -126,7 +130,9 @@ button:disabled { opacity: .5; cursor: default; }
       <dt>4</dt><dd>fire a steel ball instead (it goes on through what it breaks)</dd>
       <dt>Esc</dt><dd>menu: level, reset, graphics and physics settings, tools</dd>
       <dt>R R</dt><dd>reset the level (R twice)</dd>
-      <dt>K</dt><dd>run the benchmark (reloads the page, then reports)</dd>
+      <dt>K</dt><dd>run the benchmark: two ground storeys cut (reloads the page, then reports)</dd>
+      <dt>J</dt><dd>run the second benchmark: a 514 t steel ball set on the office tower's roof</dd>
+      <dt>I</dt><dd>the state of the page as text, to copy into a report</dd>
     </dl>
     <div class="warn" id="warn"></div>
     <button id="go" disabled>Loading…</button>

@@ -14,7 +14,7 @@ const twiceView = args.includes('--twice-view'); if (twiceView) args.splice(args
 const twice = twiceView || args.includes('--twice'); if (args.includes('--twice')) args.splice(args.indexOf('--twice'), 1);
 const root = path.join(__dirname, '..', '..');
 const page0 = fs.readFileSync(path.join(root, 'dist/tower.html'), 'utf8');
-const SUITES = { quarter: ['quarter', 'qtemple', 'qaqueduct', 'qvilla', 'qglass', 'qbarn', 'qtower', 'qchimney', 'qmill', 'qoffice', 'qballhall', 'qballglass', 'qballtemple', 'qballoffice'], quick: ['collapse', 'ball', 'quarter'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complexstand', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'], city: ['citystand', 'city'] };
+const SUITES = { quarter: ['quarter', 'qtemple', 'qaqueduct', 'qvilla', 'qglass', 'qbarn', 'qtower', 'qchimney', 'qmill', 'qoffice', 'qballhall', 'qballglass', 'qballtemple', 'qballoffice', 'qroofball'], quick: ['collapse', 'ball', 'quarter'], full: ['collapse', 'ball', 'masonry', 'timber', 'mixed', 'complexstand', 'complex', 'complexcol', 'complexroom', 'keystone', 'rubble', 'nibble'], complex: ['complexstand', 'complex', 'complexcol', 'complexroom', 'keystone'], city: ['citystand', 'city'] };
 const names = args.length ? args.flatMap(a => a.startsWith('=') ? [a.slice(1)] : SUITES[a] || [a]) : SUITES.quick;   // (=name: the scenario, where a suite has its name)
 (async () => {
   fs.mkdirSync(outDir, { recursive: true });

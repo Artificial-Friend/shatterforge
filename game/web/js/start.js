@@ -1,4 +1,5 @@
 // ---- start
+let benchWhich = '';
 (async () => {
   try {
     const bytes = Uint8Array.from(atob(WASM_B64), c => c.charCodeAt(0));
@@ -20,6 +21,8 @@
       if (a) {
         try { const i = a.info || (a.requestAdapterInfo ? await a.requestAdapterInfo() : null); if (i) window.__gpuInfo = { vendor: i.vendor, architecture: i.architecture, device: i.device, description: i.description }; } catch (e) {}
         dev = await a.requestDevice({ requiredFeatures: a.features.has('timestamp-query') ? ['timestamp-query'] : [], requiredLimits: { maxStorageBufferBindingSize: a.limits.maxStorageBufferBindingSize, maxBufferSize: a.limits.maxBufferSize } });
+        healthWatch(dev);
+        const tw = performance.now();
         E.bricks_dump();
         const f = new Float32Array(E.memory.buffer, E.out_ptr(), E.out_len()).slice();
         const n = f[0], shapes = [], idx = [];
@@ -30,15 +33,18 @@
         idx.forEach((b, k) => slots.set(b, k + 1));
         // (loose room contents, kind 4: the first structure step sends them off as bodies resting where they stand)
         if (E.loose_pending && E.loose_pending()) jobs.structure = true;
-      }
-    }
-    if (!gpu) $('warn').textContent = 'WebGPU is not available in this browser: holes still work, but loose pieces are not simulated.';
-  } catch (e) { gpu = null; $('warn').textContent = 'GPU physics unavailable: ' + e.message; }
+        health.createMs = Math.round(performance.now() - tw);
+        // (the lab's runs start from the world as made: the check's steps and its three bodies are not in them)
+        if (!LABSTATE && !window.__noSelfTest) await gpuSelfTest();
+      } else health.why = 'the browser has WebGPU but gave no adapter (hardware acceleration off, or this GPU or driver is blocked)';
+    } else health.why = 'this browser has no WebGPU' + (window.isSecureContext ? '' : ' (the page is not in a secure context)');
+    if (!gpu) { $('warn').textContent = `GPU physics is off: ${health.why}. ${NO_GPU}`; healthNoGpu(health.why); }
+  } catch (e) { gpu = null; $('warn').textContent = `GPU physics could not start: ${e.message}. ${NO_GPU}`; healthNoGpu('it could not start on this browser and GPU (' + e.message + ')'); }
   $('go').disabled = false; $('go').textContent = 'Enter';
   hud();
   // a benchmark or lab run asked for before the reload starts by itself
   if (LABSTATE && gpu) labRun().catch(e => { $('bench').hidden = false; $('bench-out').textContent = 'Lab failed: ' + e.message + '\n' + e.stack; window.LAB_ERROR = e.message; });
-  else if (benchPending()) { $('start').hidden = true; benchStart(); }
+  else if ((benchWhich = benchPending())) { $('start').hidden = true; benchStart(benchWhich); }
   // (a level reset: straight in, on the same level; a click on the view takes the pointer again)
   else { let again = false; try { again = sessionStorage.getItem('sf-reset') === '1'; sessionStorage.removeItem('sf-reset'); } catch (e) {} if (again) { $('start').hidden = true; physicsPaused = false; started = true; } }
 })();

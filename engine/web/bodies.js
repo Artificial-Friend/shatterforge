@@ -116,6 +116,10 @@ let partsMade = 0, partsCrushed = 0;
 // runs from the read-back that first shows it. Not counted: the building, parked spares, balls, and what stood
 // loose in the building from the start (furniture) until something has moved it half a metre.
 let debrisMax = Infinity, debrisSeq = 0, debrisCapped = 0, debrisLive = 0;
+// (nothing done to the level yet: no blast, no ball. What is first seen till then stood loose in it from the start.
+// Until 24 Nov this was read off the HUD's last line, which the first structure step writes as it sends the
+// furniture off: the Quarter's 223 pieces of furniture counted as debris from the first frame. Play check `budget`.)
+let worldTouched = false;
 const debrisBorn = new Map();   // body slot -> { gen, seq, p: where it was first seen, orig: there before anything was done }
 // What goes first when there is more debris than the budget: the smallest, and among those the oldest. Three
 // classes: crumbs (particles), pieces lighter than `DEBRIS_SMALL` kg, the rest. Strictly oldest first (tried, lab
@@ -125,7 +129,7 @@ const DEBRIS_SMALL = 300;   // kg: a 0.5 m cube of concrete
 function capDebris(r, pr) {
   const live = [];
   if (r.body) {
-    const nb = Math.min(gpu.bodies.length, r.body.length / 7), fresh = lastBlast === '' && balls === 0;
+    const nb = Math.min(gpu.bodies.length, r.body.length / 7), fresh = !worldTouched;
     for (let b = 1; b <= nb; b++) {
       const gb = gpu.bodies[b - 1]; if (!gb || gb.dead || gb.im === 0 || gb.ball || gb.labBall) { debrisBorn.delete(b); continue; }
       const o = (b - 1) * 7, p = [r.body[o], r.body[o + 1], r.body[o + 2]], gen = gpu.genOf(b);

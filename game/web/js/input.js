@@ -26,7 +26,9 @@ addEventListener('keydown', (e) => {
   if (e.code === 'KeyV') { const el = $('s-view'); el.value = +setting.view ? 0 : 1; el.dispatchEvent(new Event('input')); }
   if (e.code === 'Digit1') setRadius(0.4); if (e.code === 'Digit2') setRadius(0.7); if (e.code === 'Digit3') setRadius(1.2); if (e.code === 'Digit4') setRadius('ball');
   if (e.code === 'KeyB' && !locked) { if (radius === 'ball') fireBall(); else doBlast(); }
-  if (e.code === 'KeyK') { try { localStorage.setItem('sf-bench', '1'); } catch (err) {} location.reload(); }
+  if (e.code === 'KeyI' && !e.repeat) showDiagnosis();
+  if (e.code === 'KeyK') benchAsk('1');
+  if (e.code === 'KeyJ') benchAsk('ball');
   // (a browser that also sends the key that freed the pointer: the menu it just opened stays open)
   if (e.code === 'Escape' && started && !e.repeat && performance.now() - menuAt > 300) escapeKey();
   // (R twice within 1.5 s: it sits between E and F, and one slip must not cost the level)
