@@ -82,7 +82,12 @@ function restLoads() {
     const bear = b.ball && b.ballR && pos[1] - b.ballR > 1 && typeof ballBearing === 'function' ? ballBearing(i, pos, b.ballR) : null;
     const nb = bear ? bear.onS.length + bear.onP.length : 0;
     if (window.__dbg && b.ball) console.warn(`rest f${LAB.f} ball y ${pos[1].toFixed(2)}: bears on the structure at ${bear ? bear.onS.length : '-'} points, on loose pieces at ${bear ? bear.onP.length : '-'} (bodies ${bear ? [...new Set(bear.onP.map(q => q.idx))] : ''}) · failed ${failedJoints} cracked ${crackedJoints}`);
-    if (nb) { for (const q of bear.onS) add(q[0], q[1] + 0.05, q[2], W / nb); if (bear.onP.length) bearOnPieces(bear.onP.map(q => ({ ...q, f: W / nb }))); }
+    if (nb) {
+      for (const q of bear.onS) add(q[0], q[1] + 0.05, q[2], W / nb);
+      // (a piece that carries its share passes it down: to the standing brick under the contact)
+      const gone = bear.onP.length ? bearOnPieces(bear.onP.map(q => ({ ...q, f: W / nb, rBall: b.ballR }))) : new Set();
+      for (const q of bear.onP) if (!gone.has(q.idx)) add(q.p[0], q.p[1], q.p[2], W / nb);
+    }
     else add(pos[0], pos[1], pos[2], W);
   }
   const pr = snapCur && snapCur.parts;

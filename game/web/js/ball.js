@@ -48,15 +48,20 @@ function throwBall(c, r, v, opt) {
 // of the next floor lying across their own hole (7.13 m down).
 function ballBearing(body, p, r) {
   const pts = [], onS = [], onP = [];
-  for (const d of [0, 0.3, 0.55, 0.75, 0.9]) for (let k = 0; k < (d ? 12 : 1); k++) {
+  // (out to its edge: the ball is three eight-sided discs, and a disc's lower edge is at r under the centre to
+  // 0.41 r out, then rises at 45 degrees to the centre's height at 1.41 r - d. Sampled to 0.9 r as a sphere, the
+  // ball lying in a hole 0.95 r wide touched nothing: lab qroofball, at rest on a rim for 8 s with no bearing found)
+  const under = (d) => r * Math.min(1, 1.414 - d);
+  for (const d of [0, 0.3, 0.55, 0.75, 0.9, 1.0]) for (let k = 0; k < (d ? 12 : 1); k++) {
     const a = k * Math.PI / 6, x = p[0] + d * r * Math.cos(a), z = p[2] + d * r * Math.sin(a);
     const ts = E.raycast(x, p[1], z, 0, -1, 0, r + 1), st = ts >= 0 ? p[1] - ts : -1e9;
     const hit = rayDebris([x, p[1], z], [0, -1, 0], r + 1, body), dt = hit ? p[1] - hit.t : -1e9;
     if (Math.max(st, dt) < -1e8) continue;
-    pts.push({ x, z, gap: (p[1] - r * Math.sqrt(1 - d * d)) - Math.max(st, dt), st, dt, slot: hit ? hit.slot : 0 });
+    pts.push({ x, z, gap: (p[1] - under(d)) - Math.max(st, dt), st, dt, slot: hit ? hit.slot : 0 });
   }
   if (!pts.length) return { onS, onP };
   const g0 = Math.min(...pts.map(q => q.gap)); if (g0 > 0.3) return { onS, onP };
+  pts.sort((x, y) => x.gap - y.gap);   // (nearest first: the contact is there)
   for (const q of pts) {
     if (q.gap > g0 + 0.15) continue;
     if (q.dt <= q.st + 0.05 || q.st > q.dt - 0.6) { if (q.st > -1e8) onS.push([q.x, q.st, q.z]); continue; }
