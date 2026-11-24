@@ -33,22 +33,37 @@ function throwBall(c, r, v, opt) {
   worldTouched = true; lastActive = clock();
   return b;
 }
-// Where a ball at rest bears on the standing structure: the points under it where the structure comes up to its
-// surface (within 5 cm of the nearest such point), as [x, y, z] on the structure; none if it lies on debris.
-// A ball's weight went to the brick under its centre, as any piece's does. For a ball wider than the hole it has
-// made that is the floor below: lab qroofball, 24 Nov, first run: the 514 t ball came down one storey onto the
-// roof slab, sank 0.6 m into a dent 1,100 failed joints wide, and lay on the dent's rim for 20 s, its weight
-// booked to the storey under it ("rubble on its floors 517 t"), which cracked and held.
-function ballBearing(p, r) {
-  const pts = [];
+// Where a ball at rest bears, and on what. Under points of its footprint: the standing structure's top (the
+// engine's own copy) and the debris' top (the last read-back). The points where its surface comes down to either
+// (within 15 cm of the nearest) share its weight:
+// - on the structure, or on a loose piece that lies on the structure there (within 0.6 m under the contact): the
+//   weight goes to the structure at that point (`onS`: [x, y, z] on the structure);
+// - on a loose piece with nothing under it there, a slab's fragment across the hole it came out of: the piece has
+//   the weight to carry itself (`onP`: { idx: its body, p: the contact, slot: its shape there }; breaking.js
+//   bearOnPieces: it carries it in shear round the contact, or is punched through).
+// Until 24 Nov a ball's weight went to the brick under its centre, as any piece's does, and a loose piece carried
+// whatever lay on it. Lab qroofball, first run: the 514 t ball came down one storey onto the roof slab, sank 0.6 m
+// into a dent 1,100 failed joints wide and lay on its rim for 20 s, its weight booked to the storey below, which
+// cracked and held (4.05 m down). With the weight at the rim: through the roof, and then at rest on the fragments
+// of the next floor lying across their own hole (7.13 m down).
+function ballBearing(body, p, r) {
+  const pts = [], onS = [], onP = [];
   for (const d of [0, 0.3, 0.55, 0.75, 0.9]) for (let k = 0; k < (d ? 12 : 1); k++) {
     const a = k * Math.PI / 6, x = p[0] + d * r * Math.cos(a), z = p[2] + d * r * Math.sin(a);
-    const ts = E.raycast(x, p[1], z, 0, -1, 0, r + 1); if (!(ts >= 0)) continue;
-    pts.push([x, p[1] - ts, z, (p[1] - Math.sqrt(r * r - d * d * r * r)) - (p[1] - ts)]);   // (the gap under its surface there)
+    const ts = E.raycast(x, p[1], z, 0, -1, 0, r + 1), st = ts >= 0 ? p[1] - ts : -1e9;
+    const hit = rayDebris([x, p[1], z], [0, -1, 0], r + 1, body), dt = hit ? p[1] - hit.t : -1e9;
+    if (Math.max(st, dt) < -1e8) continue;
+    pts.push({ x, z, gap: (p[1] - r * Math.sqrt(1 - d * d)) - Math.max(st, dt), st, dt, slot: hit ? hit.slot : 0 });
   }
-  if (!pts.length) return [];
-  const g0 = Math.min(...pts.map(q => q[3])); if (g0 > 0.3) return [];
-  return pts.filter(q => q[3] <= g0 + 0.05).map(q => [q[0], q[1], q[2]]);
+  if (!pts.length) return { onS, onP };
+  const g0 = Math.min(...pts.map(q => q.gap)); if (g0 > 0.3) return { onS, onP };
+  for (const q of pts) {
+    if (q.gap > g0 + 0.15) continue;
+    if (q.dt <= q.st + 0.05 || q.st > q.dt - 0.6) { if (q.st > -1e8) onS.push([q.x, q.st, q.z]); continue; }
+    const sh = gpu.shapes[q.slot - 1], idx = sh ? sh.body : 0;
+    if (bodyInfo.has(idx)) onP.push({ idx, p: [q.x, q.dt, q.z], slot: q.slot });
+  }
+  return { onS, onP };
 }
 // A steel ball set down at rest with its lowest point 2 cm over whatever is under (x, z): on a roof, as the
 // benchmark `ball` and the lab's `qroofball` do. Returns the body and where its centre is.

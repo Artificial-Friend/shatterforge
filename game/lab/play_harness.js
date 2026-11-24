@@ -59,6 +59,8 @@
     const cbs = H.raf; H.raf = [];
     for (const cb of cbs) { try { cb(vt); } catch (e) { H.log.push('frame ' + H.f + ': ' + e.message + ' ' + String(e.stack).split('\n')[1]); } }
     if (H.gate && (C.shots || []).includes(H.f - H.f0)) { try { H.shot(); } catch (e) { H.log.push('shot: ' + e.message); } }
+    // (every frame: is less drawn than exists, and for how many frames running)
+    if (H.gate && H.sample && !C.noGpu) { try { const x = H.sample(), d = (x.statDrawn + x.drawnB + x.drawnP) - (x.stat + x.bod + x.par); H.def = H.def || { run: 0, longest: 0, worst: 0, frames: 0, at: 0 }; if (d < -0.05) { H.def.run++; H.def.frames++; H.def.worst = Math.min(H.def.worst, d); if (H.def.run > H.def.longest) { H.def.longest = H.def.run; H.def.at = x.f; } } else H.def.run = 0; } catch (e) {} }
     if (H.gate && H.sample && (H.f - H.f0) % H.every === 0) { try { H.samples.push(H.sample()); } catch (e) { H.log.push('sample: ' + e.message); } }
     if (H.gate && H.f - H.f0 >= H.stopAt) { H.done = true; return; }
     setTimeout(tick, H.gate ? 0 : 16);

@@ -75,10 +75,15 @@ function restLoads() {
     const b = gpu.bodies[i - 1], o = (i - 1) * 7, vo = (i - 1) * 3;
     if (!b || b.dead || !b.mass || o + 2 >= lastBodies.length) continue;
     if (Math.hypot(lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]) > 0.5) continue;
-    // (a ball bears where it touches the structure, not under its centre: ball.js ballBearing)
-    const bear = b.ball && b.ballR && typeof ballBearing === 'function' ? ballBearing([lastBodies[o], lastBodies[o + 1], lastBodies[o + 2]], b.ballR) : [];
-    if (bear.length) for (const q of bear) add(q[0], q[1] + 0.05, q[2], b.mass * 9.81 / bear.length);
-    else add(lastBodies[o], lastBodies[o + 1], lastBodies[o + 2], b.mass * 9.81);
+    // (a ball bears where it touches, not under its centre; and a loose piece under it with nothing under itself
+    // carries the weight or breaks: ball.js ballBearing, breaking.js bearOnPieces. On the ground heap, under 1 m,
+    // the ground carries it.)
+    const W = b.mass * 9.81, pos = [lastBodies[o], lastBodies[o + 1], lastBodies[o + 2]];
+    const bear = b.ball && b.ballR && pos[1] - b.ballR > 1 && typeof ballBearing === 'function' ? ballBearing(i, pos, b.ballR) : null;
+    const nb = bear ? bear.onS.length + bear.onP.length : 0;
+    if (window.__dbg && b.ball) console.warn(`rest f${LAB.f} ball y ${pos[1].toFixed(2)}: bears on the structure at ${bear ? bear.onS.length : '-'} points, on loose pieces at ${bear ? bear.onP.length : '-'} (bodies ${bear ? [...new Set(bear.onP.map(q => q.idx))] : ''}) · failed ${failedJoints} cracked ${crackedJoints}`);
+    if (nb) { for (const q of bear.onS) add(q[0], q[1] + 0.05, q[2], W / nb); if (bear.onP.length) bearOnPieces(bear.onP.map(q => ({ ...q, f: W / nb }))); }
+    else add(pos[0], pos[1], pos[2], W);
   }
   const pr = snapCur && snapCur.parts;
   let partW = 0;

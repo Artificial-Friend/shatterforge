@@ -81,13 +81,14 @@ function playerDebris() {
     E.player_debris_box(x, y, z, r.pose[b + 3], r.pose[b + 4], r.pose[b + 5], r.pose[b + 6], h0, h1, h2);
   }
 }
-function rayDebris(o, d, maxT) {
+function rayDebris(o, d, maxT, skipBody) {
   const r = snapCur; if (!r) return null;
   let best = null;
   const n = r.pose.length / 10;
   for (let k = 0; k < n; k++) {
     const b = k * 10, p = [r.pose[b], r.pose[b + 1], r.pose[b + 2]], h = [r.pose[b + 7], r.pose[b + 8], r.pose[b + 9]];
     if (!(Number.isFinite(p[0]) && Number.isFinite(p[1]) && Number.isFinite(p[2]) && Number.isFinite(r.pose[b + 6]))) continue;
+    if (skipBody) { const sh = gpu.shapes[r.slots[k] - 1]; if (!sh || sh.body === skipBody) continue; }
     // quick reject: the ray against the bounding sphere
     const ox = o[0] - p[0], oy = o[1] - p[1], oz = o[2] - p[2], rad = Math.hypot(h[0], h[1], h[2]);
     const bq = ox * d[0] + oy * d[1] + oz * d[2], cq = ox * ox + oy * oy + oz * oz - rad * rad;
@@ -304,6 +305,39 @@ function impacts() {
   }
   job.recs = job.recs.concat(recs);
   pump();
+}
+// A weight at rest on loose pieces (list: { idx: the piece's body, p: where it bears, f: N, slot: the shape there }):
+// a piece with nothing under it at the contact carries the weight as a slab carries a column, in shear round the
+// loaded patch, or the weight punches through it.
+// - The patch: the weight crushes its way in until the patch carries it, A = f / crushing strength (a 5 MN ball on
+//   30 MPa concrete: 0.17 m2, radius a = 0.23 m).
+// - The shear: on the surface round the patch through the piece's thickness t, u t with u = pi (2 a + t) (the
+//   critical perimeter at t / 2 from the patch), or 2 w t for a member narrower than that; at the material's shear
+//   strength (PUNCH_TAU; concrete 0.33 sqrt(f_c) = 1.8 MPa for 30 MPa, the two-way shear of ACI 318).
+//   A 0.25 m slab: 1.8 MPa x pi (0.46 + 0.25) m x 0.25 m = 1.0 MN. Under a 5 MN ball it goes; a 1 m block holds.
+// - Punched, the piece loses the plug (the engine's blast on a loose piece, radius a + t / 2, with nothing thrown)
+//   and is split by the hole as any piece is. Once a second, with the rest loads (worker.js restLoads).
+// Before (24 Nov): a loose piece carried whatever lay on it; lab qroofball, the 514 t ball at rest on the fragments
+// of the floor it had broken, lying across their own hole: 7.13 m down in 15 s.
+const PUNCH_TAU = [1.8e6, 0.3e6, 145e6 * 0.16, 0.5e6, 2.0e6];   // Pa: concrete, masonry, steel (a rolled section, 16% of its box), glass, timber
+let weightPunches = 0;
+function bearOnPieces(list) {
+  const worst = new Map();
+  for (const c of list) {
+    const inf = bodyInfo.get(c.idx), sh = gpu.shapes[c.slot - 1]; if (!inf || !sh || sh.body !== c.idx || snapPending.has(inf.piece)) continue;
+    const m = sh.mat & 7, crushPa = ((MATERIALS[m] || MATERIALS[0]).crush || 30) * 1e6, a = Math.sqrt(c.f / crushPa / Math.PI);
+    const dims = sh.h.map(x => 2 * x).sort((x, y) => x - y), t = dims[0], w = dims[1];
+    const cap = (PUNCH_TAU[m] ?? PUNCH_TAU[0]) * t * Math.min(Math.PI * (2 * a + t), 2 * w) * ((sh.col & 8) ? 0.2 : 1);
+    if (window.__dbg) console.warn(`weight on body ${c.idx}: ${(c.f / 1e6).toFixed(2)} MN on a ${t.toFixed(2)} m thick, ${w.toFixed(2)} m wide shape of material ${m}: carries ${(cap / 1e6).toFixed(2)} MN`);
+    if (!(c.f > cap)) continue;
+    const e = worst.get(c.idx); if (!e || c.f / cap > e.over) worst.set(c.idx, { ...c, over: c.f / cap, r: Math.max(0.3, a + t / 2) });
+  }
+  for (const [idx, c] of worst) {
+    const xf = frameOf(idx), Rt = mt(xf.R), sp = mv(Rt, [c.p[0] - xf.T[0], c.p[1] - 0.05 - xf.T[1], c.p[2] - xf.T[2]]).map((v, k) => v + xf.C[k]);
+    const v = velOf(idx), w = angOf(idx);
+    jobs.blast.push({ op: 'pblast', piece: bodyInfo.get(idx).piece, x: sp[0], y: sp[1], z: sp[2], r: c.r, ctx: new Map([[idx, { J: [0, 0, 0], vPre: v, vPost: v, w0: w }]]) });
+    weightPunches++;
+  }
 }
 function onImpacts(job, r) {
   impactMs = r.ms;

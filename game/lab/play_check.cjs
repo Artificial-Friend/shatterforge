@@ -18,6 +18,11 @@
 // fixes is in docs/LAB.md, "The player's page".
 const { chromium } = require(process.env.PW || 'playwright'); const fs = require('fs'), path = require('path');
 const root = path.resolve(__dirname, '..', '..'), out = path.join(root, 'lab-results');
+// A hole may show before its debris: the page's copy of the bricks changes when the engine answers, the debris
+// shows with the first read-back issued after it was made. With the answers 2 frames and the read-backs 2 frames
+// behind, that is at most 3 frames for one answer; the limit is two answers in a row, 2 x (read-back lag + 1) frames,
+// written 24 Nov with the check.
+const holeFrames = (cfg) => 2 * (cfg.readLag + 1);
 const LOW = { phys: 'low', gfx: 'low', debris: 1500, crumbs: 64, rubble: 16, substeps: 6, colors: 10, gShadows: 0, gMap: 0, gPx: 1 };
 const acts = (k) => [{ f: Math.round(300 * k), code: 'setRadius(0.7); doBlast();' }, { f: Math.round(420 * k), code: 'setRadius(1.2); doBlast();' }, { f: Math.round(560 * k), code: "setRadius('ball'); fireBall();" }];
 const CASES = {
@@ -52,7 +57,7 @@ const names = process.argv.slice(2).length ? process.argv.slice(2) : ['blast', '
       const start = await p.evaluate(() => ({ gpu: !!gpu, worker: !!worker, warn: $('warn').textContent, debrisMax, selfTest: health.selfTest }));
       await p.evaluate(() => { __H.install(); $('go').click(); locked = true; });
       for (let i = 0; i < 4000; i++) { await new Promise(r => setTimeout(r, 2000)); if (await p.evaluate(() => __H.done)) break; }
-      const end = await p.evaluate(() => ({ done: __H.done, samples: __H.samples, log: __H.log, state: diagnosis(), moved: [...debrisBorn].filter(([b, f]) => !f.orig).slice(0, 6).map(([b, f]) => [b, f.p.map(x => +x.toFixed(1))]), alert: $('alert').hidden ? '' : $('alert').textContent, hud: $('hud').textContent.slice(0, 400) }));
+      const end = await p.evaluate(() => ({ done: __H.done, samples: __H.samples, log: __H.log, state: diagnosis(), moved: [...debrisBorn].filter(([b, f]) => !f.orig).slice(0, 5).map(([b, f]) => [b, f.p.map(x => +x.toFixed(1)), lastBodies ? [0, 1, 2].map(k => +lastBodies[(b - 1) * 7 + k].toFixed(1)) : null, (gpu.bodyShapes.get(b) || []).length, Math.round(gpu.bodies[b - 1].mass)]), deficit: __H.def || null, alert: $('alert').hidden ? '' : $('alert').textContent, hud: $('hud').textContent.slice(0, 400) }));
       const S = end.samples, last = S[S.length - 1] || {}, why = res.why, tot = (x) => x.stat + x.bod + x.par, drawn = (x) => x.statDrawn + x.drawnB + x.drawnP;
       const need = (ok, text) => { if (!ok) why.push(text); };
       need(end.done, 'the run did not end'); need(!errs.length, 'page errors: ' + errs.slice(0, 2).join(' | ')); need(!end.log.length, 'harness log: ' + end.log.slice(0, 3).join(' | '));
@@ -64,12 +69,12 @@ const names = process.argv.slice(2).length ? process.argv.slice(2) : ['blast', '
         // drawn is what exists: at the end, and never behind for two samples running
         let behind = 0, run = 0; const behindAt = []; for (const x of S) { const off = Math.abs(drawn(x) - tot(x)) > 0.05; run = off ? run + 1 : 0; behind = Math.max(behind, run); if (off) behindAt.push([x.f, +(drawn(x) - tot(x)).toFixed(2), x.pendCh, x.busy, x.read]); }
         const ballMoved = last.ballP && S.find(x => x.ballP) ? Math.hypot(...last.ballP.map((v, k) => v - S.find(x => x.ballP).ballP[k])) : 0;
-        Object.assign(res, { gpu: start.gpu, worker: start.worker, self_test: start.selfTest, total_m3: +T0.toFixed(2), worst_change_m3: +worst.toFixed(3), left_structure_m3: +(before.stat - last.stat).toFixed(2), pieces_and_crumbs_m3: +((last.bod + last.par) - (before.bod + before.par)).toFixed(2), drawn_end_m3: +drawn(last).toFixed(2), exists_end_m3: +tot(last).toFixed(2), samples_drawn_behind: behind, behind_at: behindAt.slice(0, 8), moved_at_rest: end.moved, removed: { budget: last.capped, far: last.pFar + last.bFar, crushed: last.pCrushed, dust: last.dust, lost: last.lost }, ball: { live: last.balls, moved_m: +ballMoved.toFixed(1), look_ahead: last.punch, broke_m3: +(mid.stat - last.stat).toFixed(2) }, debris_counted_at_rest: before.dLive, issues: last.issues, steps: last.steps, frames: last.f });
+        Object.assign(res, { gpu: start.gpu, worker: start.worker, self_test: start.selfTest, total_m3: +T0.toFixed(2), worst_change_m3: +worst.toFixed(3), left_structure_m3: +(before.stat - last.stat).toFixed(2), pieces_and_crumbs_m3: +((last.bod + last.par) - (before.bod + before.par)).toFixed(2), drawn_end_m3: +drawn(last).toFixed(2), exists_end_m3: +tot(last).toFixed(2), hole_before_debris: end.deficit, moved_at_rest: end.moved, removed: { budget: last.capped, far: last.pFar + last.bFar, crushed: last.pCrushed, dust: last.dust, lost: last.lost }, ball: { live: last.balls, moved_m: +ballMoved.toFixed(1), look_ahead: last.punch, broke_m3: +(mid.stat - last.stat).toFixed(2) }, debris_counted_at_rest: before.dLive, issues: last.issues, steps: last.steps, frames: last.f });
         need(start.gpu, 'no GPU world: ' + start.warn); need(start.worker === (cs.worker !== false), `engine ${start.worker ? 'in a worker' : 'inline'}`);
         need(start.selfTest && start.selfTest.ok, 'the GPU self-check failed: ' + JSON.stringify(start.selfTest));
         need(worst < 0.05, `volume changed by ${worst.toFixed(3)} m3`);
         need(before.stat - last.stat > 1, `only ${(before.stat - last.stat).toFixed(2)} m3 left the structure`);
-        need(Math.abs(drawn(last) - tot(last)) < 0.02, `drawn ${drawn(last).toFixed(2)} m3 of ${tot(last).toFixed(2)}`); need(behind <= 1, `drawn behind what exists for ${behind} samples running`);
+        need(Math.abs(drawn(last) - tot(last)) < 0.02, `drawn ${drawn(last).toFixed(2)} m3 of ${tot(last).toFixed(2)}`); need(end.deficit && end.deficit.longest <= holeFrames(cfg), `less drawn than exists for ${end.deficit ? end.deficit.longest : '?'} frames running (at frame ${end.deficit ? end.deficit.at : '?'})`);
         need(last.capped + last.pFar + last.bFar + last.pCrushed + last.dust + last.lost === 0, 'debris removed: ' + JSON.stringify(res.removed));
         need(last.balls === 1 && ballMoved > 5, `the ball: ${last.balls} live, moved ${ballMoved.toFixed(1)} m`); need(last.punch[0] > 0 && mid.stat - last.stat > 0.05, `the ball broke ${(mid.stat - last.stat).toFixed(2)} m3 (look-ahead ${last.punch})`);
         need(before.dLive === 0, `${before.dLive} pieces counted as debris before anything was done`);
