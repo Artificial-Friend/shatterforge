@@ -42,9 +42,11 @@
   async function tick() {
     if (H.gate) {
       const next = H.f + 1;
-      try { await dev.queue.onSubmittedWorkDone(); } catch (e) {}
+      // a lost device answers nothing more: the harness stops waiting for it (the page's own frames go on, as on a real screen)
+      if (!H.lostSeen && dev && !H.lostHook) { H.lostHook = 1; dev.lost.then(() => { H.lostSeen = 1; }); }
+      if (!H.lostSeen) await Promise.race([dev.queue.onSubmittedWorkDone().catch(() => {}), sleep(5000)]);
       let guard = 0;
-      while ((H.maps > 0 || H.sent.some(at => at + jobLag() <= next) || H.reads.some(r => r.due <= next && !r.done)) && guard++ < 60000) await sleep(1);
+      while (!H.lostSeen && (H.maps > 0 || H.sent.some(at => at + jobLag() <= next) || H.reads.some(r => r.due <= next && !r.done)) && guard++ < 60000) await sleep(1);
       if (guard >= 60000) H.log.push('frame ' + next + ' waited 60 s: maps ' + H.maps + ' sent ' + H.sent.length + ' reads ' + H.reads.filter(r => !r.done).length);
     }
     H.f++; vt += FR;

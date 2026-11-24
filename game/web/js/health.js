@@ -22,6 +22,11 @@ function healthWatch(d) {
     health.gpuErrors++; if (!health.gpuError) health.gpuError = String(e.error && e.error.message || e.error).slice(0, 600);
     healthSay('gpuerr', `The GPU reported ${health.gpuErrors} error${health.gpuErrors > 1 ? 's' : ''}; the first: ${health.gpuError.slice(0, 160)}`);
   });
+  // read-backs asked of a lost device are refused, each one an unhandled rejection: they are the loss already
+  // said above, counted in the state, and not page errors (play_check.cjs lost: 2 page errors before this)
+  addEventListener('unhandledrejection', (e) => {
+    if (/device (was|is) lost|device was destroyed/i.test(String(e.reason && e.reason.message || e.reason))) { health.lostReads = (health.lostReads || 0) + 1; e.preventDefault(); }
+  });
   d.lost.then((info) => {
     health.lost = `${info.reason || 'unknown'}: ${info.message || ''}`;
     healthSay('lost', `The GPU device was lost (${health.lost.slice(0, 120)}): physics has stopped. Reset the level (R R) or reload the page.`);
@@ -74,7 +79,7 @@ function diagnosis() {
     date: new Date().toISOString(), ua: navigator.userAgent, secure: !!window.isSecureContext, webgpu: !!navigator.gpu, gpu: window.__gpuInfo || null,
     limits: lim ? { maxStorageBufferBindingSize: L('maxStorageBufferBindingSize'), maxBufferSize: L('maxBufferSize'), maxStorageBuffersPerShaderStage: L('maxStorageBuffersPerShaderStage'), maxComputeWorkgroupsPerDimension: L('maxComputeWorkgroupsPerDimension'), maxComputeInvocationsPerWorkgroup: L('maxComputeInvocationsPerWorkgroup') } : null,
     world: gpu ? { made_ms: health.createMs, bodies: gpu.n, live, room_bodies: gpu.roomBodies(), room_shapes: gpu.roomShapes(), frame: gpu.frame, skipped: gpu.skipped || 0, substeps: gpu.substeps, stats: gpu.stats, step_ms: gpu.gpuMs || null, dispatch: gpu.dispatchCal || null, lost_steps: gpu.lost || 0, rejected: gpu.rejected || 0 } : null,
-    off_because: health.why || null, self_test: health.selfTest, issues: [...health.issues.values()], gpu_errors: health.gpuErrors, first_gpu_error: health.gpuError || null, device_lost: health.lost || null, stalls: health.stalls, no_room: health.noRoom,
+    off_because: health.why || null, self_test: health.selfTest, issues: [...health.issues.values()], gpu_errors: health.gpuErrors, first_gpu_error: health.gpuError || null, device_lost: health.lost || null, reads_refused_after_loss: health.lostReads || 0, stalls: health.stalls, no_room: health.noRoom,
     engine: { in_worker: !!worker, bricks: E ? E.bricks_alive() : null, busy: busy ? busy.op : null, queued: jobs.blast.length, last_ms: workerMs },
     page: { level: KIND_NAMES[KIND], started, paused: physicsPaused, steps: stepsDone, steps_at_read: stepsAtRead, reads: readsDone, reading, fps: +fps.toFixed(1), steps_per_s: +(rate.steps || 0).toFixed(1), reads_per_s: +(rate.reads || 0).toFixed(1), drawn_shapes: debrisShapes, chunks_waiting: pendingChunks.length },
     debris: { kept_at_most: debrisMax < Infinity ? debrisMax : 'no limit', live: debrisLive, removed_over_budget: debrisCapped, particles_made: partsMade, particles_crushed: partsCrushed, particles_removed_far: partsFar, bodies_removed_far: bodiesFar, clean_up_m: farDist < Infinity ? farDist : 'off', dust_bricks: dustBricks, spill_lost: spillLost, vanished: flick.vanished, jumps: flick.jumps },
