@@ -629,6 +629,13 @@ Pairs beyond `maxPairs` are lost, and a lost ground pair lets a piece fall throu
 
 ## Still to do
 
+- **The weight of big loose bodies does not all reach the structure** (24 November; lab `qroofball`: "66 t applied of
+  5,453 sent" at one read). A resting body's weight is booked at the standing brick within 4 m under its centre
+  (`rest_load`); a broken slab lying across a hole has none there and loads nothing. Not tried.
+- **The steel ball is a faceted body, its weight is worked out for a sphere** (24 November). Its corners reach 0.4 m
+  past the sphere for the 5 m ball; the page looks for what it bears on up to 1.5 m off the sphere (docs/LAB.md).
+  And its weight on loose pieces acts four times a second, not in the step. Not tried: a sphere shape on the GPU.
+
 - **A part cut free can be undrawn for 2 to 5 frames** (24 November; `play_check hz144`: 52.85 m³ for up to 5 frames of 144 Hz). The page side: docs/LAB.md, 24 November, "Open". Not tried: drawing a new body at its birth pose.
 
 - **Standing structure pushes what rests on it and is not pushed back within a step** (24 November; lab `qroofball`,

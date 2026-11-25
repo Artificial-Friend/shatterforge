@@ -3838,6 +3838,12 @@ async function gpuSelfTest() {
 // Steps going out and nothing coming back: twice a second (from the HUD). The page steps at most 3 past the newest
 // read-back, so a GPU that stops answering stops the world without a word.
 function healthTick() {
+  // debris removed because more exists than the setting keeps: said for 6 s each time it happens (a limit of 250
+  // keeps 250 crumbs of a break that makes thousands: "what I break disappears", and nothing on screen said why)
+  if (!LAB.on) {
+    if (debrisCapped > (health.capSeen || 0)) { health.capSeen = debrisCapped; health.capUntil = performance.now() + 6000; healthSay('budget', `${debrisCapped} pieces of debris removed so far: more than the ${debrisMax} kept at once. Settings, Physics, "Debris kept at once".`); }
+    else if (health.issues.has('budget') && performance.now() > health.capUntil) healthClear('budget');
+  }
   if (!gpu || physicsPaused || LAB.on) { health.stallSince = 0; return; }
   const now = performance.now(), wants = (gpu.stats.awake || 0) > 0 || (gpu.stats.pActive || 0) > 0 || clock() - lastActive < 2000;
   if (!wants || readsDone !== health.lastReads) { health.lastReads = readsDone; health.stallSince = now; healthClear('stall'); return; }

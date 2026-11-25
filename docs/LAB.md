@@ -1294,12 +1294,26 @@ with until its first read-back; not done in this round.
    rejection. `play_check lost` before: 2 page errors. After: 0, the refusals counted in the state (key I).
    (The check's own harness also waited 60 s a frame on a destroyed device; it now stops waiting.)
 4. **A worker that answered late was given up on but not stopped**, so its answers could arrive after the page
-   had started the engine itself. It is now terminated. Not seen to cause the report.
+   had started the engine itself. It is now terminated. Not seen to cause the report. **It has no check** (rule 2 not
+   met for this one: a worker held past 15 s was not built into the harness).
 5. **All 223 loose contents of the Quarter counted as debris from the start** (`capDebris` took "nothing done
    yet" from the text of the last blast). With the Low preset's limit of 1,500 that left 1,277 for real debris.
    Before: 223 counted at rest. After: 39 (`play_check`, limit 55). The 39 are furniture that moves more than
    0.5 m while it settles (for example a piece at y 3.9 m found at 3.3 m, 0.3 m aside): they fall off or over
    what they were set on. Why was not followed; they count as debris because they did move.
+
+### A second reading of the report: a small debris limit (24 November, later)
+
+"Debris kept at once" goes down to 250 on its slider, and the setting is saved in the browser. On the build the
+report was made on, 223 pieces of furniture counted against it from the first frame (fault 5), and crumbs are
+removed before pieces, oldest first. `play_check blast`'s two blasts and ball make about 49 pieces and 161 crumbs:
+with a limit of 250 that build was 183 over, so every crumb and some pieces were removed as they were made. At 500
+or more nothing was. Whether the reporter's limit was that low is not known; the default is 10,000, the Low preset
+1,500. The ball does not count against the limit, so this reading explains "disappears" and not "the ball doesn't
+work". On this build the same blasts with a limit of 250 remove nothing (39 + 49 + 161 = 249), and when debris is
+removed the page now says so for 6 s: "707 pieces of debris removed so far: more than the 250 kept at once.
+Settings, Physics, "Debris kept at once"." Check: `play_check tiny` (three 2.5 m blasts, limit 250: 707 removed,
+said at 21 of its samples; before, nothing on screen).
 
 ### A weight set on a roof: lab `qroofball`, and the page's second benchmark (key J)
 
@@ -1318,6 +1332,11 @@ frames, how far the ball went down):
 | 3 | broken slab pieces under the ball carried it for ever: weight on a loose piece now tried against that piece | 7.24 to 9.62 m |
 | 4 | "touching" taken as within 0.6 m of the sphere's surface, tried four times a second | 26.4 m |
 | 5 | a ball hung on corners bears on the nearest thing under it (up to 1.5 m) | **30.4 m** |
+
+The 1.5 m of run 5 is an allowance of the model, widened twice after runs that fell short (0.3 m, 0.6 m), and the
+result clears the limit by 0.4 m: the ball is drawn and collides as a faceted body whose corners reach 0.4 m past
+the sphere the rays assume, so a ball lying on its corners is "off" the surface by that much or more
+(game/web/js/ball.js, at the constant). It is not a measured quantity.
 
 (One step between 2 and 3 went to 0.02 m: the weight was split over 13 sample points, each under the piece's
 capacity. It is one patch per piece.)

@@ -32,6 +32,14 @@ const CASES = {
   noworker: { cfg: { script: acts(1), stopAt: 760, noWorker: 1 }, expect: 'play', worker: false },
   nogpu: { cfg: { script: [{ f: 40, code: 'setRadius(1.2); doBlast();' }, { f: 80, code: "setRadius('ball'); fireBall();" }], stopAt: 140, noGpu: 1 }, expect: 'said', key: 'gpu' },
   nocreate: { cfg: { script: [{ f: 40, code: 'setRadius(1.2); doBlast();' }], stopAt: 100, failCompile: 1 }, expect: 'said', key: 'gpu' },
+  // a saved limit of 250 pieces of debris (the slider's least): the page must say that it removes debris
+  tiny: { cfg: { script: [300, 340, 380].map(f => ({ f, code: 'setRadius(2.5); doBlast();' })), stopAt: 520, saved: { debris: 250 } }, expect: 'said', key: 'budget' },
+  // the page's benchmarks through their own start (the key sets 'sf-bench' and reloads; the page starts it):
+  // J, the 514 t ball on the office roof, to its end. Limits, set before its first run: the ball at least 30 m
+  // down in 1,500 steps (as lab qroofball), volume lost under 2% of the building, no banner
+  benchball: { cfg: { script: [], stopAt: 1500, every: 30, bench: 'ball' }, expect: 'bench', down: 30 },
+  // K, the collapse: that it starts (90 steps)
+  benchk: { cfg: { script: [], stopAt: 90, every: 30, bench: '1' }, expect: 'bench' },
   lost: { cfg: { script: [{ f: 200, code: 'dev.destroy();' }, { f: 230, code: 'setRadius(1.2); doBlast();' }], stopAt: 300 }, expect: 'said', key: 'lost' },
 };
 const names = process.argv.slice(2).length ? process.argv.slice(2) : ['blast', 'nogpu'];
@@ -48,13 +56,17 @@ const names = process.argv.slice(2).length ? process.argv.slice(2) : ['blast', '
     const p = await b.newPage({ viewport: { width: 400, height: 250 } });
     const errs = []; p.on('pageerror', e => errs.push(e.message));
     await p.route('**/three.min.js', r => r.fulfill({ body: threeJs, contentType: 'text/javascript' }));
-    await p.addInitScript(([c]) => { window.__HCFG = c; if (c.saved) localStorage.setItem('sf-settings', JSON.stringify(c.saved)); }, [cfg]);
+    await p.addInitScript(([c]) => { window.__HCFG = c; if (c.bench) localStorage.setItem('sf-bench', c.bench); if (c.saved) localStorage.setItem('sf-settings', JSON.stringify(c.saved)); }, [cfg]);
     await p.addInitScript({ path: path.join(__dirname, 'play_harness.js') });
     let res = { case: name, pass: false, why: [] };
     try {
       await p.goto('file://' + html);
       for (let i = 0; i < 600; i++) { await new Promise(r => setTimeout(r, 1000)); if (await p.evaluate(() => !$('go').disabled)) break; }
       const start = await p.evaluate(() => ({ gpu: !!gpu, worker: !!worker, warn: $('warn').textContent, debrisMax, selfTest: health.selfTest }));
+      if (cfg.bench) {   // (started by the page; the harness takes the clock once the ball is down or the cuts are made)
+        for (let i = 0; i < 900; i++) { await new Promise(r => setTimeout(r, 1000)); if (await p.evaluate(() => BENCH.phase === 'collapse' || !BENCH.on && $('bench-out').textContent.length > 0)) break; }
+        await p.evaluate(() => { window.__b0 = { phase: BENCH.phase, kind: BENCH.kind, at: BENCH.ballAt, y: BENCH.kind === 'ball' ? benchBallY() : 0 }; __H.install(); });
+      } else
       await p.evaluate(() => { __H.install(); $('go').click(); locked = true; });
       for (let i = 0; i < 4000; i++) { await new Promise(r => setTimeout(r, 2000)); if (await p.evaluate(() => __H.done)) break; }
       const end = await p.evaluate(() => ({ done: __H.done, samples: __H.samples, log: __H.log, state: diagnosis(), moved: [...debrisBorn].filter(([b, f]) => !f.orig).slice(0, 5).map(([b, f]) => [b, f.p.map(x => +x.toFixed(1)), lastBodies ? [0, 1, 2].map(k => +lastBodies[(b - 1) * 7 + k].toFixed(1)) : null, (gpu.bodyShapes.get(b) || []).length, Math.round(gpu.bodies[b - 1].mass)]), deficit: __H.def || null, alert: $('alert').hidden ? '' : $('alert').textContent, hud: $('hud').textContent.slice(0, 400) }));
@@ -82,12 +94,26 @@ const names = process.argv.slice(2).length ? process.argv.slice(2) : ['blast', '
         need(before.dLive <= 55, `${before.dLive} pieces counted as debris before anything was done (a quarter of the furniture: 55)`);
         need(!last.issues, 'the page complains: ' + last.issues + ' · ' + end.alert.slice(0, 200));
         if (cs.budget) need(start.debrisMax === cs.budget, `budget ${start.debrisMax}`);
+      } else if (cs.expect === 'bench') {
+        const bn = await p.evaluate(() => ({ b0: window.__b0, phase: BENCH.phase, kind: BENCH.kind, steps: stepsDone - BENCH.f0, y: BENCH.kind === 'ball' ? benchBallY() : 0, rows: BENCH.rows.length, each5s: BENCH.rows.filter((r, i) => i % 5 === 0).map(r => +(r.ballY || 0).toFixed(1)), capped: debrisCapped }));
+        const T0 = S.length ? tot(S[0]) : 0, lostV = T0 - Math.min(...S.map(tot)), made = Math.max(...S.map(tot)) - T0;
+        Object.assign(res, { gpu: start.gpu, worker: start.worker, self_test: start.selfTest, started: bn.b0, phase_end: bn.phase, steps: bn.steps, total_m3: +T0.toFixed(2), lost_m3: +lostV.toFixed(2), made_m3: +made.toFixed(3), pieces: last.nb, crumbs: last.np, removed_over_limit: bn.capped, issues: last.issues || '', ball_down_m: cs.down ? +(bn.b0.at[1] - bn.y).toFixed(2) : undefined, ball_y_each_5s: cs.down ? bn.each5s : undefined, drawn_end_m3: +drawn(last).toFixed(2), exists_end_m3: +tot(last).toFixed(2) });
+        need(start.gpu, 'no GPU world: ' + start.warn); need(bn.b0 && bn.b0.phase === 'collapse', 'the benchmark did not start: ' + JSON.stringify(bn.b0));
+        need(bn.kind === (cfg.bench === 'ball' ? 'ball' : 'collapse'), 'the wrong benchmark: ' + bn.kind);
+        need(lostV < 0.02 * T0 && made < 0.05, `volume: ${lostV.toFixed(2)} m3 lost, ${made.toFixed(3)} made, of ${T0.toFixed(0)}`);
+        need(last.np + last.nb > (S[0].np + S[0].nb), 'nothing broke');
+        need(!S.some(x => x.issues), 'the page complains: ' + S.map(x => x.issues).filter(Boolean)[0]);
+        if (cs.down) need(bn.b0.at[1] - bn.y >= cs.down, `the ball went down ${(bn.b0.at[1] - bn.y).toFixed(2)} m (limit >= ${cs.down})`);
       } else {
         // the page must say it, in play: the banner shown, with this trouble in it; and the state (key I) must hold it
         const bricks = [S[0] ? S[0].bricks : 0, last.bricks];
         Object.assign(res, { gpu: start.gpu, said: end.alert.slice(0, 260), issues: last.issues, start_card: start.warn.slice(0, 160), bricks, state: { off_because: end.state.off_because, device_lost: end.state.device_lost, self_test: end.state.self_test } });
+        if (cs.key === 'budget') {   // (shown for 6 s after each removal: at any sample)
+          Object.assign(res, { kept_at_most: start.debrisMax, removed: last.capped, pieces: last.nb, crumbs: last.np, said_at_samples: S.filter(x => (x.issues || '').split(',').includes('budget')).length });
+          need(start.debrisMax === 250, `the limit is ${start.debrisMax}`); need(last.capped > 0, 'nothing was removed'); need(res.said_at_samples > 0, 'the page never said it removes debris');
+        } else {
         need((last.issues || '').split(',').includes(cs.key), `nothing on screen about "${cs.key}" (issues: ${last.issues || 'none'})`);
-        need(end.alert.length > 20, 'the banner is not shown');
+        need(end.alert.length > 20, 'the banner is not shown'); }
         if (cs.key === 'gpu') { need(!start.gpu, 'a GPU world was made'); need(!!end.state.off_because, 'the state does not say why'); need(bricks[1] !== bricks[0], 'the blast changed nothing'); }
         if (cs.key === 'lost') need(!!end.state.device_lost, 'the state does not say the device was lost');
       }
