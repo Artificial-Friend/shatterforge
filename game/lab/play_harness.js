@@ -22,7 +22,7 @@
     const RW = window.Worker;
     window.Worker = class {
       constructor(u) { this.w = new RW(u); this._on = null;
-        this.w.onmessage = (m) => { if (m.data.op === 'ready') { this._on && this._on(m); return; } const at = H.sent.shift(); H.held.push({ due: at + jobLag(), m, self: this }); };
+        this.w.onmessage = (m) => { if (m.data.op === 'ready') { this._on && this._on(m); return; } const at = H.sent.shift(); if (!H.gate) { this._on && this._on(m); return; }   /* (before the harness has the clock: at once; a benchmark cuts before it) */ H.held.push({ due: at + jobLag(), m, self: this }); };
         this.w.onerror = (e) => { H.log.push('worker error ' + e.message); this.onerror && this.onerror(e); }; }
       set onmessage(f) { this._on = f; } get onmessage() { return this._on; }
       postMessage(msg, tr) { if (msg.op !== 'init' && msg.op !== 'param') H.sent.push(H.f); this.w.postMessage(msg, tr || []); }
