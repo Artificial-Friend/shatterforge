@@ -53,7 +53,10 @@ if pl:
         except Exception: continue
         if "case" not in d: continue
         if d.get("total_m3") is not None:
-            kv = f"left the structure {d.get('left_structure_m3')} m3, pieces and crumbs {d.get('pieces_and_crumbs_m3')} m3, worst change of the total {d.get('worst_change_m3')} m3, hole before its debris {((d.get('hole_before_debris') or {}).get('longest'))} frames, ball moved {(d.get('ball') or {}).get('moved_m')} m and broke {(d.get('ball') or {}).get('broke_m3')} m3"
+            if 'steps' in d and 'lost_m3' in d:
+                kv = f"benchmark from its own start: {d.get('steps')} steps, {d.get('pieces')} pieces and {d.get('crumbs')} crumbs, {d.get('lost_m3')} m3 lost, {d.get('removed_over_limit')} removed over the debris limit" + (f", ball {d.get('ball_down_m')} m down" if d.get('ball_down_m') is not None else '')
+            else:
+                kv = f"left the structure {d.get('left_structure_m3')} m3, pieces and crumbs {d.get('pieces_and_crumbs_m3')} m3, worst change of the total {d.get('worst_change_m3')} m3, hole before its debris {((d.get('hole_before_debris') or {}).get('longest'))} frames, ball moved {(d.get('ball') or {}).get('moved_m')} m and broke {(d.get('ball') or {}).get('broke_m3')} m3"
         else: kv = "on screen: " + (d.get("said") or "nothing")[:110]
         L.append(f"| {d['case']} | {'pass' if d.get('pass') else '**FAIL**'} | {'; '.join(d.get('why') or []) or '-'} | {kv} | {age(p)} |")
 else: L.append("not run")
