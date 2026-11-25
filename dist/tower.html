@@ -5791,6 +5791,7 @@ function placeBall(x, z, r) {
 // game's ball, 514 kg, bears 5 kN, which everything carries.
 let ballWeightNext = 0;
 function ballWeights() {
+  if (window.__dbg && !(window.__bw = (window.__bw || 0) + 1 & 63)) console.warn(`ballWeights: gpu ${!!gpu} bodies ${!!lastBodies} vel ${!!lastVel} clock ${clock().toFixed(0)} next ${ballWeightNext.toFixed(0)}`);
   if (!gpu || !lastBodies || !lastVel || clock() < ballWeightNext) return;
   ballWeightNext = clock() + 250;
   for (let i = 2; i <= gpu.n; i++) {
@@ -5799,6 +5800,7 @@ function ballWeights() {
     if (Math.hypot(lastVel[vo], lastVel[vo + 1], lastVel[vo + 2]) > 0.5) continue;
     const pos = [lastBodies[o], lastBodies[o + 1], lastBodies[o + 2]]; if (!(pos[1] - b.ballR > 1)) continue;
     const bear = ballBearing(i, pos, b.ballR), n = bear.onS.length + bear.onP.length;
+    if (window.__dbg) console.warn(`ballWeights: ball ${i} y ${pos[1].toFixed(2)} onS ${bear.onS.length} onP ${bear.onP.length} ${bear.why || ''}`);
     if (bear.onP.length) { bearOnPieces(bear.onP.map(q => ({ ...q, f: b.mass * 9.81 / n, rBall: b.ballR }))); pump(); }
   }
 }
