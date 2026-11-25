@@ -24,6 +24,11 @@ function frameBody(now, dt) {
     if (TILED) { const px = E.player_get(0), pz = E.player_get(2); sun.target.position.set(px, 0, pz); sun.position.set(px - 30, 60, pz - 22); }
     cam.rotation.set(pitch, yaw, 0);
     pump();
+    // (a heavy ball at rest still weighs on what is under it when everything has fallen asleep and the steps below
+    // have stopped: its weight was tried only from impacts(), inside them. The page's ball benchmark stood on the
+    // second floor's pieces from 7 s on, 8.71 m down, where the lab, which always steps, went 30.4 m:
+    // play_check benchball)
+    if (gpu && !physicsPaused && typeof ballWeights === 'function') ballWeights();
     // physics runs while anything is awake (and briefly after a blast, before the first stats arrive)
     if (gpu && diag.physics && !physicsPaused && (gpu.stats.awake > 0 || gpu.stats.pActive > 0 || now - lastActive < 2000)) {
       acc += dt; physFrames++;
