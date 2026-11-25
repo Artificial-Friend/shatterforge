@@ -37,7 +37,7 @@ const CASES = {
   // the page's benchmarks through their own start (the key sets 'sf-bench' and reloads; the page starts it):
   // J, the 514 t ball on the office roof, to its end. Limits, set before its first run: the ball at least 30 m
   // down in 1,500 steps (as lab qroofball), volume lost under 2% of the building, no banner
-  benchball: { cfg: { script: [], stopAt: 1500, every: 30, bench: 'ball' }, expect: 'bench', down: 30 },
+  benchball: { cfg: { script: [], stopAt: +(process.env.SF_STOP || 1500), every: 30, bench: 'ball' }, expect: 'bench', down: 30 },
   // K, the collapse: that it starts (90 steps)
   benchk: { cfg: { script: [], stopAt: 90, every: 30, bench: '1' }, expect: 'bench' },
   lost: { cfg: { script: [{ f: 200, code: 'dev.destroy();' }, { f: 230, code: 'setRadius(1.2); doBlast();' }], stopAt: 300 }, expect: 'said', key: 'lost' },
@@ -58,6 +58,7 @@ const names = process.argv.slice(2).length ? process.argv.slice(2) : ['blast', '
     await p.route('**/three.min.js', r => r.fulfill({ body: threeJs, contentType: 'text/javascript' }));
     await p.addInitScript(([c]) => { window.__HCFG = c; if (c.bench) localStorage.setItem('sf-bench', c.bench); if (c.saved) localStorage.setItem('sf-settings', JSON.stringify(c.saved)); }, [cfg]);
     await p.addInitScript({ path: path.join(__dirname, 'play_harness.js') });
+    if (process.env.SF_DBG) { p.on('console', m => { if (m.type() === 'warning') console.log(`[${name}] ${m.text()}`); }); await p.addInitScript(() => { window.__dbg = true; }); }
     let res = { case: name, pass: false, why: [] };
     try {
       await p.goto('file://' + html);
