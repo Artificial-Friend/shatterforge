@@ -1354,6 +1354,25 @@ from 43.75 m to 13.37 m, **30.4 m, eight floors**, still going down at the end (
 It takes 1 to 6 s a floor: it waits on each floor's broken pieces until the once-a-second and four-a-second
 tries punch them. A real 514 t ball would not wait. The limit (30 m) was set before the runs and is unchanged.
 
+**The same on the page (key J), which the lab run did not show.** `play_check benchball` starts the benchmark the
+way the key does (the page reloads and starts it), with the worker and the default settings, and runs it to its
+1,500 steps. Limits set before its first run: the ball at least 30 m down, under 2% of the building's volume
+lost, no banner. First run: **8.71 m**, and only 931 steps in 1,500 frames. The page steps the physics only while
+something is awake, and the ball's weight on loose pieces was tried from inside those steps (`impacts()`); once
+the ball and the pieces under it slept, nothing tried it again, and the ball stood on the second floor from about
+7 s on. The lab steps every frame, so `qroofball` never met this. Fix: the weight is tried from the frame loop
+whether or not the world steps (game/web/js/loop.js). After: **35.76 m in 1,504 steps** (ball at 43.8, 36.7, 27.1,
+24.0, 17.5 m at 0, 5, 10, 15, 20 s), 2.87 m³ lost (0.04%), nothing removed, no banner
+(`lab-results/play_benchball.json`, software GPU, 25 November). The benchmark's report also threw on a GPU that
+gives no time for a stage (one line; fixed).
+
+**The first benchmark (key K) on default settings removes most of its own debris.** `play_check benchk` (its start,
+90 steps): 72 blasts cut two ground storeys and make about 50,000 pieces and crumbs; "Debris kept at once" is
+10,000 by default, and 39,869 had been removed after 90 steps. That is the setting doing what it says, and until
+this round nothing on screen said so. For a player on default settings a large break loses four fifths of its
+debris as it is made: a third reading of "what I break disappears", and the likeliest on Chrome with defaults.
+The limit is unchanged here: what it should be is a question of what the player's GPU carries (bench/).
+
 **One check fails in this run and is not fixed:** "energy gains over 5%": 1 (limit 0). Frame 444, traced with
 the ball's height to 0.1 mm (`SF_DBG=1`, 452 frames): the ball lay still at y 36.3460 m on the structure at two
 points, nothing loose under it; the engine's answers at frames 441 and 445 moved 51 and 125 parts of the standing
@@ -1369,7 +1388,8 @@ anything in the structural solve). And the ball's weight on pieces acts four tim
 
 ### What was run on this build, and what was not
 
-Run (software GPU, 24 November, `lab-results/final/`): the shader check; `play_check` all seven cases; the GPU
+Run (software GPU, 24 and 25 November, `lab-results/final/`): the shader check; `play_check` all ten cases
+(`tiny`, `benchball` and `benchk` on the last build; the others before the last two page changes, `blast` again after them); the GPU
 suite (54 of 54 scenes pass); the hull library; page checks `rest`, `debris`, `view`, `settings` (pass);
 `collapse --frames 150 --twice` (the two runs agree in all 150 frames; "settled" fails in it as in every
 150-frame run); lab `collapse`, `ball`, `quarter`, `qballoffice`, `qballhall` (pass); `qroofball` (above);
