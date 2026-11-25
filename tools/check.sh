@@ -27,7 +27,7 @@ if [ "$level" != status ]; then
     # (and determinism: the collapse twice, 150 frames, the same frame for frame)
     lab) for c in rest debris view settings; do node game/lab/page_check.cjs $c 2>&1 | grep -E "^(PASS|FAIL)"; done
          # (and the player's page: what breaks off is there and drawn, the ball flies; with no GPU, it says so)
-         for c in blast nogpu; do node game/lab/play_check.cjs $c 2>&1 | grep -E "^(PASS|FAIL|  FAIL)" | cut -c1-200; done
+         for c in blast nogpu tiny; do node game/lab/play_check.cjs $c 2>&1 | grep -E "^(PASS|FAIL|  FAIL)" | cut -c1-200; done
          node game/lab/lab.cjs quick 2>&1 | grep -v "GL Driver" | grep -v " of "
          node game/lab/lab.cjs collapse --frames 150 --twice --out lab-results/twice 2>&1 | grep -E "deterministic|    frame"
          # (and the same collapse with the engineer's view on: the view draws, it changes nothing; 15 Nov)

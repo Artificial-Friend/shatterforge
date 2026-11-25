@@ -1368,7 +1368,7 @@ gives no time for a stage (one line; fixed).
 
 **The first benchmark (key K) on default settings removes most of its own debris.** `play_check benchk` (its start,
 90 steps): 72 blasts cut two ground storeys and make about 50,000 pieces and crumbs; "Debris kept at once" is
-10,000 by default, and 39,869 had been removed after 90 steps. That is the setting doing what it says, and until
+10,000 by default, and 39,869 had been removed after 90 steps (40,951 in the second run). That is the setting doing what it says, and until
 this round nothing on screen said so. For a player on default settings a large break loses four fifths of its
 debris as it is made: a third reading of "what I break disappears", and the likeliest on Chrome with defaults.
 The limit is unchanged here: what it should be is a question of what the player's GPU carries (bench/).
